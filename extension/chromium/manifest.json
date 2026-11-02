@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "StreamShelf Connector",
+  "version": "1.0.1",
+  "description": "Поиск медиа в выбранной вкладке и передача выбранной сессии в локальный StreamShelf.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png",
+    "256": "icons/icon-256.png"
+  },
+  "permissions": [
+    "nativeMessaging",
+    "alarms",
+    "cookies",
+    "webRequest",
+    "storage",
+    "scripting",
+    "tabs",
+    "activeTab"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "StreamShelf",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtt6kQpU8Uvk1lYPyHl2sIcrYQx91Dlc+kLvvf/WYQ8VfDZbdKnhvubBm3/kzRCK7ZNO09GImGCMshCnsvu6XtUVbE3p66jdc1EePP2NYzDIAsY0od34ACYCCwDxrEUCQHsFOAemrmM55uyByF+MBxk9uOEbrhW3j1aPWnW5hlcn/1N/7dYVevHDdWAmx+esQdFIBaHJryTAQQGyDyxNc5xCan3cV+2bWiuNhtr6MopDf8Yml1Y66NEudP7nBKZNa6k219kdFOO4aWLEc8ilEsaiZ+zMgMOwK+gK6qwDrH7sXOGNcA3jBVgCFUUGW2f/aqPt2pLsgjPn7Tp1lBkG7zQIDAQAB",
+  "background": {
+    "service_worker": "background.js"
+  }
+}

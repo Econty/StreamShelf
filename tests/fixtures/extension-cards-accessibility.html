@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>StreamShelf accessibility fixture</title>
+<style>
+  * { box-sizing: border-box; } body { font: 14px Arial; background: #202124; color: #e8eaed; margin: 0; }
+  header { display: flex; align-items: center; gap: 32px; padding: 18px 26px; border-bottom: 1px solid #383a3d; }
+  h1 { font-size: 23px; margin: 0; } input { background: #292a2d; color: #eee; border: 0; border-radius: 22px; padding: 14px; width: min(48vw, 700px); }
+  nav { display: flex; gap: 12px; padding: 14px 26px; border-bottom: 1px solid #383a3d; }
+  nav button { color: #8ab4f8; background: transparent; border: 1px solid #1661a5; border-radius: 24px; padding: 10px 18px; }
+  .layout { display: flex; } aside { width: 240px; padding: 24px; color: #aeb4bb; flex: none; }
+  main { flex: 1; padding: 22px; min-width: 0; } h2 { font-size: 18px; font-weight: 400; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(270px, 400px)); gap: 12px; }
+  .fixture-notice { color: #9aa0a6; font-size: 12px; }
+</style>
+<header><h1>Расширения</h1><input aria-label="Поиск расширений" placeholder="Поиск расширений"></header>
+<nav><button>Загрузить распакованное расширение</button><button>Упаковать расширение</button><button>Обновить</button></nav>
+<div class="layout"><aside>Мои расширения<br><br><span class="fixture-notice">Локальная тестовая страница; настоящие расширения не изменяются.</span></aside>
+<main><h2>Все расширения</h2><div class="grid"><extension-card label="StreamShelf Connector"></extension-card><extension-card label="Other extension"></extension-card></div></main></div>
+<script>
+class ExtensionCard extends HTMLElement {
+  connectedCallback() {
+    const label = this.getAttribute('label');
+    const shadow = this.attachShadow({mode:'open'});
+    shadow.innerHTML = `<style>
+      .card { width: 100%; height: 208px; border-radius: 10px; background: #292a2d; color: #e8eaed; display: flex; flex-direction: column; padding: 16px; box-sizing: border-box; }
+      .name { font-size: 14px; margin: 0 0 15px; } .spacer { flex: 1; }
+      .footer { display: flex; align-items: center; gap: 12px; }
+      button { height: 32px; border: 1px solid #1661a5; border-radius: 20px; color: #8ab4f8; background: transparent; padding: 0 12px; margin-right: 8px; } cr-toggle { margin-left: auto; width: 34px; height: 20px; }
+    </style><div id="card" class="card"><div id="name" class="name"></div><div>Поиск медиа в выбранной вкладке и передача выбранной сессии в локальный StreamShelf.</div><div class="spacer"></div>
+    <div>Идентификатор: cjhiagnpgpmaagnoinjnkipimjlplcpe</div><div id="button-strip" class="footer"><div><button>Сведения</button><button>Удалить</button></div>
+    <cr-toggle id="enable-toggle" role="switch" tabindex="0" aria-checked="false"></cr-toggle></div></div>`;
+    shadow.querySelector('#name').textContent = label;
+    const toggle = shadow.querySelector('#enable-toggle');
+    toggle.setAttribute('aria-label', label === 'StreamShelf Connector' ? 'fixture Connector toggle' : 'fixture Other toggle');
+    toggle.onclick = () => toggle.setAttribute('aria-checked', String(toggle.getAttribute('aria-checked') !== 'true'));
+  }
+}
+class CrToggle extends HTMLElement {
+  connectedCallback() {
+    const shadow = this.attachShadow({mode:'open'});
+    shadow.innerHTML = '<style>:host{display:block;background:#777;border-radius:10px}span{display:block;width:14px;height:14px;margin:3px;background:#ddd;border-radius:50%}</style><span></span>';
+  }
+}
+customElements.define('cr-toggle', CrToggle);
+customElements.define('extension-card', ExtensionCard);
+</script>
