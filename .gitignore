@@ -1,0 +1,15 @@
+build/
+build-local/
+release/
+dist/
+artifacts/
+backups/
+.vscode/
+*.log
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+tests/*.txt
