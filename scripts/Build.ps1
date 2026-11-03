@@ -1,15 +1,21 @@
-param([switch]$IncludeTools)
+param(
+    [ValidateSet('dev','release')][string]$Preset = 'release',
+    [switch]$IncludeTools
+)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location $root
 try {
-    cmake -S . -B build
+    foreach ($tool in @('cmake','ninja')) {
+        if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool not found on PATH" }
+    }
+    cmake --preset $Preset
     if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed' }
-    cmake --build build --config Release
+    cmake --build --preset $Preset --parallel
     if ($LASTEXITCODE -ne 0) { throw 'C++ build failed' }
-    ctest --test-dir build -C Release --output-on-failure
-    if ($LASTEXITCODE -ne 0) { throw 'Core tests failed' }
-    cmake --install build --config Release --prefix release/StreamShelf-Native
+    ctest --preset $Preset
+    if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+    cmake --install "build/$Preset" --prefix release/StreamShelf-Native
     if ($LASTEXITCODE -ne 0) { throw 'Install failed' }
     if ($IncludeTools) {
         if (-not (Test-Path artifacts/bundled-tools/checksums.json)) { throw 'Verified tools bundle missing' }
