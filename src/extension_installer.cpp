@@ -4,6 +4,7 @@
 #include "extension_guide_state.hpp"
 #include "extension_presence.hpp"
 #include "uia_result.hpp"
+#include <objbase.h>
 #include <uiautomation.h>
 #include <windowsx.h>
 #include <winver.h>
