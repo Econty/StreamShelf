@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 let checks=0;
 function check(value,label){assert(value,label);checks++;console.log('PASS '+label);}
 for(const family of ['chromium','firefox']){
-  const sent=[],native=[],listeners={},timers=new Map(),mutations=[],observers=[],events=new Map();let serial=0;
+  const sent=[],native=[],listeners={},timers=new Map(),mutations=[],observers=[],events=new Map();let serial=0; const stopMessages=[];
   const event=name=>({addListener:listener=>listeners[name]=listener});
   const api={runtime:{sendMessage:async m=>{sent.push(m);listeners.message(m,{tab:{id:7}},()=>{});},onMessage:event('contentMessage')},};
   const node=(tag,attributes={})=>({tagName:tag,...attributes,getAttribute(key){return attributes[key]||null;}});
@@ -15,7 +15,7 @@ for(const family of ['chromium','firefox']){
   const scripts=[structured,node('SCRIPT',{textContent:'const manifest="https:\\/\\/media.example\\/playlist.m3u8?expires=1";'})];
   const timings=[{name:'https://media.example/previous.mpd',initiatorType:'fetch'},{name:'https://media.example/mime-only',initiatorType:'fetch',contentType:'audio/ogg'},{name:'https://example.org/private-api',initiatorType:'fetch',contentType:'application/json'}];
   const context=vm.createContext({chrome:api,URL,Map,Set,WeakMap,JSON,console,location:{href:'https://example.org/messages'},setTimeout:fn=>{timers.set(++serial,fn);return serial;},clearTimeout:id=>timers.delete(id),document:{documentElement:{},querySelectorAll:selector=>selector==='script'?scripts:nodes,addEventListener:(name,fn)=>events.set(name,fn),removeEventListener:(name,fn)=>{if(events.get(name)===fn)events.delete(name);}},performance:{getEntriesByType:()=>timings},MutationObserver:class{constructor(fn){this.fn=fn;this.closed=false;mutations.push(this);}observe(){}disconnect(){this.closed=true;}},PerformanceObserver:class{constructor(fn){this.fn=fn;this.closed=false;observers.push(this);}observe(){}disconnect(){this.closed=true;}}});
-  const backend={runtime:{onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),connectNative:()=>({postMessage:m=>native.push(m),onDisconnect:event('disconnect'),onMessage:event('native')})},storage:{local:{get:async()=>({instanceId:'test'}),set:async()=>{}}},tabs:{get:async id=>({id,url:'https://example.org/messages'}),query:async()=>[],reload:async()=>{},sendMessage:async()=>{},onActivated:event('activated'),onUpdated:event('updated'),onRemoved:event('removed')},windows:{WINDOW_ID_NONE:-1,onFocusChanged:event('focus')},alarms:{create:()=>{},onAlarm:event('alarm')},permissions:{contains:async()=>true},scripting:{executeScript:async()=>{}},webRequest:{onBeforeSendHeaders:event('request'),onHeadersReceived:event('response'),onErrorOccurred:event('error')}};
+  const backend={runtime:{onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),connectNative:()=>({postMessage:m=>native.push(m),onDisconnect:event('disconnect'),onMessage:event('native')})},storage:{local:{get:async()=>({instanceId:'test'}),set:async()=>{}}},tabs:{get:async id=>({id,url:'https://example.org/messages'}),query:async()=>[],reload:async()=>{},sendMessage:async(id,message)=>{stopMessages.push({id,message});},onActivated:event('activated'),onUpdated:event('updated'),onRemoved:event('removed')},windows:{WINDOW_ID_NONE:-1,onFocusChanged:event('focus')},alarms:{create:()=>{},onAlarm:event('alarm')},permissions:{contains:async()=>true},scripting:{executeScript:async()=>{}},webRequest:{onBeforeSendHeaders:event('request'),onHeadersReceived:event('response'),onErrorOccurred:event('error')}};
   const bg=vm.createContext({chrome:backend,URL,Map,Set,crypto:globalThis.crypto,navigator:{userAgent:'Yandex/test'}});
   vm.runInContext(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/background.js`,'utf8'),bg);
   await new Promise(resolve=>listeners.message({type:'connectTab',tabId:7},{},resolve));
@@ -49,6 +49,8 @@ for(const family of ['chromium','firefox']){
   vm.runInContext(source,context);listeners.contentMessage({type:'stopDom'});
   check(observers.at(-1).closed&&mutations.at(-1).closed,`${family}: reinjected scanner is stopped by existing listener`);
   check(vm.runInContext('classify("https://media.example/videoplayback?mime=audio%2Fwebm")',bg)==='Аудио',`${family}: MIME query on opaque CDN URL is recognized`);
+  await vm.runInContext('selectActiveTab(8)',bg);
+  check(stopMessages.some(x=>x.id===7&&x.message.type==='stopDom'),`${family}: switching tabs stops the previous scanner`);
   listeners.response({tabId:99,requestId:'foreign',url:'https://media.example/foreign.mp4',responseHeaders:[{name:'Content-Type',value:'video/mp4'}]});
   check(!has('foreign.mp4'),`${family}: resources from other browser tabs stay excluded`);
 }

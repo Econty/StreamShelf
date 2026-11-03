@@ -66,7 +66,7 @@ void App::importAssemblyFile() {
         m.ext=utf8(ext.empty()?L"":ext.substr(1)); m.key="local:"+path;
         if(m.ext=="json") { m.category="Данные"; m.id="chapters";
             auto data=Json::parse(readFile(wide(path),4*1024*1024),nullptr,false);
-            if(!data.is_array())m.id="metadata";
+            if(!data.is_array() && !(data.is_object() && data.contains("chapters") && data["chapters"].is_array()))m.id="metadata";
             post([this,m,path]{sourcePool.push_back(assemblySource(m,path));}); return;
         }
         if(m.ext=="png"||m.ext=="jpg"||m.ext=="jpeg") {
@@ -85,6 +85,7 @@ void App::importAssemblyFile() {
         for(const auto &stream:probe.value("streams",Json::array()))if(str(stream,"codec_type")=="video" && number(stream.value("disposition",Json::object()),"attached_pic")!=1)hasVideo=true;
         for(const auto &stream:probe.value("streams",Json::array())) {
             auto type=str(stream,"codec_type"); if(type!="video"&&type!="audio"&&type!="subtitle")continue;
+            if(type=="video" && number(stream.value("disposition",Json::object()),"attached_pic")!=0)continue;
             auto item=m; item.category=type=="video"?"Видео":type=="audio"?"Аудио":"Субтитры";
             auto s=assemblySource(item,path);s.role=type=="video"?0:type=="audio"?1:2;s.stream=int(number(stream,"index"));s.includeAudio=false;s.derivedAudio=hasVideo&&s.role==1;
             auto tags=stream.value("tags",Json::object());s.language=str(tags,"language");s.name=str(tags,"title",m.title)+" · #"+std::to_string(s.stream);

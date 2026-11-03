@@ -30,7 +30,8 @@ struct Job {
 class App {
     std::mutex eventsMutex;
     std::deque<std::function<void()>> events;
-    std::vector<std::thread> workers;
+    struct Worker { std::thread thread; std::shared_ptr<std::atomic_bool> finished; };
+    std::vector<Worker> workers;
     std::vector<std::thread> downloadWorkers;
     std::mutex jobsMutex;
     std::condition_variable jobsCv;

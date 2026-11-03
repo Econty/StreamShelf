@@ -67,6 +67,8 @@ void writeFile(const fs::path &p, const std::string &s) {
     std::ofstream f(p, std::ios::binary | std::ios::trunc);
     if (!f.write(s.data(), s.size()))
         throw std::runtime_error("Ошибка записи файла");
+    f.close();
+    if (!f) throw std::runtime_error("Ошибка завершения записи файла");
 }
 void protectFile(const fs::path &p, const std::string &s) {
     DATA_BLOB in{DWORD(s.size()), (BYTE *)s.data()}, out{};
@@ -75,7 +77,16 @@ void protectFile(const fs::path &p, const std::string &s) {
         throw std::runtime_error("Ошибка DPAPI");
     std::string v((char *)out.pbData, out.cbData);
     LocalFree(out.pbData);
-    writeFile(p, v);
+    static std::atomic_uint64_t serial{0};
+    auto temp = p;
+    temp += L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++serial);
+    try {
+        writeFile(temp, v);
+        if (!MoveFileExW(temp.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("Не удалось сохранить защищённый файл");
+    } catch (...) {
+        std::error_code ec; fs::remove(temp, ec); throw;
+    }
 }
 std::string unprotectFile(const fs::path &p) {
     auto s = readFile(p);
@@ -330,6 +341,7 @@ static void fetch(const std::string &url, size_t limit,
             std::string part;
             while (std::getline(row, part, '\t'))
                 f.push_back(part);
+            if (!line.empty() && line.back() == '\t') f.emplace_back();
             if (f.size() != 7)
                 continue;
             auto d = f[0];

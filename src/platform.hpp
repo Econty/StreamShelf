@@ -11,6 +11,7 @@
 #include <thread>
 #include <condition_variable>
 #include <memory>
+#include <set>
 #include "core.hpp"
 namespace ss {
 namespace fs = std::filesystem;
@@ -76,6 +77,8 @@ struct Session {
     std::mutex writeMutex, mutex;
     std::condition_variable cv;
     std::map<std::string, Json> replies;
+    std::set<std::string> pendingCredentials;
+    void acceptCredentialReply(const Json &);
     // Snapshots belong to this browser session and the exact requested URL.
     std::map<std::string, Json> credentialSnapshots;
     uint64_t credentialEpoch = 0, credentialScanId = 0;

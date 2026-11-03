@@ -49,6 +49,19 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         if(r.code||!data.is_object())throw std::runtime_error("Не удалось прочитать дорожки одного из сохранённых файлов. Исходники оставлены на диске.");
         return data;
     };
+    // Reuse the previously validated container if its move to the destination failed.
+    auto saved = folder / (L"result." + wide(muxContainer(j->muxOptions)));
+    if (!j->output.empty() && fs::path(wide(j->output)) == saved && fs::is_regular_file(saved)) {
+        auto probe = probeFile(saved);
+        bool video=false, audio=false;
+        for (const auto &stream : probe.value("streams", Json::array())) {
+            video |= str(stream,"codec_type")=="video" && number(stream.value("disposition",Json::object()),"attached_pic")==0;
+            audio |= str(stream,"codec_type")=="audio";
+        }
+        if (!video && !audio) throw std::runtime_error("Не удалось проверить сохранённый контейнер.");
+        j->workerOutput=utf8(saved.wstring()); j->workerCategory=video?"Видео":"Аудио";
+        return;
+    }
     struct Mapped {size_t source;int input,stream,type;};
     std::vector<Mapped> mapped;std::vector<std::wstring> args{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-n"};
     double totalDuration=0;
@@ -88,7 +101,9 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         args.insert(args.end(),{L"-i",path.wstring()});++input;
     }
     if(mapped.empty()||std::none_of(mapped.begin(),mapped.end(),[](const auto &m){return m.type<2;}))throw std::runtime_error("Нет доступных видео- или аудиодорожек");
-    auto chapterFile=folder/L"chapters.ffmetadata";
+    static std::atomic_uint64_t temporarySerial{0};
+    auto suffix=std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++temporarySerial);
+    auto chapterFile=folder/(L"chapters-"+suffix+L".ffmetadata");
     if(!chapters.empty()) {
         auto data=Json::parse(readFile(chapters,4*1024*1024));
         if(data.is_object())data=data.value("chapters",Json::array());
@@ -151,14 +166,15 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         }
     }
     args.insert(args.end(),{L"-metadata",L"title="+wide(metadataTitle),L"-metadata",L"artist="+wide(artist),L"-metadata",(j->muxOptions.container==0?L"SYNOPSIS=":L"description=")+wide(description)});
-    auto extension=wide(muxContainer(j->muxOptions));auto partial=folder/(L"result.part."+extension),final=folder/(L"result."+extension);
-    struct Cleanup {fs::path partial,chapters;~Cleanup(){std::error_code ec;fs::remove(partial,ec);fs::remove(chapters,ec);}}cleanup{partial,chapterFile};
+    auto extension=wide(muxContainer(j->muxOptions));auto partial=folder/(L"result.part-"+suffix+L"."+extension),final=folder/(L"result."+extension);
+    struct Cleanup {fs::path partial,chapters;~Cleanup(){std::error_code ec;fs::remove(chapters,ec);}}cleanup{partial,chapterFile};
     if (j->muxOptions.container == 2 && !description.empty())
         args.insert(args.end(), {L"-movflags", L"use_metadata_tags"});
     args.push_back(partial.wstring());
     auto r=runFfmpegWithProgress(j,args,totalDuration);
     if(j->cancel||stopping)throw std::runtime_error("Отменено");
     if(r.code){auto detail=redact(r.error);if(detail.size()>600)detail=detail.substr(detail.size()-600);throw std::runtime_error("Не удалось собрать контейнер. Исходники сохранены отдельно. Проверьте совместимость кодеков и контейнера. "+detail);}
+    j->workerOutput=utf8(partial.wstring());
     auto output=probeFile(partial);int actual[3]{};
     for(const auto &s:output.value("streams",Json::array())){auto type=str(s,"codec_type");if(type=="video")++actual[0];if(type=="audio")++actual[1];if(type=="subtitle")++actual[2];}
     for(int i=0;i<3;i++)if(actual[i]<expected[i])throw std::runtime_error("В итоговом файле отсутствуют выбранные дорожки. Исходники сохранены.");

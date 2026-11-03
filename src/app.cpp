@@ -140,8 +140,8 @@ App::~App() {
         if (t.joinable())
             t.join();
     for (auto &t : workers)
-        if (t.joinable())
-            t.join();
+        if (t.thread.joinable())
+            t.thread.join();
     try {
         saveHistory();
         protectFile(dataRoot() / L"settings.dpapi", Json{{"destination", destination},
@@ -168,16 +168,23 @@ void App::drain() {
     for (auto &f : v)
         f();
     updateAssemblies();
+    for (auto it=workers.begin(); it!=workers.end();) {
+        if (it->finished->load()) { if (it->thread.joinable()) it->thread.join(); it=workers.erase(it); }
+        else ++it;
+    }
 }
 void App::work(std::function<void()> f) {
-    workers.emplace_back([this, f] {
+    auto finished = std::make_shared<std::atomic_bool>(false);
+    std::thread thread([this, f, finished] {
         try {
             f();
         } catch (const std::exception &e) {
             auto s = redact(e.what());
             post([this, s] { error(s); });
-        }
+        } catch (...) {}
+        *finished = true;
     });
+    workers.push_back({std::move(thread), finished});
 }
 // Command-line tools may use the Windows OEM code page even when the shell
 // requests UTF-8. Keep the journal UTF-8 without weakening path/URL validation.
@@ -1054,6 +1061,12 @@ void App::download(const std::shared_ptr<Job> &j) {
     if (j->mux) {
         const auto container = muxContainer(j->muxOptions);
         auto codecArgs = muxCodecArgs(j->muxOptions);
+        auto saved = folder / (L"result." + wide(container));
+        if (!j->output.empty() && fs::path(wide(j->output)) == saved && fs::is_regular_file(saved)) {
+            validate(saved, ExpectedStreams::AnyMedia);
+            j->workerOutput = utf8(saved.wstring());
+            return;
+        }
         if (j->muxInputs.empty() || j->muxInputs.size() > 64) throw std::runtime_error("Выберите от 1 до 64 медиафайлов");
         auto probeFile = [&](const fs::path &path) {
             std::atomic_bool cancel{false}, finished{false};
@@ -1087,10 +1100,12 @@ void App::download(const std::shared_ptr<Job> &j) {
             args.insert(args.end(), {L"-i", path.wstring()});
         }
         if (!expectedVideo && !expectedAudio) throw std::runtime_error("Выберите хотя бы одну видео- или аудиодорожку");
-        auto chapterFile = folder / L"chapters.ffmetadata";
-        auto partial = folder / (L"result.part." + wide(container));
+        static std::atomic_uint64_t temporarySerial{0};
+        auto suffix = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++temporarySerial);
+        auto chapterFile = folder / (L"chapters-" + suffix + L".ffmetadata");
+        auto partial = folder / (L"result.part-" + suffix + L"." + wide(container));
         auto final = folder / (L"result." + wide(container));
-        struct Cleanup { fs::path partial, chapters; ~Cleanup(){ std::error_code ec; fs::remove(partial, ec); fs::remove(chapters, ec); } } cleanup{partial, chapterFile};
+        struct Cleanup { fs::path partial, chapters; ~Cleanup(){ std::error_code ec; fs::remove(chapters, ec); } } cleanup{partial, chapterFile};
         if (!j->muxChapters.empty()) {
             auto json = Json::parse(readFile(wide(j->muxChapters), 4 * 1024 * 1024));
             writeFile(chapterFile, chaptersToFfmetadata(json));
@@ -1111,6 +1126,7 @@ void App::download(const std::shared_ptr<Job> &j) {
             if (detail.size() > 500) detail = detail.substr(detail.size() - 500);
             throw std::runtime_error("FFmpeg не смог объединить дорожки. Проверьте совместимость контейнера и кодеков или выберите перекодирование." + (detail.empty() ? "" : " " + detail));
         }
+        j->workerOutput = utf8(partial.wstring());
         auto output = probeFile(partial);
         int video = 0, audio = 0, subtitles = 0;
         for (const auto &stream : output.value("streams", Json::array())) {
@@ -1666,10 +1682,13 @@ void App::action(const std::string &cmd) {
             for (auto &j : jobs)
                 if (j->id == selectedJob) {
                     if (cmd == "retryJob" && j->assembly && j->done) {
-                        requireAvailableCodecs(j);
+                        auto saved=fs::path(wide(j->folder))/(L"result."+wide(muxContainer(j->muxOptions)));
+                        bool reuse=j->state!="Готово" && !j->output.empty() && fs::path(wide(j->output))==saved && fs::is_regular_file(saved);
+                        if (!reuse) requireAvailableCodecs(j);
                         std::lock_guard queueLock(jobsMutex);
-                        j->waitingSources=true; j->cancel=false; j->done=false; j->claimed=false; j->decisionNeeded=false; j->prompted=false;
-                        j->state="Ожидание источников"; for(auto &source:j->sources)source.enabled=true;
+                        j->waitingSources=!reuse; j->cancel=false; j->done=false; j->claimed=false; j->decisionNeeded=false; j->prompted=false;
+                        j->state=reuse?"Ожидание":"Ожидание источников"; for(auto &source:j->sources)source.enabled=true;
+                        jobsCv.notify_all();
                     } else if (cmd == "retryJob" && j->done &&
                                (j->state == "Ошибка" || j->state == "Отменено" ||
                                 j->state == "Ожидание повтора")) {

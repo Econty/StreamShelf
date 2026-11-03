@@ -60,7 +60,7 @@ async function connect(allowLaunch=true) {
   connecting=(async()=>{
   const stored=await api.storage.local.get('instanceId');instanceId=stored.instanceId||crypto.randomUUID();await api.storage.local.set({instanceId});
   const opened=api.runtime.connectNative('dev.streamshelf.connector');port=opened;
-  opened.onDisconnect.addListener(()=>{if(port!==opened)return;lastError=api.runtime.lastError?.message||'Приложение отключено';port=null;scanning=false;requests.clear();resources.clear();});
+  opened.onDisconnect.addListener(()=>{if(port!==opened)return;if(scanning&&tabId!==null)api.tabs.sendMessage(tabId,{type:'stopDom',scanId}).catch(()=>{});lastError=api.runtime.lastError?.message||'Приложение отключено';port=null;scanning=false;requests.clear();resources.clear();});
   opened.onMessage.addListener(message=>{handleCommand(message).catch(e=>send({type:'error',requestId:message.requestId,message:e.message}));});
   send({type:'hello',protocol:1,version:VERSION,instanceId,browser:navigator.userAgent,allowLaunch,capabilities:['network','dom','cookies','tabReload']});
   if(tabId===null){const tabs=await api.tabs.query({active:true,lastFocusedWindow:true}).catch(()=>[]);if(tabs[0])await selectActiveTab(tabs[0].id);}
@@ -77,6 +77,8 @@ async function selectActiveTab(id) {
   let tab;
   try { tab=await api.tabs.get(id); } catch { return; }
   if(sequence!==selectionSequence)return;
+  if(scanning && (tabId!==tab.id || !cleanUrl(tab.url)) && tabId!==null)
+    api.tabs.sendMessage(tabId,{type:'stopDom',scanId}).catch(()=>{});
   if(!cleanUrl(tab.url)) {
     if(scanning)send({type:'scanState',scanId,scanning:false,tabId,message:'Вкладка изменилась. Запустите анализ заново.'});
     tabId=null;pageUrl='';scanning=false;resources.clear();requests.clear();segments.clear();pageHeaders={};

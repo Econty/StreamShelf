@@ -140,11 +140,8 @@ void identityAndRetry() {
     auto request=[&](const std::string &target, Json reply) {
         auto pending=std::async(std::launch::async,[&]{return session.credentials(target,cancel);});
         auto frame=receive();
-        {
-            std::lock_guard lock(session.mutex);
-            session.replies[str(frame,"requestId")]=std::move(reply);
-        }
-        session.cv.notify_all();
+        reply["requestId"]=str(frame,"requestId");
+        session.acceptCredentialReply(reply);
         return pending.get();
     };
     auto firstSnapshot=request(url,{{"url",url},{"headers",{{"Referer","https://example.test/"}}}});
@@ -154,6 +151,13 @@ void identityAndRetry() {
     try { request("https://example.test/video?token=two",{{"type","error"},{"message","tab changed"}}); }
     catch(const std::exception &) { rejected=true; }
     check("different resource URL cannot reuse a snapshot",rejected);
+    auto abandoned=std::async(std::launch::async,[&]{try { session.credentials(url,cancel); } catch (...) {} });
+    auto oldRequest=receive();
+    cancel=true; abandoned.get(); cancel=false;
+    for (int i=0; i<120; ++i) session.acceptCredentialReply({{"requestId",str(oldRequest,"requestId")},{"url",url}});
+    { std::lock_guard lock(session.mutex); check("late cancelled replies are discarded",session.replies.empty() && session.pendingCredentials.empty()); }
+    auto fresh=request(url,{{"url",url},{"headers",{{"Referer","fresh"}}}});
+    check("new request succeeds after late replies",str(fresh["headers"],"Referer")=="fresh");
 
 }
 #endif

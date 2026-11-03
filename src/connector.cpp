@@ -113,6 +113,14 @@ bool Session::acceptVerification(const std::string &token) {
     if (verificationToken.empty() || token != verificationToken) return false;
     verificationToken.clear(); lastPong = GetTickCount64(); verified = true; return true;
 }
+void Session::acceptCredentialReply(const Json &reply) {
+    std::lock_guard lock(mutex);
+    auto request = str(reply, "requestId");
+    if (pendingCredentials.count(request)) {
+        replies.insert_or_assign(request, reply);
+        cv.notify_all();
+    }
+}
 Json Session::credentials(const std::string &url, std::atomic_bool &cancel) {
     static std::atomic_uint64_t serial{0};
     std::string request = std::to_string(++serial);
@@ -124,6 +132,11 @@ Json Session::credentials(const std::string &url, std::atomic_bool &cancel) {
         epoch = credentialEpoch;
     }
     if (cancel) throw std::runtime_error("Отменено");
+    { std::lock_guard lock(mutex); pendingCredentials.insert(request); }
+    struct PendingGuard {
+        Session &session; const std::string &request;
+        ~PendingGuard() { std::lock_guard lock(session.mutex); session.pendingCredentials.erase(request); session.replies.erase(request); }
+    } guard{*this, request};
     try {
         send({{"type", "credentials"}, {"requestId", request}, {"tabId", selected}, {"url", url}});
         std::unique_lock l(mutex);
@@ -206,10 +219,7 @@ void Connector::start() {
                                 continue;
                             }
                             if (type == "credentialsResult" || (type == "error" && j.contains("requestId"))) {
-                                std::lock_guard l(s->mutex);
-                                if (s->replies.size() < 100)
-                                    s->replies[str(j, "requestId")] = j;
-                                s->cv.notify_all();
+                                s->acceptCredentialReply(j);
                             } else {
                                 if (type == "tabSelected") {
                                     std::lock_guard l(s->mutex);
