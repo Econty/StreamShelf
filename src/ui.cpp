@@ -1,3 +1,4 @@
+#include <cwctype>
 #include "app.hpp"
 #include "media_display.hpp"
 #include "language_options.hpp"
