@@ -1,13 +1,13 @@
 import vm from 'node:vm';import fs from 'node:fs';import crypto from 'node:crypto';import assert from 'node:assert/strict';
 let count=0;
 for(const family of ['chromium','firefox']) {
- const manifest=JSON.parse(fs.readFileSync(`extension/${family}/manifest.json`));
+ const manifest=JSON.parse(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/manifest.json`));
  if(family==='chromium') {
   const digest=crypto.createHash('sha256').update(Buffer.from(manifest.key,'base64')).digest('hex').slice(0,32);
   const id=[...digest].map(x=>String.fromCharCode(97+parseInt(x,16))).join('');
   assert.equal(id,'cjhiagnpgpmaagnoinjnkipimjlplcpe');count++;
   for(const size of [16,32,48,96,256]) {
-   const image=fs.readFileSync(`extension/chromium/${manifest.icons[size]}`);
+   const image=fs.readFileSync(`extension/chromium-development/${manifest.icons[size]}`);
    assert.equal(image.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
    assert.equal(image.readUInt32BE(16),size);assert.equal(image.readUInt32BE(20),size);
   }
@@ -22,7 +22,7 @@ for(const family of ['chromium','firefox']) {
   assert.equal(manifest.version,'1.0.2');
   assert(manifest.description.length>20);
   for(const size of [16,32,48,96,256]) {
-   const path=manifest.icons[size];const image=fs.readFileSync(`extension/firefox/${path}`);
+   const path=manifest.icons[size];const image=fs.readFileSync(`extension/firefox-development/${path}`);
    assert.equal(image.subarray(0,8).toString('hex'),'89504e470d0a1a0a');
    assert.equal(image.readUInt32BE(16),size);assert.equal(image.readUInt32BE(20),size);
   }
@@ -33,7 +33,7 @@ for(const family of ['chromium','firefox']) {
  const port={postMessage:m=>sent.push(m),onDisconnect:event('disconnect'),onMessage:event('native')};
  const api={runtime:{onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),connectNative:()=>port,lastError:null},storage:{local:{get:async key=>({[key]:stored[key]}),set:async values=>Object.assign(stored,values)}},tabs:{get:async id=>({id,url:id===99?'chrome://extensions/':'https://example.com/watch',title:'Test',cookieStoreId:'firefox-container-1'}),query:async()=>[{id:99}],reload:async()=>{},sendMessage:async()=>{},onActivated:event('activated'),onUpdated:event('updated'),onRemoved:event('removed')},windows:{WINDOW_ID_NONE:-1,get:async()=>({focused:true}),onFocusChanged:event('focus')},alarms:{create:()=>{},onAlarm:event('alarm')},permissions:{contains:async()=>siteAccess,onAdded:event('permissionAdded'),onRemoved:event('permissionRemoved')},scripting:{executeScript:async()=>{}},cookies:{getAll:async options=>{assert.equal(options.storeId,'firefox-container-1');return [{domain:'example.com',name:'session',value:'SECRET',path:'/',secure:true,httpOnly:true,partitionKey:{topLevelSite:'https://example.com'}}];}},webRequest:{onBeforeSendHeaders:event('request'),onHeadersReceived:event('response'),onErrorOccurred:event('error')}};
  const context=vm.createContext({chrome:api,browser:family==='firefox'?api:undefined,URL,crypto:crypto.webcrypto,navigator:{userAgent:'Firefox/Test'},Map,Set,setTimeout,clearTimeout,console});
- vm.runInContext(fs.readFileSync(`extension/${family}/background.js`,'utf8'),context);
+ vm.runInContext(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/background.js`,'utf8'),context);
  if(['chromium','firefox'].includes(family)){listeners.installed();await new Promise(resolve=>setTimeout(resolve,0));assert(sent.some(m=>m.type==='hello'&&m.allowLaunch===false));count++;}
  assert.equal(vm.runInContext("classify('https://e.com/file','video/mp4')",context),'Видео');count++;
  assert.equal(vm.runInContext("classify('https://e.com/segment.ts','video/mp2t')",context),'Сегмент');count++;
@@ -51,6 +51,11 @@ for(const family of ['chromium','firefox']) {
  assert(!sent.some(m=>m.item?.url?.includes('foreign')));count++;
  listeners.request({tabId:7,url:'https://example.com/media.mp4?token=SIGNED',requestId:'ok',requestHeaders:[{name:'Authorization',value:'Bearer SECRET'}]});
  listeners.response({tabId:7,url:'https://example.com/media.mp4?token=SIGNED',requestId:'ok',responseHeaders:[{name:'Content-Type',value:'video/mp4'}]});
+ await new Promise(resolve=>setTimeout(resolve,0));
+ const snapshot=sent.find(m=>m.type==='scanCredentials');
+ assert.equal(snapshot?.url,'https://example.com/media.mp4?token=SIGNED');
+ assert.equal(snapshot?.headers.Authorization,'Bearer SECRET');
+ assert.equal(snapshot?.cookies[0].partitioned,true);count+=3;
  const found=sent.find(m=>m.type==='resource');assert.equal(found.item.url,'https://example.com/media.mp4?token=SIGNED');assert(!JSON.stringify(found).includes('SECRET'));count++;
  await vm.runInContext("handleCommand({type:'credentials',requestId:'r',tabId:7,url:'https://example.com/media.mp4?token=SIGNED'})",context);
  const creds=sent.find(m=>m.type==='credentialsResult');assert.equal(creds.cookies[0].partitioned,true);assert.equal(creds.headers.Authorization,'Bearer SECRET');count++;
@@ -74,6 +79,10 @@ for(const family of ['chromium','firefox']) {
   assert(!sent.some(m=>m.item?.url?.includes('old.mp4')));count++;
   listeners.activated({tabId:8});await new Promise(resolve=>setTimeout(resolve,0));
   assert(sent.some(m=>m.type==='scanState'&&m.scanId===3&&m.scanning===false));assert.equal(vm.runInContext('scanning',context),false);count+=2;
+  listeners.activated({tabId:99});await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(vm.runInContext('tabId',context),null);assert.equal(vm.runInContext('pageUrl',context),'');
+  assert.equal(vm.runInContext('resources.size',context),0);assert.equal(sent.at(-1).type,'tabClosed');count+=4;
+  listeners.activated({tabId:7});await new Promise(resolve=>setTimeout(resolve,0));
   listeners.updated(9,{url:'https://example.com/watch'},{active:true,windowId:1});await new Promise(resolve=>setTimeout(resolve,0));
   assert.equal(vm.runInContext('tabId',context),9);count++;
  }
@@ -83,7 +92,7 @@ console.log(`${count} extension checks passed`);
 
 // Firefox's permission prompt must not stay behind its action popup.
 {
- const popupCode=fs.readFileSync('extension/firefox/popup.js','utf8');
+ const popupCode=fs.readFileSync('extension/firefox-development/popup.js','utf8');
  for(const preGranted of [false,true]) {
   let closed=0,requestCount=0,connectCount=0;
   const button={disabled:false,onclick:null},status={textContent:''},win={close(){closed++;}};

@@ -28,8 +28,8 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 [Files]
 Source: "..\release\StreamShelf-2.2-fix\StreamShelf.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Assets\*"; DestDir: "{app}\Assets"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\extension\chromium\*"; DestDir: "{app}\extensions\chromium"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\extension\signed\StreamShelf-Connector-1.0.2.xpi"; DestDir: "{app}\extensions\signed"; Flags: ignoreversion
+Source: "..\extension\chromium-development\*"; DestDir: "{app}\extensions\chromium-development"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\extension\firefox-signed\StreamShelf-Connector-1.0.2.xpi"; DestDir: "{app}\extensions\firefox-signed"; Flags: ignoreversion
 Source: "..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\release\StreamShelf-2.2-fix\bundled-tools\*"; DestDir: "{app}\bundled-tools"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion

@@ -31,6 +31,18 @@ template <typename F> void rejects(F f) {
     check(threw, "Expected rejection");
 }
 int main() {
+    test("Data sources retain their own analysis snapshot", [] {
+        auto first = parseAnalysis(Json{{"title", "First"}, {"description", "first description"}, {"chapters", Json::array({Json{{"title", "first chapter"}}})}}, "https://example.com/first");
+        auto second = parseAnalysis(Json{{"title", "Second"}, {"description", "second description"}, {"chapters", Json::array({Json{{"title", "second chapter"}}})}}, "https://example.com/second");
+        for (const auto &item : first.items) if (item.category == "Данные") {
+            check(str(item.data, "description") == "first description", "description belongs to first analysis");
+            check(str(item.data["chapters"][0], "title") == "first chapter", "chapters belong to first analysis");
+            if (item.id == "description") check(dataSourceContent(item) == "first description", "description exported as plain text");
+            if (item.id == "chapters") check(str(Json::parse(dataSourceContent(item))[0], "title") == "first chapter", "correct chapters exported");
+            if (item.id == "metadata") check(str(Json::parse(dataSourceContent(item)), "title") == "First", "correct metadata exported");
+        }
+        check(str(second.items[0].data, "description") == "second description", "second analysis has independent snapshot");
+    });
     test("Firefox guide follows current evidence and requires a verified connection", [] {
         FirefoxGuideObservation o;
         check(firefoxGuideStage(o) == FirefoxGuideStage::OpenManager, "unknown page");

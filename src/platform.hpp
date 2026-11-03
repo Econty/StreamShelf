@@ -47,7 +47,7 @@ struct ProcessResult {
     std::string output, error;
 };
 ProcessResult runProcess(const fs::path &, const std::vector<std::wstring> &, Log, std::atomic_bool &,
-                         bool capture = false, bool shellCommand = false);
+                         bool capture = false, bool shellCommand = false, const fs::path &extraPath = {});
 std::string httpGet(const std::string &, size_t limit = 32 * 1024 * 1024);
 std::string httpPreview(const std::string &, std::atomic_bool &, const Json &, const std::string &);
 PreviewImage decodePreview(const std::string &);
@@ -76,6 +76,9 @@ struct Session {
     std::mutex writeMutex, mutex;
     std::condition_variable cv;
     std::map<std::string, Json> replies;
+    // Snapshots belong to this browser session and the exact requested URL.
+    std::map<std::string, Json> credentialSnapshots;
+    uint64_t credentialEpoch = 0, credentialScanId = 0;
     std::atomic_bool alive{true};
     std::atomic<DWORD> readerId{0};
     std::atomic_bool readerEnded{false};

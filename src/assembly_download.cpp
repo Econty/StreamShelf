@@ -52,7 +52,7 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
     struct Mapped {size_t source;int input,stream,type;};
     std::vector<Mapped> mapped;std::vector<std::wstring> args{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-n"};
     double totalDuration=0;
-    int input=0,chapterInput=-1,expectedChapters=0;std::string metadataTitle=j->title,artist=j->assemblyArtist,description=j->assemblyDescription;
+    int input=0,chapterInput=-1,expectedChapters=0;std::string metadataTitle=j->assemblyMetadataTitle.empty()?j->title:j->assemblyMetadataTitle,artist=j->assemblyArtist,description=j->assemblyDescription;
     fs::path cover,chapters;const AssemblySource *coverSource=nullptr;
     for(size_t n=0;n<j->sources.size();++n) {
         const auto &s=j->sources[n];if(!s.enabled)continue;
@@ -62,8 +62,10 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         if(s.role==4){chapters=path;continue;}
         if(s.role==5){
             auto content=readFile(path,4*1024*1024);
+            auto extension=path.extension().wstring();std::transform(extension.begin(),extension.end(),extension.begin(),::towlower);
+            if(extension==L".txt"){if(description.empty())description=content;continue;}
             auto data=Json::parse(content,nullptr,false);
-            if(!data.is_object()) {if(path.extension()==L".txt"){if(description.empty())description=content;continue;}throw std::runtime_error("Источник метаданных должен содержать JSON-объект");}
+            if(!data.is_object())throw std::runtime_error("Источник метаданных должен содержать JSON-объект");
             if(artist.empty())artist=str(data,"artist",str(data,"uploader"));
             if(description.empty())description=str(data,"description");
             continue;
@@ -105,11 +107,17 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         std::wstring disposition=primary?L"default":L"0";
         if(m.type==2&&s.forced)disposition=primary?L"default+forced":L"forced";
         args.insert(args.end(),{L"-disposition:"+spec,disposition});
-        if(!s.language.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"language="+wide(normalizedLanguage(s.language))});
-        if(!s.name.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"title="+wide(s.name)});
-        if(!s.description.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"comment="+wide(s.description)});
-        if(!s.artist.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"artist="+wide(s.artist)});
-        if(!s.date.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"DATE_RELEASED="+wide(s.date)});
+        args.insert(args.end(), {L"-map_metadata:s:"+spec, std::to_wstring(m.input)+L":s:"+std::to_wstring(m.stream)});
+        if(s.metadataStream<0 || m.stream==s.metadataStream) {
+            if(!s.language.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"language="+wide(normalizedLanguage(s.language))});
+            if(!s.name.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"title="+wide(s.name)});
+            if(!s.description.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"comment="+wide(s.description)});
+            if(!s.artist.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"artist="+wide(s.artist)});
+            if(!s.summary.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"SUMMARY="+wide(s.summary)});
+            if(!s.synopsis.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"SYNOPSIS="+wide(s.synopsis)});
+            if(!s.handlerName.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"handler_name="+wide(s.handlerName)});
+            if(!s.date.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"DATE_RELEASED="+wide(s.date)});
+        }
         int codec=m.type==s.role?s.codec:0;
         static const wchar_t *video[]={L"copy",L"libx264",L"libx265",L"libvpx-vp9",L"libaom-av1",L"h264_nvenc",L"hevc_nvenc",L"h264_qsv",L"hevc_qsv",L"h264_amf",L"hevc_amf"};
         static const wchar_t *audio[]={L"copy",L"aac",L"libopus",L"libmp3lame",L"flac"};
@@ -145,6 +153,8 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
     args.insert(args.end(),{L"-metadata",L"title="+wide(metadataTitle),L"-metadata",L"artist="+wide(artist),L"-metadata",(j->muxOptions.container==0?L"SYNOPSIS=":L"description=")+wide(description)});
     auto extension=wide(muxContainer(j->muxOptions));auto partial=folder/(L"result.part."+extension),final=folder/(L"result."+extension);
     struct Cleanup {fs::path partial,chapters;~Cleanup(){std::error_code ec;fs::remove(partial,ec);fs::remove(chapters,ec);}}cleanup{partial,chapterFile};
+    if (j->muxOptions.container == 2 && !description.empty())
+        args.insert(args.end(), {L"-movflags", L"use_metadata_tags"});
     args.push_back(partial.wstring());
     auto r=runFfmpegWithProgress(j,args,totalDuration);
     if(j->cancel||stopping)throw std::runtime_error("Отменено");
@@ -155,6 +165,6 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
     if(int(output.value("chapters",Json::array()).size())<expectedChapters)throw std::runtime_error("Контейнер не сохранил все главы. Выберите другой формат.");
     if(!cover.empty()&&std::none_of(output["streams"].begin(),output["streams"].end(),[](const Json &s){return str(s,"codec_type")=="attachment"||number(s.value("disposition",Json::object()),"attached_pic")!=0;}))throw std::runtime_error("Обложка не сохранилась в контейнере. Исходники сохранены.");
     if(fs::exists(final))throw std::runtime_error("Итоговый файл уже существует; сохранённый файл не заменён");
-    fs::rename(partial,final);j->output=utf8(final.wstring());j->item.category=actual[0]?"Видео":"Аудио";
+    fs::rename(partial,final);j->workerOutput=utf8(final.wstring());j->workerCategory=actual[0]?"Видео":"Аудио";
 }
 }

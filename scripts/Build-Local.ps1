@@ -27,6 +27,10 @@ try {
  if($LASTEXITCODE){throw 'Container plan test compilation failed'}
  & .\build-local\container_plan_tests.exe
  if($LASTEXITCODE){throw 'Container plan tests failed'}
+ & $Compiler @common src/core.cpp src/platform.cpp tests/terminal_windows_tests.cpp @libraries -o build-local/terminal_tests.exe
+ if($LASTEXITCODE){throw 'Terminal test compilation failed'}
+ & .\build-local\terminal_tests.exe
+ if($LASTEXITCODE){throw 'Terminal tests failed'}
  & $Compiler @common src/core.cpp src/platform.cpp src/connector.cpp tests/connector_windows_tests.cpp @libraries -o build-local/connector_tests.exe
  if($LASTEXITCODE){throw 'Connector test compilation failed'}
  & .\build-local\connector_tests.exe
@@ -81,7 +85,7 @@ try {
   $target=if($directory -eq 'extension'){'extensions'}else{$directory}
   $destination=Join-Path 'release/StreamShelf-Native' $target
   New-Item -ItemType Directory -Force -Path $destination | Out-Null
-  Get-ChildItem -LiteralPath $directory | Where-Object { $directory -ne 'extension' -or $_.Name -ne 'firefox' } | Copy-Item -Destination $destination -Recurse -Force
+  Get-ChildItem -LiteralPath $directory | Where-Object { $directory -ne 'extension' -or $_.Name -ne 'firefox-development' } | Copy-Item -Destination $destination -Recurse -Force
  }
  Copy-Item -LiteralPath README.md,THIRD_PARTY.md,VERIFICATION.md,BROWSER-INSTALLER.md,BROWSER-INSTALLER-VERIFICATION.md -Destination release/StreamShelf-Native -Force
  Write-Output 'Local build and regression tests complete'

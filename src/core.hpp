@@ -104,6 +104,7 @@ std::string validateCookies(const std::string &s);
 std::string sizeText(double size, bool approx = false);
 std::vector<uint32_t> codepoints(const std::string &s);
 std::string sanitizeMetadata(const Json &j);
+std::string dataSourceContent(const Media &item);
 constexpr const char *ExtensionId = "cjhiagnpgpmaagnoinjnkipimjlplcpe";
 constexpr const char *FirefoxId = "connector@streamshelf.local";
 constexpr uint32_t MaxFrame = 1024 * 1024;

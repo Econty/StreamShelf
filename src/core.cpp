@@ -113,7 +113,7 @@ Analysis parseAnalysis(const Json &j, const std::string &url) {
             m.title = std::string(name) == "metadata"   ? "Метаданные JSON"
                       : std::string(name) == "chapters" ? "Главы"
                                                         : "Описание";
-            m.data = name;
+            m.data = j;
             add(m);
         }
     return a;
@@ -249,5 +249,12 @@ std::string sanitizeMetadata(const Json &j) {
         return v.is_string() ? Json(redact(v.get<std::string>())) : v;
     };
     return clean(j).dump(2);
+}
+std::string dataSourceContent(const Media &item) {
+    if (!item.data.is_object()) throw std::runtime_error("Данные источника недоступны. Повторите анализ страницы.");
+    if (item.id == "metadata") return sanitizeMetadata(item.data);
+    if (item.id == "description") return redact(str(item.data, "description"));
+    if (item.id == "chapters") return item.data.value("chapters", Json::array()).dump(2);
+    throw std::runtime_error("Неизвестный источник данных");
 }
 } // namespace ss

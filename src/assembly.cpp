@@ -2,22 +2,20 @@
 #include "language_options.hpp"
 #include <fstream>
 namespace ss {
-void App::openConstructor(bool automatic, bool completed) {
+void App::openConstructor(bool completed) {
     sourcePool.clear(); draft.clear(); draftSelection=-1;
-    assemblyName = title.empty() ? "Мой контейнер" : title; assemblyArtist.clear(); assemblyDescription.clear();
+    assemblyName = title.empty() ? "Мой контейнер" : title; assemblyMetadataTitle.clear(); assemblyArtist.clear(); assemblyDescription.clear();
     if(completed) for(const auto &job:jobs) if(job->id==selectedJob&&job->assembly){
-        draft=job->sources;assemblyName=job->title;assemblyArtist=job->assemblyArtist;assemblyDescription=job->assemblyDescription;muxOptions=job->muxOptions;
-        for(auto &source:draft){
+        sourcePool=job->sources;assemblyName=job->title;assemblyMetadataTitle=job->assemblyMetadataTitle;assemblyArtist=job->assemblyArtist;assemblyDescription=job->assemblyDescription;muxOptions=job->muxOptions;
+        for(auto &source:sourcePool){
             if(!source.dependency.empty())for(const auto &child:jobs)if(child->id==source.dependency&&child->done&&child->state=="Готово")source.path=child->output;
             source.dependency.clear();source.enabled=true;
         }
-        sourcePool=draft;
         const size_t initialCount=sourcePool.size();
         for(size_t i=0;i<initialCount;++i)if(sourcePool[i].role==0&&sourcePool[i].includeAudio){
             auto audio=sourcePool[i];audio.role=1;audio.stream=-1;audio.includeAudio=false;audio.derivedAudio=true;audio.name+=" · звук";sourcePool.push_back(audio);
         }
-        constructorOpen=true;downloadChoice=false;requestedPage=0;draftSelection=draft.empty()?-1:0;
-        if(job->waitingSources&&!job->claimed){job->cancel=true;job->done=true;job->state="Отменено";}
+        constructorOpen=true;downloadChoice=false;requestedPage=0;
         return;
     }
     if (completed) {
@@ -39,19 +37,25 @@ void App::openConstructor(bool automatic, bool completed) {
     }
     constructorOpen=true; downloadChoice=false; requestedPage=0;
     muxOptions={};
-    if (automatic) {
-        for (const auto &s : sourcePool) if ((completed || s.media.selected) && !s.derivedAudio) draft.push_back(s);
-        autoConstruct();
-    }
+
 }
 void App::autoConstruct() {
-    if (draft.empty()) for (const auto &s : sourcePool) if ((s.media.selected || !s.path.empty()) && !s.derivedAudio) draft.push_back(s);
+    for (const auto &source : sourcePool) {
+        bool alreadyAdded = std::any_of(draft.begin(), draft.end(), [&](const auto &item) {
+            if (source.role >= 3) return item.role == source.role;
+            return item.role == source.role && item.path == source.path &&
+                   item.stream == source.stream && item.media.key == source.media.key &&
+                   item.media.id == source.media.id;
+        });
+        if (!alreadyAdded) draft.push_back(source);
+    }
     std::stable_sort(draft.begin(),draft.end(),[](const auto &a,const auto &b){return a.role<b.role;});
-    // Auxiliary sections accept one source each; the remaining choices stay in the pool.
-    bool auxiliary[6]{};
-    draft.erase(std::remove_if(draft.begin(),draft.end(),[&](const auto &s){if(s.role<3)return false;bool duplicate=auxiliary[s.role];auxiliary[s.role]=true;return duplicate;}),draft.end());
-    bool first[6]{};
-    for (auto &s : draft) { s.primary=s.role<3 && !first[s.role]; first[s.role]=true; }
+    for (int role=0; role<3; ++role) {
+        if (std::any_of(draft.begin(), draft.end(), [role](const auto &s){return s.role==role && s.primary;}))
+            continue;
+        auto first=std::find_if(draft.begin(), draft.end(), [role](const auto &s){return s.role==role;});
+        if (first!=draft.end()) first->primary=true;
+    }
     draftSelection=draft.empty()?-1:0;
 }
 void App::importAssemblyFile() {
@@ -91,7 +95,67 @@ void App::importAssemblyFile() {
         post([this,imported]{sourcePool.insert(sourcePool.end(),imported.begin(),imported.end());});
     });
 }
+static std::string metadataTag(const Json &tags, std::initializer_list<const char *> keys) {
+    if (!tags.is_object()) return {};
+    for (auto key : keys)
+        for (auto it=tags.begin(); it!=tags.end(); ++it)
+            if (it->is_string() && _stricmp(it.key().c_str(), key)==0 && !it->get_ref<const std::string &>().empty())
+                return it->get<std::string>();
+    return {};
+}
+void App::readDroppedMetadata(const AssemblySource &original) {
+    work([this,original] {
+        Json probe;
+        std::atomic_bool cancel{false},finished{false};
+        std::thread watchdog([&]{
+            for(int i=0;i<150 && !finished && !stopping;++i) Sleep(100);
+            if(!finished) cancel=true;
+        });
+        try {
+            std::shared_lock lock(toolsMutex);
+            auto result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-show_format",L"-of",L"json",wide(original.path)},nullptr,cancel,true);
+            if(!result.code) probe=Json::parse(result.output,nullptr,false);
+        } catch (...) {}
+        finished=true;
+        watchdog.join();
+        post([this,original,probe=std::move(probe)] {
+            auto it=std::find_if(draft.begin(),draft.end(),[&](const auto &s){return s.uiId==original.uiId && s.metadataPending;});
+            if(!constructorOpen || it==draft.end()) return;
+            it->metadataPending=false;
+            if(!probe.is_object()) { notify("Не удалось прочитать метаданные источника"); return; }
+            auto type=original.role==0?"video":original.role==1?"audio":"subtitle";
+            auto streams=probe.value("streams",Json::array());
+            for(const auto &stream:streams) {
+                if(str(stream,"codec_type")!=type) continue;
+                if(original.stream>=0 && number(stream,"index")!=original.stream) continue;
+                if(original.role==0 && number(stream.value("disposition",Json::object()),"attached_pic")==1) continue;
+                it->metadataStream=int(number(stream,"index",-1));
+                auto tags=stream.value("tags",Json::object());
+                auto fill=[&](std::string AssemblySource::*member,std::initializer_list<const char *> keys) {
+                    auto value=metadataTag(tags,keys);
+                    if(!value.empty() && ((*it).*member)==(original.*member)) (*it).*member=std::move(value);
+                };
+                fill(&AssemblySource::name,{"title","name"});
+                fill(&AssemblySource::language,{"language"});
+                fill(&AssemblySource::description,{"description","comment"});
+                fill(&AssemblySource::summary,{"summary"});
+                fill(&AssemblySource::synopsis,{"synopsis"});
+                if(muxOptions.container==1 || muxOptions.container==2)
+                    fill(&AssemblySource::handlerName,{"handler_name"});
+                fill(&AssemblySource::artist,{"artist"});
+                fill(&AssemblySource::date,{"date_released","date"});
+                break;
+            }
+            auto tags=probe.value("format",Json::object()).value("tags",Json::object());
+            if(assemblyMetadataTitle.empty()) assemblyMetadataTitle=metadataTag(tags,{"title","name"});
+            if(assemblyArtist.empty()) assemblyArtist=metadataTag(tags,{"artist"});
+            if(assemblyDescription.empty()) assemblyDescription=metadataTag(tags,{"description","synopsis","comment"});
+        });
+    });
+}
 void App::enqueueAssembly() {
+    if(std::any_of(draft.begin(),draft.end(),[](const auto &s){return s.metadataPending;}))
+        throw std::runtime_error("Дождитесь чтения метаданных дорожек");
     if(draft.empty())throw std::runtime_error("Добавьте медиа в конструктор");
     if(draft.size()>64)throw std::runtime_error("В одной сборке допускается до 64 источников");
     if(!fs::path(wide(destination)).is_absolute())throw std::runtime_error("Выберите полную папку сохранения");
@@ -105,7 +169,9 @@ void App::enqueueAssembly() {
         if(s.role==0&&(s.maxrate.empty()!=s.bufsize.empty()))throw std::runtime_error("Укажите максимальный битрейт и размер буфера вместе");
         if(s.role==1&&s.codec==4&&!s.bitrate.empty())throw std::runtime_error("FLAC использует качество без потерь; уберите заданный битрейт");
         if(s.codec==0&&(!s.bitrate.empty()||!s.maxrate.empty()||!s.bufsize.empty()||!s.sampleRate.empty()||!s.frameRate.empty()||!s.width.empty()))throw std::runtime_error("Для расширенных параметров выберите кодек перекодирования");
-        if(muxOptions.container!=0 && s.role<3 && (!s.description.empty()||!s.artist.empty()||!s.date.empty()))throw std::runtime_error("Этот контейнер не гарантирует сохранение описания, автора и даты отдельной дорожки. Выберите MKV или очистите эти поля.");
+        if(!supportsExtendedTrackTags(muxOptions.container) && s.role<3 && (!s.description.empty()||!s.artist.empty()||!s.date.empty()||!s.summary.empty()||!s.synopsis.empty()))throw std::runtime_error("Для расширенных тегов дорожки выберите MKV или WebM либо очистите эти поля.");
+        if(!s.handlerName.empty() && (s.role>=3 || (muxOptions.container!=1 && muxOptions.container!=2)))throw std::runtime_error("Имя обработчика дорожки доступно для MP4 и MOV.");
+        if(s.role==2 && s.forced && !supportsForcedSubtitles(muxOptions.container))throw std::runtime_error("Выбранный контейнер не сохраняет флаг принудительных субтитров. Снимите флаг или смените контейнер.");
         if(s.role>=3 && (!s.description.empty()||!s.artist.empty()||!s.date.empty()||!s.language.empty()))throw std::runtime_error("Для обложки, глав и источника метаданных дополнительные поля дорожки не поддерживаются. Очистите их или измените исходные данные.");
         if(!s.language.empty() && normalizedLanguage(s.language)=="und") {
             auto value=wide(s.language);
@@ -131,7 +197,7 @@ void App::enqueueAssembly() {
     auto parent=std::make_shared<Job>();parent->assembly=true;parent->mux=true;parent->muxOptions=muxOptions;
     parent->id=std::to_string(GetTickCount64())+"-"+std::to_string(++jobSerial);
     parent->title=assemblyName;parent->item.title=assemblyName;parent->item.category="Требуют проверки";
-    parent->assemblyArtist=assemblyArtist;parent->assemblyDescription=assemblyDescription;
+    parent->assemblyMetadataTitle=assemblyMetadataTitle;parent->assemblyArtist=assemblyArtist;parent->assemblyDescription=assemblyDescription;
     parent->folder=utf8((fs::path(wide(destination))/wide(parent->id+"-container")).wstring());
     parent->outputDirectory=destination;parent->waitingSources=true;parent->state="Ожидание источников";
     std::vector<std::shared_ptr<Job>> children;
@@ -147,7 +213,7 @@ void App::enqueueAssembly() {
             child->folder=utf8((fs::path(wide(destination))/wide(parent->id+"-sources")/wide(child->id)).wstring());
             child->outputDirectory=utf8((fs::path(wide(destination))/wide(parent->id+"-sources")).wstring());
             auto it=mediaSessions.find(source.media.key);child->session=it==mediaSessions.end()?session():it->second;
-            if(child->item.category=="Данные")child->local=child->item.id=="chapters"?analysis.raw.value("chapters",Json::array()).dump(2):sanitizeMetadata(analysis.raw);
+            if(child->item.category=="Данные")child->local=dataSourceContent(child->item);
             source.dependency=child->id;downloads[identity]=child->id;children.push_back(child);
         }
         parent->sources.push_back(source);

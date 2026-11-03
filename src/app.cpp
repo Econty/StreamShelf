@@ -14,6 +14,8 @@ static Json mediaJson(const Media &m) {
             {"thumbnail", m.thumbnail},
             {"category", m.category},
             {"ext", m.ext},
+            {"quality", m.quality}, {"size", m.size}, {"approx", m.approx},
+            {"fps", m.fps}, {"rate", m.rate},
             {"url", m.url},
             {"page", m.page},
             {"protocol", m.protocol},
@@ -34,6 +36,11 @@ static Media mediaFrom(const Json &j) {
     m.thumbnail = str(j,"thumbnail");
     m.category = str(j, "category");
     m.ext = str(j, "ext");
+    m.quality = str(j, "quality");
+    m.size = number(j, "size");
+    m.approx = j.value("approx", false);
+    m.fps = number(j, "fps");
+    m.rate = number(j, "rate");
     m.url = str(j, "url");
     m.page = str(j, "page");
     m.protocol = str(j, "protocol");
@@ -90,7 +97,7 @@ App::App() {
                 job->assemblyInput = v.value("assemblyInput",false);
                 job->localFile=v.value("localFile",false);job->conversionSource=v.value("conversionSource",false);
                 job->assembly = v.value("assembly",false);
-                job->assemblyArtist = str(v,"assemblyArtist"); job->assemblyDescription = str(v,"assemblyDescription");
+                job->assemblyMetadataTitle = str(v,"assemblyMetadataTitle"); job->assemblyArtist = str(v,"assemblyArtist"); job->assemblyDescription = str(v,"assemblyDescription");
                 for (const auto &source : v.value("sources",Json::array())) { auto entry=assemblyFrom(source); if(source.contains("media"))entry.media=mediaFrom(source["media"]); job->sources.push_back(entry); }
                 job->mux = v.value("mux", false);
                 if (job->mux) {
@@ -116,6 +123,7 @@ App::App() {
 }
 App::~App() {
     stopping = true;
+    if(terminalCancel) *terminalCancel=true;
     *analysisCancel = true;
     connector.stop();
     {
@@ -268,6 +276,16 @@ void App::start() {
                     url.clear();
                     connection = "Вкладка закрыта — выберите страницу в браузере";
                 }
+                return;
+            }
+            if (type == "scanCredentials") {
+                auto target = str(j, "url");
+                std::lock_guard lock(s->mutex);
+                if (httpUrl(target) && s->credentialScanId &&
+                    j.value("scanId", uint64_t(0)) == s->credentialScanId &&
+                    j.contains("cookies") && j["cookies"].is_array() &&
+                    j.contains("headers") && j["headers"].is_object())
+                    s->credentialSnapshots.insert_or_assign(target, j);
                 return;
             }
             if (session() != s)
@@ -618,6 +636,21 @@ struct TempCookie {
         }
     }
 };
+void App::resetCredentialSnapshots() {
+    std::set<std::shared_ptr<Session>> sources(sessions.begin(), sessions.end());
+    for (const auto &[key, source] : mediaSessions) if(source) sources.insert(source);
+    if(analysisSession) sources.insert(analysisSession);
+    {
+        std::lock_guard lock(jobsMutex);
+        for (const auto &job : jobs) if(job->session) sources.insert(job->session);
+    }
+    for (const auto &source : sources) {
+        std::lock_guard lock(source->mutex);
+        source->credentialSnapshots.clear();
+        ++source->credentialEpoch;
+        source->credentialScanId=0;
+    }
+}
 void App::analyze(const std::string &u, bool deep) {
     if (!httpUrl(u)) {
         error("Введите HTTP/HTTPS-ссылку");
@@ -629,6 +662,7 @@ void App::analyze(const std::string &u, bool deep) {
     *analysisCancel = true;
     auto cancel = analysisCancel = std::make_shared<std::atomic_bool>(false);
     auto generation = ++analysisGeneration;
+    resetCredentialSnapshots();
     if (!keepResults) { media.clear(); mediaSessions.clear(); previews.clear(); ++previewGeneration; analysis = {}; selectedMedia.clear(); }
     busy = true;
     auto s = session();
@@ -789,7 +823,7 @@ void App::saveHistory() {
                      {"local", j->local},
                      {"output", j->output},
                      {"outputDirectory", j->outputDirectory},
-                     {"assembly", j->assembly}, {"assemblyInput",j->assemblyInput}, {"localFile",j->localFile}, {"conversionSource",j->conversionSource}, {"sources", sources}, {"assemblyArtist",j->assemblyArtist}, {"assemblyDescription",j->assemblyDescription},
+                     {"assembly", j->assembly}, {"assemblyInput",j->assemblyInput}, {"localFile",j->localFile}, {"conversionSource",j->conversionSource}, {"sources", sources}, {"assemblyMetadataTitle",j->assemblyMetadataTitle}, {"assemblyArtist",j->assemblyArtist}, {"assemblyDescription",j->assemblyDescription},
                      {"item", mediaJson(j->item)}, {"mux", j->mux}, {"muxInputs", j->muxInputs}, {"muxChapters", j->muxChapters},
                      {"muxOptions", {{"container", j->muxOptions.container}, {"video", j->muxOptions.video}, {"audio", j->muxOptions.audio}, {"subtitles", j->muxOptions.subtitles}}}});
     }
@@ -830,9 +864,7 @@ void App::enqueue() {
         j->folder = utf8((dest / wide(j->id)).wstring());
         j->outputDirectory = utf8(dest.wstring());
         if (m.category == "Данные") {
-            j->local = m.id == "metadata"      ? sanitizeMetadata(analysis.raw)
-                       : m.id == "description" ? redact(str(analysis.raw, "description"))
-                                               : analysis.raw.value("chapters", Json::array()).dump(2);
+            j->local = dataSourceContent(m);
         }
         std::lock_guard l(jobsMutex);
         jobs.push_back(j);
@@ -847,36 +879,48 @@ void App::setParallel(int n) {
     parallel = std::clamp(n, 1, 4);
     jobsCv.notify_all();
 }
+static bool isSubtitleJob(const Job &job) {
+    return job.item.category=="Субтитры" || job.item.category=="Автосубтитры";
+}
+struct SubtitleRateLimited : std::runtime_error {
+    SubtitleRateLimited() : std::runtime_error("HTTP 429") {}
+};
 void App::downloadLoop() {
     while (!stopping) {
         std::shared_ptr<Job> next;
+        bool subtitle=false;
         {
-            std::unique_lock l(jobsMutex);
-            jobsCv.wait(l, [&] {
-                if (stopping)
-                    return true;
-                if (active >= parallel)
-                    return false;
-                return std::any_of(jobs.begin(), jobs.end(),
-                                   [](auto &j) { return !j->waitingSources && !j->claimed && !j->done && !j->cancel; });
+            std::unique_lock lock(jobsMutex);
+            auto eligible=[this](const auto &job) {
+                return !job->waitingSources && !job->claimed && !job->done && !job->cancel &&
+                    (!isSubtitleJob(*job) || (!subtitleActive && GetTickCount64()>=subtitleResumeAt));
+            };
+            jobsCv.wait_for(lock,std::chrono::seconds(1),[&] {
+                return stopping || (active<parallel && std::any_of(jobs.begin(),jobs.end(),eligible));
             });
-            if (stopping)
-                return;
-            for (auto &j : jobs)
-                if (!j->waitingSources && !j->claimed && !j->done && !j->cancel) {
-                    next = j;
-                    j->claimed = true;
-                    active++;
-                    break;
+            if (stopping) return;
+            if (active<parallel) {
+                auto it=std::find_if(jobs.begin(),jobs.end(),eligible);
+                if(it!=jobs.end()){
+                    next=*it;
+                    next->claimed=true;
+                    subtitle=isSubtitleJob(*next);
+                    if(subtitle)subtitleActive=true;
+                    ++active;
                 }
+            }
         }
         if (!next)
             continue;
+        next->workerOutput.clear();
+        next->workerCategory.clear();
         post([next] { next->state = "Скачивание"; });
+        bool succeeded=false;
         try {
             download(next);
-            if (!next->outputDirectory.empty() && !next->output.empty()) {
-                fs::path source = wide(next->output), dest = wide(next->outputDirectory);
+            if(next->cancel || stopping)throw std::runtime_error("Отменено");
+            if (!next->outputDirectory.empty() && !next->workerOutput.empty()) {
+                fs::path source = wide(next->workerOutput), dest = wide(next->outputDirectory);
                 std::wstring base = wide(next->item.title.empty() ? "media" : next->item.title);
                 for (auto &ch : base) if (ch < 32 || std::wstring(L"<>:\"/\\|?*").find(ch) != std::wstring::npos) ch = L'_';
                 while (!base.empty() && (base.back() == L'.' || base.back() == L' ')) base.pop_back();
@@ -890,33 +934,71 @@ void App::downloadLoop() {
                 for (int n = 0; n < 10000; ++n) {
                     auto name = base + (n ? L" (" + std::to_wstring(n + 1) + L")" : L"") + extension;
                     auto target = dest / name;
-                    if (MoveFileW(source.c_str(), target.c_str())) { next->output = utf8(target.wstring()); moved = true; break; }
+                    if (MoveFileW(source.c_str(), target.c_str())) { next->workerOutput = utf8(target.wstring()); moved = true; break; }
                     auto error = GetLastError();
                     if (error != ERROR_ALREADY_EXISTS && error != ERROR_FILE_EXISTS) throw std::runtime_error("Не удалось сохранить файл в выбранной папке.");
                 }
                 if (!moved) throw std::runtime_error("Не удалось подобрать свободное имя файла.");
                 std::error_code ec; fs::remove(fs::path(wide(next->folder)), ec);
             }
-            post([this, next] {
+            auto output = next->workerOutput, category = next->workerCategory;
+            std::error_code sizeError;
+            auto fileSize = output.empty() ? 0 : fs::file_size(wide(output), sizeError);
+            post([this, next, output, category, fileSize, measured = !sizeError && !output.empty()] {
+                if (measured) {
+                    next->item.size = static_cast<double>(fileSize);
+                    next->item.approx = false;
+                }
+                next->output = output; if (!category.empty()) next->item.category = category;
+                next->done = true;
                 next->state = next->cancel ? "Отменено" : "Готово";
                 next->percent = next->cancel ? next->percent : 100;
                 next->detail = next->cancel ? "Загрузка остановлена" : "Файл сохранён";
                 saveHistory();
             });
+            succeeded=true;
+        } catch (const SubtitleRateLimited &) {
+            unsigned seconds;
+            {
+                std::lock_guard lock(jobsMutex);
+                seconds=subtitleBackoff;
+                subtitleResumeAt=GetTickCount64()+ULONGLONG(seconds)*1000;
+                subtitleBackoff=std::min(seconds*2,600u);
+            }
+            auto message="HTTP 429: субтитры отложены на "+std::to_string(seconds)+" с";
+            post([this,next,message]{
+                {
+                    std::lock_guard lock(jobsMutex);
+                    next->claimed=false;
+                    next->done=next->cancel.load();
+                    next->state=next->cancel?"Отменено":"Пауза сервера";
+                    next->percent=0;
+                    next->detail=message;
+                }
+                jobsCv.notify_all();
+                saveHistory();
+            });
+            log(message);
         } catch (const std::exception &e) {
             auto msg = dynamic_cast<const fs::filesystem_error *>(&e)
                 ? std::string("Не удалось создать папку или сохранить файл. Проверьте путь и права доступа.") : redact(e.what());
-            post([this, next, msg] {
+            auto output = next->workerOutput;
+            post([this, next, msg, output] {
+                next->output = output;
+                next->done = true;
                 next->state = next->cancel ? "Отменено" : "Ошибка";
                 next->detail = msg;
                 saveHistory();
             });
             log(msg);
         }
-        next->done = true;
         {
             std::lock_guard l(jobsMutex);
             active--;
+            if(subtitle) {
+                subtitleActive=false;
+                if(succeeded)subtitleBackoff=60;
+            }
         }
         jobsCv.notify_all();
     }
@@ -964,7 +1046,7 @@ void App::download(const std::shared_ptr<Job> &j) {
             if(entry.is_regular_file() && path.stem()==L"media" && mediaExtensions.count(ext))candidates.push_back(path);
         }
         if(candidates.size()==1){
-            j->output=utf8(candidates[0].wstring());
+            j->workerOutput=utf8(candidates[0].wstring());
             validate(candidates[0],ExpectedStreams::AnyMedia);
             return;
         }
@@ -1036,18 +1118,51 @@ void App::download(const std::shared_ptr<Job> &j) {
         }
         if (video < expectedVideo || audio < expectedAudio || subtitles < expectedSubtitle || int(output.value("chapters", Json::array()).size()) < chapterCount)
             throw std::runtime_error("Итоговый файл не содержит все выбранные дорожки или главы. Попробуйте другой контейнер.");
-        fs::rename(partial, final); j->output = utf8(final.wstring());
-        j->item.category = video ? "Видео" : "Аудио";
+        fs::rename(partial, final); j->workerOutput = utf8(final.wstring());
+        j->workerCategory = video ? "Видео" : "Аудио";
         return;
     }
     if (j->item.category == "Данные") {
-        auto path = folder / (L"metadata." + wide(j->item.ext)); writeFile(path, j->local); j->output = utf8(path.wstring());
+        auto path = folder / (L"metadata." + wide(j->item.ext)); writeFile(path, j->local); j->workerOutput = utf8(path.wstring());
         return;
     }
+    if (!j->item.format && j->item.protocol != "m3u8" && j->item.protocol != "dash" &&
+        j->item.category != "HLS" && j->item.category != "DASH") {
+        auto final = folder / (L"media." + wide(j->item.ext.empty() ? "bin" : j->item.ext));
+        if (fs::is_regular_file(final)) {
+            j->workerOutput = utf8(final.wstring());
+            if (j->item.category == "Видео" || j->item.category == "Видео без звука" ||
+                j->item.category == "Видео · звук не проверен" || j->item.category == "Аудио" || j->item.category == "Требуют проверки") {
+                auto expected = j->assemblyInput ? ExpectedStreams::AnyMedia : j->item.category == "Аудио" ? ExpectedStreams::Audio : j->item.category == "Требуют проверки" ? ExpectedStreams::AnyMedia : ExpectedStreams::Video;
+                validate(final, expected);
+            }
+            return;
+        }
+    }
+    const bool subtitle=isSubtitleJob(*j);
+    const bool extractedSubtitle = subtitle && httpUrl(j->page) && !j->item.language.empty() &&
+        (j->item.id.rfind("subtitles:",0)==0 || j->item.id.rfind("automatic_captions:",0)==0);
+    if(j->cancel || stopping)throw std::runtime_error("Отменено");
     auto target = j->item.format                  ? j->page
                   : j->item.credentialUrl.empty() ? j->item.url
                                                   : j->item.credentialUrl;
-    auto cred = credentials(j->session, target, j->cancel);
+    std::pair<std::string, Json> cred{"", Json::object()};
+    try {
+        cred = credentials(j->session, target, j->cancel);
+    } catch (const std::exception &) {
+        if (j->cancel || stopping) throw;
+        log("Снимок доступа не получен, пробуем скачать без cookies.");
+    }
+    std::pair<std::string,Json> pageCred{"",Json::object()};
+    if(extractedSubtitle) {
+        try { pageCred=credentials(j->session,j->page,j->cancel); }
+        catch(const std::exception &) { if(j->cancel || stopping)throw; }
+        // The HTTP client applies the original domain/path scope to each cookie.
+        if(cred.first.empty())cred.first=pageCred.first;
+        if(!cred.second.contains("Referer"))cred.second["Referer"]=j->page;
+        if(!cred.second.contains("User-Agent") && pageCred.second.contains("User-Agent"))
+            cred.second["User-Agent"]=pageCred.second["User-Agent"];
+    }
     TempCookie cookie(cred.first);
     if (!j->item.format && j->item.protocol != "m3u8" && j->item.protocol != "dash" &&
         j->item.category != "HLS" && j->item.category != "DASH") {
@@ -1055,8 +1170,8 @@ void App::download(const std::shared_ptr<Job> &j) {
         path += L".part";
         auto lastTick=GetTickCount64();uint64_t lastCount=0;
         post([j]{j->state="Скачивание";j->percent=-1;j->detail="Соединяемся с сервером…";});
-        httpDownload(
-            j->item.url, path, j->cancel, [](double){}, cred.second, cred.first,
+        auto fetchFile=[&](const std::string &url){httpDownload(
+            url, path, j->cancel, [](double){}, cred.second, cred.first,
             [this,j,&lastTick,&lastCount](uint64_t count,uint64_t total){
                 auto now=GetTickCount64(),elapsed=now-lastTick;
                 if(elapsed<250 && (!total||count<total))return;
@@ -1067,7 +1182,49 @@ void App::download(const std::shared_ptr<Job> &j) {
                 if(speed>0)line<<" · "<<std::setprecision(2)<<speed/(1024.*1024.)<<" МиБ/с";
                 auto detail=line.str();double percent=total?std::clamp(100.*count/total,0.,100.):-1.;
                 post([j,detail,percent]{j->state="Скачивание";j->detail=detail;j->percent=percent;});
-            });
+            });};
+        auto downloadUrl=j->item.url;
+        bool refreshed=false;
+        for(;;) {
+            try { fetchFile(downloadUrl); break; }
+            catch(const std::runtime_error &e) {
+                std::string reason=e.what();
+                if(subtitle && reason=="HTTP 429" && !j->cancel && !stopping)throw SubtitleRateLimited();
+                if(!extractedSubtitle || j->cancel || stopping)throw;
+                if(refreshed || (reason!="HTTP 401" && reason!="HTTP 403" && reason!="HTTP 404" && reason!="HTTP 410"))throw;
+                refreshed=true;
+                post([j]{j->detail="Обновляем ссылку на субтитры…";});
+                TempCookie pageCookie(pageCred.first);
+                auto args=headersArgs(pageCred.second);
+                args.insert(args.end(),{L"--ignore-config",L"--encoding",L"utf-8",L"--no-playlist",
+                    L"--no-warnings",L"--dump-single-json",L"--skip-download",L"--socket-timeout",L"15",
+                    L"--js-runtimes",L"deno:"+(dataRoot()/L"tools"/L"deno.exe").wstring()});
+                if(!pageCookie.path.empty())args.insert(args.end(),{L"--cookies",pageCookie.path.wstring()});
+                args.insert(args.end(),{L"--",wide(j->page)});
+                auto result=runProcess(tool(L"yt-dlp.exe"),args,nullptr,j->cancel,true);
+                if(j->cancel || stopping)throw std::runtime_error("Отменено");
+                auto data=Json::parse(result.output,nullptr,false);
+                if(result.code || !data.is_object())
+                    throw std::runtime_error("Не удалось обновить ссылку на субтитры после "+reason);
+                auto updated=parseAnalysis(data,j->page);
+                auto track=std::find_if(updated.items.begin(),updated.items.end(),[&](const Media &item){
+                    return item.id==j->item.id && httpUrl(item.url);
+                });
+                if(track==updated.items.end())
+                    throw std::runtime_error("Субтитры выбранного языка и формата больше не доступны");
+                downloadUrl=track->url;
+                if(downloadUrl!=j->item.url) {
+                    // A new URL gets scoped cookies and page context, never old resource headers.
+                    cred.first=pageCred.first;
+                    cred.second=Json{{"Referer",j->page}};
+                    if(pageCred.second.contains("User-Agent"))cred.second["User-Agent"]=pageCred.second["User-Agent"];
+                }
+            }
+        }
+        if(subtitle) {
+            std::error_code ec;
+            if(fs::file_size(path,ec)==0 || ec)throw std::runtime_error("Сервер вернул пустые субтитры");
+        }
         {
             std::ifstream file(path, std::ios::binary); char head[1024]{}; file.read(head, sizeof(head));
             if (looksLikeHtml(std::string(head, size_t(file.gcount())))) {
@@ -1078,7 +1235,7 @@ void App::download(const std::shared_ptr<Job> &j) {
         auto final = path;
         final.replace_extension();
         fs::rename(path, final);
-        j->output = utf8(final.wstring());
+        j->workerOutput = utf8(final.wstring());
         if (j->item.category == "Видео" || j->item.category == "Видео без звука" ||
             j->item.category == "Видео · звук не проверен" || j->item.category == "Аудио" || j->item.category == "Требуют проверки") {
             auto expected = j->assemblyInput ? ExpectedStreams::AnyMedia : j->item.category == "Аудио" ? ExpectedStreams::Audio : j->item.category == "Требуют проверки" ? ExpectedStreams::AnyMedia : ExpectedStreams::Video;
@@ -1134,10 +1291,10 @@ void App::download(const std::shared_ptr<Job> &j) {
     if (!resultPath) throw std::runtime_error("Не удалось определить итоговый файл загрузки.");
     auto final = fs::weakly_canonical(fs::path(wide(*resultPath)));
     if (final.parent_path() != fs::weakly_canonical(folder) || !fs::is_regular_file(final)) throw std::runtime_error("Итоговый файл не найден в папке загрузки.");
-    j->output = utf8(final.wstring());
+    j->workerOutput = utf8(final.wstring());
     if (j->item.category == "Видео" || j->item.category == "Видео без звука" || j->item.category == "Видео · звук не проверен" || j->item.category == "Аудио" || j->item.category == "HLS" || j->item.category == "DASH" || j->item.category == "Требуют проверки")
         validate(final, j->assemblyInput ? ExpectedStreams::AnyMedia : !j->pair.empty() ? ExpectedStreams::VideoAndAudio : j->item.category == "Аудио" ? ExpectedStreams::Audio : j->item.category == "HLS" || j->item.category == "DASH" || j->item.category == "Требуют проверки" ? ExpectedStreams::AnyMedia : ExpectedStreams::Video);
-    j->output = utf8(final.wstring());
+    j->workerOutput = utf8(final.wstring());
 }
 void App::closeRequest() {
     bool activeJob;
@@ -1199,7 +1356,8 @@ void App::action(const std::string &cmd) {
                     std::lock_guard queueLock(jobsMutex);
                     for (const auto &s : j->sources) for (const auto &child : jobs)
                         if (child->id == s.dependency && child->done && child->state != "Готово") {
-                            child->session = session(); child->cancel=false; child->done=false; child->claimed=false; child->state="Ожидание";
+                            if (!child->session) child->session = session();
+                            child->cancel=false; child->done=false; child->claimed=false; child->state="Ожидание";
                         }
                     for(auto &source:j->sources)source.enabled=true;
                     j->decisionNeeded=false; j->prompted=false; j->waitingSources=true; j->state="Ожидание источников"; jobsCv.notify_all();
@@ -1292,7 +1450,7 @@ void App::action(const std::string &cmd) {
                         (selected.family == "firefox" ? L"firefox" : L"chromium");
                     if (guidedBrowser(selected) != GuidedBrowser::None) {
                         auto guideTarget = guidedBrowser(selected) == GuidedBrowser::Firefox
-                            ? executable().parent_path() / L"extensions" / L"signed" / L"StreamShelf-Connector-1.0.2.xpi" : folder;
+                            ? executable().parent_path() / L"extensions" / L"firefox-signed" / L"StreamShelf-Connector-1.0.2.xpi" : folder;
                         if (guidedBrowser(selected) == GuidedBrowser::Firefox && !fs::is_regular_file(guideTarget)) throw std::runtime_error("Подписанный файл расширения Firefox не найден в комплекте программы.");
                         extensionInstaller.start(hwnd, selected, profile ? &*profile : nullptr, guideTarget, reduced, light);
                         auto checkConnection = [this, expected = selected.exe] {
@@ -1315,7 +1473,7 @@ void App::action(const std::string &cmd) {
                         checkConnection();
                         notify("Мастер установки открыт. Следуйте подсказкам поверх браузера.");
                     } else {
-                        auto signedDir = executable().parent_path() / L"extensions" / L"signed";
+                        auto signedDir = executable().parent_path() / L"extensions" / L"firefox-signed";
                         auto signedXpi = signedDir / L"StreamShelf-Connector-1.0.2.xpi";
                         bool signedAvailable = selected.family == "firefox" && fs::is_regular_file(signedXpi);
                         openPath(signedAvailable ? signedDir : folder);
@@ -1346,6 +1504,11 @@ void App::action(const std::string &cmd) {
                 tab = s->tab;
             }
             auto id = nextScanGeneration();
+            if(cmd!="stopScan") {
+                resetCredentialSnapshots();
+                std::lock_guard lock(s->mutex);
+                s->credentialScanId=id;
+            }
             scanning = false;
             auto command = cmd == "stopScan" ? Json{{"type", "scanStop"}, {"scanId", id}}
                 : Json{{"type", "scanStart"}, {"scanId", id}, {"tabId", tab}, {"reload", cmd == "reloadScan"}};
@@ -1414,7 +1577,10 @@ void App::action(const std::string &cmd) {
             notify("Журнал скопирован");
         } else if (cmd == "addLocalDownloads") {
             work([this]{auto path=pickFile(hwnd);if(!path.empty())post([this,path]{addLocalFiles({path});});});
+        } else if (cmd == "interruptTerminal") {
+            if(terminalCancel) *terminalCancel=true;
         } else if (cmd == "runTerminal") {
+            if(terminalCancel) {notify("Дождитесь завершения команды или нажмите Ctrl+C");return;}
             auto command=terminalCommand;terminalCommand.clear();
             auto normalized=command;
             auto firstNonspace=normalized.find_first_not_of(" \t");
@@ -1422,55 +1588,84 @@ void App::action(const std::string &cmd) {
             else {normalized.erase(0,firstNonspace);auto last=normalized.find_last_not_of(" \t");normalized.resize(last+1);}
             std::transform(normalized.begin(),normalized.end(),normalized.begin(),[](unsigned char c){return char(std::tolower(c));});
             if(normalized=="clear"||normalized=="cls"||normalized=="/clear")logs.clear();
-            else if(normalized=="/help")log("Команды Windows: help, dir, echo, cd. /clear очищает журнал. Каждая команда запускается отдельно.");
-            else if(!command.empty())work([this,command]{
-                wchar_t shell[MAX_PATH]{};if(!GetSystemDirectoryW(shell,MAX_PATH))throw std::runtime_error("Не найден системный командный процессор");
-                auto exe=fs::path(shell)/L"cmd.exe";log("> "+command);
-                bool first=true;auto result=runProcess(exe,{L"/d",L"/s",L"/c",wide("chcp 65001>nul & "+command)},[this,&first](const std::string &line){if(first){first=false;return;}log(line);},stopping,true,true);
-                log("Команда завершена: код "+std::to_string(result.code));
-            });
+            else if(normalized=="/help")log("Команды Windows и утилиты StreamShelf: yt-dlp, ffmpeg, ffprobe, deno. /clear очищает журнал. Каждая команда запускается отдельно.");
+            else if(!normalized.empty()){
+                auto cancel=std::make_shared<std::atomic_bool>(false);
+                terminalCancel=cancel;
+                work([this,command,cancel]{
+                    auto finished=[this]{post([this]{terminalCancel.reset();});};
+                    try {
+                        wchar_t shell[MAX_PATH]{};
+                        if(!GetSystemDirectoryW(shell,MAX_PATH))throw std::runtime_error("Не найден системный командный процессор");
+                        auto exe=fs::path(shell)/L"cmd.exe";log("> "+command);
+                        bool first=true;
+                        auto result=runProcess(exe,{L"/d",L"/s",L"/c",wide("chcp 65001>nul & "+command)},
+                            [this,&first](const std::string &line){if(first){first=false;return;}log(line);},
+                            *cancel,true,true,dataRoot()/L"tools");
+                        log(*cancel?"Команда прервана":"Команда завершена: код "+std::to_string(result.code));
+                    } catch (...) {finished();throw;}
+                    finished();
+                });
+            }
         } else if (cmd == "clearLogs")
             logs.clear();
         else if (cmd == "selectAllJobs") {
             selectedJobs.clear();
             for (const auto &j : jobs) selectedJobs.insert(j->id);
-        } else if (cmd == "clearSelectedJobs" || cmd == "clearFinishedJobs") {
-            size_t removed = 0;
+        } else if (cmd == "clearSelectedJobs" || cmd == "clearFinishedJobs" || cmd == "removeJob" || cmd == "cancelJob" || cmd == "cancelSelectedJobs") {
+            size_t removed=0, cancelled=0;
+            const bool cancelOnly=cmd=="cancelJob" || cmd=="cancelSelectedJobs";
             {
-                std::lock_guard l(jobsMutex);
-                // Preserve resolved source paths in waiting assemblies before removing history rows.
-                for(const auto &child:jobs) if(child->done && (child->state=="Готово"||child->state=="Ошибка"||child->state=="Отменено"||child->state=="Ожидание повтора") && (cmd=="clearFinishedJobs" || selectedJobs.count(child->id))) {
-                    for(const auto &parent:jobs) if(!parent->done && parent->waitingSources)
-                        for(auto &source:parent->sources) if(source.dependency==child->id) {
-                            if(child->state=="Готово" && !child->output.empty() && fs::is_regular_file(wide(child->output)))source.path=child->output;
-                            else source.path.clear();
-                            source.dependency.clear();
-                        }
+                std::lock_guard lock(jobsMutex);
+                std::set<std::string> targets;
+                for(const auto &job:jobs) {
+                    const bool terminal=job->done && (job->state=="Готово" || job->state=="Ошибка" ||
+                        job->state=="Отменено" || job->state=="Ожидание повтора");
+                    const bool chosen=(cmd=="removeJob" || cmd=="cancelJob")?job->id==selectedJob:
+                        cancelOnly?(selectedJobs.empty()?job->id==selectedJob:selectedJobs.count(job->id)!=0):
+                        cmd=="clearFinishedJobs"?terminal:selectedJobs.count(job->id)!=0;
+                    if(chosen)targets.insert(job->id);
                 }
-                std::set<std::string> dependencies;
-                for(const auto &parent:jobs)if(!parent->done && parent->waitingSources)for(const auto &source:parent->sources)if(!source.dependency.empty())dependencies.insert(source.dependency);
-                jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [&](const auto &j) {
-                    bool referenced = dependencies.count(j->id)!=0;
-                    bool terminal=j->state=="Готово"||j->state=="Ошибка"||j->state=="Отменено"||j->state=="Ожидание повтора";
-                    bool erase = !referenced && j->done && terminal && (cmd == "clearFinishedJobs" || selectedJobs.count(j->id));
-                    if (erase) { selectedJobs.erase(j->id); if (selectedJob == j->id) selectedJob.clear(); ++removed; }
-                    return erase;
-                }), jobs.end());
+                std::set<std::string> retainedDependencies;
+                for(const auto &job:jobs)if(!targets.count(job->id) && !job->done)
+                    for(const auto &source:job->sources)if(!source.dependency.empty())
+                        retainedDependencies.insert(source.dependency);
+                std::set<std::string> stop=targets;
+                for(const auto &job:jobs)if(targets.count(job->id) && job->assembly && !job->done)
+                    for(const auto &source:job->sources)
+                        if(!source.dependency.empty() && !retainedDependencies.count(source.dependency))
+                            stop.insert(source.dependency);
+                for(const auto &job:jobs)if(stop.count(job->id) && !job->done){
+                    job->cancel=true;
+                    ++cancelled;
+                    if(!job->claimed){
+                        job->done=true;
+                        job->state="Отменено";
+                    }
+                }
+                if(!cancelOnly){
+                    for(const auto &child:jobs)if(targets.count(child->id)){
+                        for(const auto &parent:jobs)if(!targets.count(parent->id) && !parent->done && parent->waitingSources)
+                            for(auto &source:parent->sources)if(source.dependency==child->id){
+                                if(child->state=="Готово" && !child->output.empty() && fs::is_regular_file(wide(child->output)))
+                                    source.path=child->output;
+                                else source.path.clear();
+                                source.dependency.clear();
+                            }
+                        selectedJobs.erase(child->id);
+                        if(selectedJob==child->id)selectedJob.clear();
+                    }
+                    removed=std::erase_if(jobs,[&](const auto &job){return targets.count(job->id)!=0;});
+                }
             }
+            jobsCv.notify_all();
             saveHistory();
-            notify(removed ? "Записи удалены. Скачанные файлы сохранены." : "Нет завершённых записей для удаления");
-        } else if (cmd == "cancelJob" || cmd == "retryJob" || cmd == "openJobFolder" || cmd == "openJobFile" ||
-                 cmd == "removeJob") {
+            if(cancelOnly)notify(cancelled?"Остановка задач: "+std::to_string(cancelled):"Нет активных или ожидающих задач");
+            else notify(removed?"Удалено записей: "+std::to_string(removed)+". Файлы сохранены.":"Нет записей для удаления");
+        } else if (cmd == "retryJob" || cmd == "openJobFolder" || cmd == "openJobFile") {
             for (auto &j : jobs)
                 if (j->id == selectedJob) {
-                    if (cmd == "cancelJob") {
-                        j->cancel = true;
-                        if(j->assembly)for(const auto &source:j->sources)for(const auto &child:jobs)if(child->id==source.dependency&&!child->done){child->cancel=true;if(!child->claimed){child->done=true;child->state="Отменено";}}
-                        if (!j->claimed) {
-                            j->done = true;
-                            j->state = "Отменено";
-                        }
-                    } else if (cmd == "retryJob" && j->assembly && j->done) {
+                    if (cmd == "retryJob" && j->assembly && j->done) {
                         requireAvailableCodecs(j);
                         std::lock_guard queueLock(jobsMutex);
                         j->waitingSources=true; j->cancel=false; j->done=false; j->claimed=false; j->decisionNeeded=false; j->prompted=false;
@@ -1478,7 +1673,8 @@ void App::action(const std::string &cmd) {
                     } else if (cmd == "retryJob" && j->done &&
                                (j->state == "Ошибка" || j->state == "Отменено" ||
                                 j->state == "Ожидание повтора")) {
-                        j->session = session();
+                        std::lock_guard queueLock(jobsMutex);
+                        if (!j->session) j->session = session();
                         j->cancel = false;
                         j->done = false;
                         j->claimed = false;
@@ -1493,16 +1689,6 @@ void App::action(const std::string &cmd) {
                     else if (cmd == "openJobFile" && j->state == "Готово") {
                         if (!j->output.empty() && fs::is_regular_file(wide(j->output))) openPath(wide(j->output));
                         else notify("Итоговый файл не найден. Откройте папку загрузки.");
-                    } else if (cmd == "removeJob" && j->done && (j->state=="Готово"||j->state=="Ошибка"||j->state=="Отменено"||j->state=="Ожидание повтора")) {
-                        std::lock_guard l(jobsMutex);
-                        for(const auto &parent:jobs)if(!parent->done && parent->waitingSources)for(auto &source:parent->sources)if(source.dependency==j->id){
-                            if(j->state=="Готово"&&!j->output.empty()&&fs::is_regular_file(wide(j->output)))source.path=j->output;else source.path.clear();
-                            source.dependency.clear();
-                        }
-                        auto target = j;
-                        selectedJobs.erase(j->id);
-                        selectedJob.clear();
-                        jobs.erase(std::remove(jobs.begin(), jobs.end(), target), jobs.end());
                     }
                     break;
                 }

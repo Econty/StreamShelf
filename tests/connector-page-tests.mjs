@@ -1,8 +1,8 @@
 import vm from 'node:vm';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-const source=fs.readFileSync('extension/chromium/popup.js','utf8');
-const html=fs.readFileSync('extension/chromium/popup.html','utf8');
+const source=fs.readFileSync('extension/chromium-development/popup.js','utf8');
+const html=fs.readFileSync('extension/chromium-development/popup.html','utf8');
 assert.match(html,/>Подключить расширение<\/button>/);
 assert.doesNotMatch(html,/Подключить текущую вкладку|<select/i);
 for(const mode of ['ordinary','internal-page','no-http-tabs','denied-then-retry']){

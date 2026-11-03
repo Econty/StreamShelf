@@ -17,10 +17,10 @@ for(const family of ['chromium','firefox']){
   const context=vm.createContext({chrome:api,URL,Map,Set,WeakMap,JSON,console,location:{href:'https://example.org/messages'},setTimeout:fn=>{timers.set(++serial,fn);return serial;},clearTimeout:id=>timers.delete(id),document:{documentElement:{},querySelectorAll:selector=>selector==='script'?scripts:nodes,addEventListener:(name,fn)=>events.set(name,fn),removeEventListener:(name,fn)=>{if(events.get(name)===fn)events.delete(name);}},performance:{getEntriesByType:()=>timings},MutationObserver:class{constructor(fn){this.fn=fn;this.closed=false;mutations.push(this);}observe(){}disconnect(){this.closed=true;}},PerformanceObserver:class{constructor(fn){this.fn=fn;this.closed=false;observers.push(this);}observe(){}disconnect(){this.closed=true;}}});
   const backend={runtime:{onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),connectNative:()=>({postMessage:m=>native.push(m),onDisconnect:event('disconnect'),onMessage:event('native')})},storage:{local:{get:async()=>({instanceId:'test'}),set:async()=>{}}},tabs:{get:async id=>({id,url:'https://example.org/messages'}),query:async()=>[],reload:async()=>{},sendMessage:async()=>{},onActivated:event('activated'),onUpdated:event('updated'),onRemoved:event('removed')},windows:{WINDOW_ID_NONE:-1,onFocusChanged:event('focus')},alarms:{create:()=>{},onAlarm:event('alarm')},permissions:{contains:async()=>true},scripting:{executeScript:async()=>{}},webRequest:{onBeforeSendHeaders:event('request'),onHeadersReceived:event('response'),onErrorOccurred:event('error')}};
   const bg=vm.createContext({chrome:backend,URL,Map,Set,crypto:globalThis.crypto,navigator:{userAgent:'Yandex/test'}});
-  vm.runInContext(fs.readFileSync(`extension/${family}/background.js`,'utf8'),bg);
+  vm.runInContext(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/background.js`,'utf8'),bg);
   await new Promise(resolve=>listeners.message({type:'connectTab',tabId:7},{},resolve));
   await vm.runInContext('handleCommand({type:"scanStart",tabId:7})',bg);
-  const source=fs.readFileSync(`extension/${family}/content.js`,'utf8');
+  const source=fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/content.js`,'utf8');
   vm.runInContext(source,context);
   let resources=()=>native.filter(m=>m.type==='resource');
   let has=path=>resources().some(m=>m.item.url===`https://media.example/${path}`);

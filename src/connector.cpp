@@ -117,29 +117,41 @@ Json Session::credentials(const std::string &url, std::atomic_bool &cancel) {
     static std::atomic_uint64_t serial{0};
     std::string request = std::to_string(++serial);
     int selected;
+    uint64_t epoch;
     {
         std::lock_guard l(mutex);
         selected = tab;
+        epoch = credentialEpoch;
     }
-    send({{"type", "credentials"}, {"requestId", request}, {"tabId", selected}, {"url", url}});
-    std::unique_lock l(mutex);
-    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(25);
-    while (alive && !cancel && !replies.count(request)) {
-        if (cv.wait_for(l, std::chrono::milliseconds(100)) == std::cv_status::timeout &&
-            std::chrono::steady_clock::now() > until)
-            throw std::runtime_error("Расширение не ответило на запрос cookies");
+    if (cancel) throw std::runtime_error("Отменено");
+    try {
+        send({{"type", "credentials"}, {"requestId", request}, {"tabId", selected}, {"url", url}});
+        std::unique_lock l(mutex);
+        auto until = std::chrono::steady_clock::now() + std::chrono::seconds(25);
+        while (alive && !cancel && !replies.count(request)) {
+            if (cv.wait_for(l, std::chrono::milliseconds(100)) == std::cv_status::timeout &&
+                std::chrono::steady_clock::now() > until)
+                throw std::runtime_error("Расширение не ответило на запрос cookies");
+        }
+        if (cancel)
+            throw std::runtime_error("Отменено");
+        if (!replies.count(request))
+            throw std::runtime_error("Браузерная сессия закрыта");
+        auto result = replies[request];
+        replies.erase(request);
+        if (str(result, "type") == "error")
+            throw std::runtime_error(str(result, "message", "Ошибка расширения"));
+        if (str(result, "url") != url)
+            throw std::runtime_error("Адрес снимка cookies не совпал");
+        if (epoch == credentialEpoch) credentialSnapshots.insert_or_assign(url, result);
+        return result;
+    } catch (...) {
+        if (cancel) throw;
+        std::lock_guard lock(mutex);
+        auto cached = credentialSnapshots.find(url);
+        if (epoch == credentialEpoch && cached != credentialSnapshots.end()) return cached->second;
+        throw;
     }
-    if (cancel)
-        throw std::runtime_error("Отменено");
-    if (!replies.count(request))
-        throw std::runtime_error("Браузерная сессия закрыта");
-    auto result = replies[request];
-    replies.erase(request);
-    if (str(result, "type") == "error")
-        throw std::runtime_error(str(result, "message", "Ошибка расширения"));
-    if (str(result, "url") != url)
-        throw std::runtime_error("Адрес снимка cookies не совпал");
-    return result;
 }
 void Connector::start() {
     acceptThread = std::thread([this] {
@@ -283,7 +295,7 @@ void updateConnectorExtensions(const fs::path &app) {
         ext = app.parent_path() / L"extension";
     // Firefox is installed from the signed XPI in the application bundle.
     // Its native host registration only needs FirefoxId, not unpacked sources.
-    auto source = ext / L"chromium";
+    auto source = ext / L"chromium-development";
     for (auto name : {L"manifest.json", L"background.js", L"content.js"})
         if (!fs::is_regular_file(source / name))
             throw std::runtime_error("В сборке отсутствует файл расширения Chromium: " + utf8(name));

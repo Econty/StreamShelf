@@ -60,7 +60,7 @@ void App::addLocalFiles(const std::vector<std::string> &paths) {
                     std::atomic_bool cancelled{false},finished{false};
                     std::thread watchdog([&]{for(int n=0;n<150&&!finished&&!stopping;++n)Sleep(100);if(!finished)cancelled=true;});
                     ProcessResult result{};
-                    try {std::shared_lock lock(toolsMutex);result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_entries",L"stream=codec_name,codec_type:stream_disposition=attached_pic",L"-of",L"json",path.wstring()},nullptr,cancelled,true);}
+                    try {std::shared_lock lock(toolsMutex);result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_entries",L"stream=codec_name,codec_type,width,height,avg_frame_rate:stream_tags=language:stream_disposition=attached_pic:format=duration,bit_rate",L"-of",L"json",path.wstring()},nullptr,cancelled,true);}
                     catch(...){finished=true;watchdog.join();throw;}
                     finished=true;watchdog.join();if(stopping)break;
                     auto data=Json::parse(result.output,nullptr,false);
@@ -72,6 +72,23 @@ void App::addLocalFiles(const std::vector<std::string> &paths) {
                         if(type=="subtitle")sub=true;
                     }
                     if(!video&&!audio&&!sub){++rejected;continue;}
+                    auto format=data.value("format",Json::object());
+                    item.data=Json{{"duration",muxDuration(format)}};
+                    try { item.rate=std::stod(str(format,"bit_rate"))/1000; } catch(...) {}
+                    for(const auto &stream:data["streams"]){
+                        auto tags=stream.value("tags",Json::object());
+                        if(item.language.empty())item.language=str(tags,"language");
+                        if(!item.quality.empty() || str(stream,"codec_type")!="video" ||
+                           number(stream.value("disposition",Json::object()),"attached_pic")==1) continue;
+                        int w=int(number(stream,"width")),h=int(number(stream,"height"));
+                        if(w>0 && h>0)item.quality=std::to_string(w)+"×"+std::to_string(h);
+                        auto rate=str(stream,"avg_frame_rate");
+                        auto slash=rate.find('/');
+                        if(slash!=std::string::npos)try{
+                            double denominator=std::stod(rate.substr(slash+1));
+                            if(denominator>0)item.fps=std::stod(rate.substr(0,slash))/denominator;
+                        }catch(...) {}
+                    }
                     item.category=video?"Видео":audio?"Аудио":"Субтитры";item.videoOnly=video&&!audio;if(video&&!audio)item.acodec="none";
                 }
                 std::error_code ec;auto size=fs::file_size(path,ec);if(!ec)item.size=double(size);

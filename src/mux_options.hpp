@@ -2,6 +2,12 @@
 #include "core.hpp"
 namespace ss {
 struct MuxOptions { int container = 0, video = 0, audio = 0, subtitles = 0; };
+inline bool supportsExtendedTrackTags(int container) {
+    return container == 0 || container == 3;
+}
+inline bool supportsForcedSubtitles(int container) {
+    return container == 0 || container == 1 || container == 3;
+}
 inline std::string muxContainer(const MuxOptions &o) {
     static const char *v[] = {"mkv", "mp4", "mov", "webm"};
     if (o.container < 0 || o.container >= 4) throw std::runtime_error("Неизвестный контейнер");

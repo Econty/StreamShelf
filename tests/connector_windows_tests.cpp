@@ -135,6 +135,26 @@ void identityAndRetry() {
     check("stale and wrong pong do not confirm", !session.acceptVerification(oldId) && !session.acceptVerification("wrong") && !session.verified);
     check("matching pong confirms exactly once", session.acceptVerification(newId) && session.verified && !session.acceptVerification(newId));
     check("matching pong records the time for connection expiry", session.lastPong > 0 && session.lastPong <= GetTickCount64());
+    std::atomic_bool cancel{false};
+    const std::string url="https://example.test/video?token=one";
+    auto request=[&](const std::string &target, Json reply) {
+        auto pending=std::async(std::launch::async,[&]{return session.credentials(target,cancel);});
+        auto frame=receive();
+        {
+            std::lock_guard lock(session.mutex);
+            session.replies[str(frame,"requestId")]=std::move(reply);
+        }
+        session.cv.notify_all();
+        return pending.get();
+    };
+    auto firstSnapshot=request(url,{{"url",url},{"headers",{{"Referer","https://example.test/"}}}});
+    auto cached=request(url,{{"type","error"},{"message","tab changed"}});
+    check("exact resource snapshot survives a tab change",cached==firstSnapshot);
+    bool rejected=false;
+    try { request("https://example.test/video?token=two",{{"type","error"},{"message","tab changed"}}); }
+    catch(const std::exception &) { rejected=true; }
+    check("different resource URL cannot reuse a snapshot",rejected);
+
 }
 #endif
 }

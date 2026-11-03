@@ -1,5 +1,6 @@
 #include "app.hpp"
 #include "media_display.hpp"
+#include "language_options.hpp"
 #include <windowsx.h>
 #include <set>
 #include <numeric>
@@ -77,11 +78,125 @@ void UI::toggle(const std::string &id, Rect r, bool on, std::function<void()> f)
     c.circle(r.x + r.h / 2 + v * (r.w - r.h), r.y + r.h / 2, (r.h / 2 - 3) * (1 + p * .08f), hex(0xf4fffd));
     hit(id, r, std::move(f));
 }
+static std::vector<std::pair<std::string,std::string>> terminalCompletions(const std::string &value) {
+    static const std::vector<std::string> commands={
+        "yt-dlp", "ffmpeg", "ffprobe", "deno", "assoc", "attrib", "call", "cd", "chcp", "chdir", "choice", "cls", "cmd", "color", "copy", "date", "del", "dir", "echo", "endlocal", "erase", "exit", "fc", "find", "findstr", "for", "ftype", "help", "if", "ipconfig", "md", "mkdir", "more", "move", "path", "pause", "ping", "popd", "pushd", "rd", "ren", "rename", "rmdir", "robocopy", "set", "setlocal", "sort", "start", "systeminfo", "tasklist", "time", "timeout", "title", "tree", "type", "ver", "where", "whoami", "xcopy", "/help", "/clear"
+    };
+    static const std::map<std::string,std::vector<std::string>> flags={
+        {"yt-dlp",{"--version","--help","--list-formats","--dump-json","--no-playlist","--output","--format"}},
+        {"ffmpeg",{"-version","-help","-formats","-codecs","-encoders","-i","-hide_banner"}},
+        {"ffprobe",{"-version","-help","-show_streams","-show_format","-show_chapters","-of json","-v error"}},
+        {"deno",{"--version","--help","run","info","eval","fmt","lint","test","task","install"}},
+        {"dir",{"/a","/b","/d","/l","/o","/p","/q","/s","/t","/w","/x","/4","/?"}},
+        {"cd",{"/d","/?"}}, {"chdir",{"/d","/?"}},
+        {"copy",{"/a","/b","/d","/v","/y","/-y","/z","/?"}},
+        {"del",{"/p","/f","/s","/q","/a","/?"}},
+        {"findstr",{"/b","/e","/l","/r","/s","/i","/x","/v","/n","/m","/o","/p","/f:","/c:","/g:","/d:","/?"}},
+        {"where",{"/r","/q","/f","/t","/?"}},
+        {"robocopy",{"/s","/e","/copy:","/dcopy:","/r:","/w:","/mt","/l","/xj","/?"}},
+        {"xcopy",{"/s","/e","/d","/i","/v","/f","/l","/h","/k","/y","/-y","/?"}},
+        {"ipconfig",{"/all","/release","/renew","/flushdns","/displaydns","/?"}},
+        {"ping",{"-t","-a","-n","-l","-4","-6","/?"}},
+        {"tasklist",{"/v","/fo","/fi","/nh","/svc","/?"}},
+        {"tree",{"/f","/a","/?"}}, {"more",{"/e","/c","/p","/s","/t","/?"}},
+        {"set",{"/a","/p","/?"}}, {"cmd",{"/c","/k","/d","/s","/q","/v:on","/v:off","/?"}}
+    };
+    auto lower=value;
+    std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char c){return char(std::tolower(c));});
+    auto first=lower.find_first_not_of(" \t");
+    if(first==std::string::npos) return {};
+    auto space=lower.find_first_of(" \t",first);
+    std::vector<std::pair<std::string,std::string>> result;
+    if(space==std::string::npos){
+        for(const auto &command:commands)
+            if(command.starts_with(lower.substr(first)) && command!=lower.substr(first))
+                result.emplace_back(value.substr(0,first)+command,command);
+    } else if(auto it=flags.find(lower.substr(first,space-first));it!=flags.end()){
+        auto token=lower.find_last_of(" \t")+1;
+        if(token==value.size() || lower[token]=='-' || lower[token]=='/' || it->first=="deno")
+            for(const auto &flag:it->second)
+                if(flag.starts_with(lower.substr(token)) && flag!=lower.substr(token))
+                    result.emplace_back(value.substr(0,token)+flag,flag);
+    }
+    if(result.size()>6) result.resize(6);
+    return result;
+}
 void UI::input(const std::string &id, Rect r, std::string &value, const std::string &placeholder) {
+    bool invalid = false;
+    if (!value.empty() && id.rfind("track:", 0) == 0) {
+        if (id == "track:language") {
+            auto textValue = wide(value);
+            invalid = normalizedLanguage(value) == "und" &&
+                CompareStringOrdinal(textValue.c_str(), -1, L"und", -1, TRUE) != CSTR_EQUAL &&
+                CompareStringOrdinal(textValue.c_str(), -1, L"Не определён", -1, TRUE) != CSTR_EQUAL &&
+                CompareStringOrdinal(textValue.c_str(), -1, L"Undetermined", -1, TRUE) != CSTR_EQUAL;
+        } else if (id == "track:date") {
+            static const std::regex format(R"(^([0-9]{4})(-([0-9]{2})-([0-9]{2}))?$)");
+            std::smatch match;
+            invalid = !std::regex_match(value, match, format);
+            if (!invalid) {
+                int year = std::stoi(match[1]);
+                invalid = year == 0;
+                if (match[2].matched) {
+                    int month = std::stoi(match[3]), day = std::stoi(match[4]);
+                    int days[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+                    if (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) days[1] = 29;
+                    invalid = invalid || month < 1 || month > 12 || day < 1 || (month >= 1 && month <= 12 && day > days[month-1]);
+                }
+            }
+        } else {
+            int limit = id == "track:bitrate" || id == "track:maxrate" ? 1000000 :
+                        id == "track:bufsize" ? 2000000 : id == "track:samplerate" ? 384000 :
+                        id == "track:framerate" ? 240 : id == "track:width" ? 16384 : 0;
+            if (limit) {
+                invalid = value.size() > 7 || !std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isdigit(ch); });
+                if (!invalid) { int n = std::stoi(value); invalid = n < 1 || n > limit; }
+            }
+        }
+    }
     bool f = focus == id;
+    if (f && app.constructorOpen && id.rfind("track:", 0) == 0 && r.move(c.offsetX, c.offsetY).intersect(c.clip()).h > 0) {
+        std::vector<std::pair<std::string, std::string>> options;
+        if (id == "track:language") {
+            for (const auto &[code, label] : trackLanguages())
+                if (!code.empty()) options.emplace_back(code, label + " · " + code);
+        } else {
+            std::vector<std::string> values;
+            if (id == "track:samplerate") values = {"44100", "48000", "88200", "96000"};
+            else if (id == "track:framerate") values = {"24", "25", "30", "50", "60"};
+            else if (id == "track:width") values = {"640", "854", "1280", "1920", "2560", "3840"};
+            else if (id == "track:bitrate") {
+                bool audio = app.draftSelection >= 0 && app.draftSelection < int(app.draft.size()) && app.draft[app.draftSelection].role == 1;
+                values = audio ? std::vector<std::string>{"96", "128", "192", "256", "320"} : std::vector<std::string>{"1000", "2500", "5000", "8000", "12000"};
+            }
+            for (const auto &option : values) options.emplace_back(option, option);
+        }
+        auto query = wide(value);
+        for (auto &ch : query) ch = std::towlower(ch);
+        std::vector<std::pair<std::string, std::string>> matches;
+        for (const auto &option : options) {
+            auto label = wide(option.second);
+            for (auto &ch : label) ch = std::towlower(ch);
+            if (query.empty() || label.find(query) != std::wstring::npos) matches.push_back(option);
+            if (matches.size() == 6) break;
+        }
+        if (suggestionField != id) { suggestionIndex = 0; suggestionDismissedValue.reset(); }
+        suggestionField = id;
+        suggestionAnchor = r.move(c.offsetX, c.offsetY);
+        suggestions = std::move(matches);
+        if (suggestionDismissedValue == value) suggestions.clear();
+        suggestionIndex = std::clamp(suggestionIndex, 0, std::max(0, int(suggestions.size()) - 1));
+    }
+    if(f && id=="terminal:command"){
+        if(suggestionField!=id){suggestionIndex=0;suggestionDismissedValue.reset();}
+        suggestionField=id;
+        suggestionAnchor=r.move(c.offsetX,c.offsetY);
+        suggestions=suggestionDismissedValue==value?std::vector<std::pair<std::string,std::string>>{}:terminalCompletions(value);
+        suggestionIndex=std::clamp(suggestionIndex,0,std::max(0,int(suggestions.size())-1));
+    }
     float focused = to(id + ":focus", f ? 1 : 0), h = hover(id, r);
     c.glow({r.x - 10, r.y - 10, r.w + 20, r.h + 20}, accent.alpha(focused * .08f));
-    c.border(r, 13, mix(edge, accent, std::max(focused, h * .3f)), panel);
+    c.border(r, 13, invalid ? hex(0xff6b6b) : mix(edge, accent, std::max(focused, h * .3f)), panel);
     auto w = wide(value);
     auto &caret = carets[id];
     auto &anchor = anchors[id];
@@ -221,7 +336,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
         c.circle(cx + 11, cy - 105 + drift, 2.5f + pulse, hex(0x8be2d1));
         centered("KRECHETOV LABS", cy - 48, 13, hex(0x8be2d1));
         centered("StreamShelf", cy + 5, 36, hex(0xeef3fc));
-        centered("Версия 2.2 Beta", cy + 41, 12, hex(0x8999b4));
+        centered("Версия 2.2.1 Beta", cy + 41, 12, hex(0x8999b4));
         c.rect({cx - 50, cy + 69, 100, 2}, 1, hex(0x2a374b));
         c.rect({cx - 50, cy + 69, 100 * std::clamp(elapsedSeconds / float(app.splashSeconds), 0.f, 1.f), 2}, 1, hex(0x8be2d1));
         c.opacity = 1; c.render(); return;
@@ -329,7 +444,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     c.circle(40, height - 28, 3, app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady ? accent : muted);
     if(!compactMenu)c.text(app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady?"Браузер подключён":"Нет соединения",52,height-24,10,muted,150);
     if (!compactMenu) {
-        c.text("KRECHETOV LABS · StreamShelf 2.2 Beta", 25, height - 80, 9, muted, 195);
+        c.text("KRECHETOV LABS · StreamShelf 2.2.1 Beta", 25, height - 80, 9, muted, 195);
         c.text("Разработчик: Арсений Кречетов", 25, height - 59, 9, muted, 195);
     }
     float contentLeft=compactMenu?76.f:226.f;
@@ -449,6 +564,8 @@ std::vector<Media *> UI::filtered() {
         }
         return less;
     });
+    if (!cardView && mediaSelectedFirst)
+        std::stable_partition(out.begin(),out.end(),[](const Media *m){return m->selected;});
     return out;
 }
 void UI::startMediaAnalysis(bool deep) {
@@ -485,17 +602,16 @@ void UI::mediaPage(Rect r) {
         if (m.selected)
             selected++;
     c.text(std::to_string(selected) + " выбрано", r.x + r.w - 130, r.y + 65, 11, accent);
-    input("media:search", {r.x, r.y + 291 - saved, r.w - 410, 36}, app.search, "Поиск файлов…");
+    input("media:search", {r.x, r.y + 291 - saved, r.w - 454, 36}, app.search, "Поиск файлов…");
     std::vector<std::string> categories = {"Все категории", "Видео", "Аудио", "Субтитры", "Автосубтитры", "Превью", "HLS", "DASH", "Данные", "Изображения", "Защищённые", "Требуют проверки"};
-    choice("category", {r.x + r.w - 400, r.y + 291 - saved, 166, 36}, categories, app.category,
+    choice("category", {r.x + r.w - 444, r.y + 291 - saved, 166, 36}, categories, app.category,
            [this](int i) { app.category = i; });
-    button("selectall", {r.x + r.w - 224, r.y + 291 - saved, 94, 36}, "Выбрать все", [this] {
-        auto v = filtered();
-        bool all = std::all_of(v.begin(), v.end(), [](auto *m) { return m->selected; });
-        for (auto *m : v)
-            if (!m->drm)
-                m->selected = !all;
-    });
+    auto visible=filtered();
+    const bool selectable=std::any_of(visible.begin(),visible.end(),[](const auto *m){return !m->drm;});
+    const bool allMediaSelected=selectable && std::all_of(visible.begin(),visible.end(),[](const auto *m){return m->drm || m->selected;});
+    button("selectall", {r.x + r.w - 268, r.y + 291 - saved, 138, 36}, allMediaSelected?"Снять все галочки":"Выбрать все", [this,allMediaSelected] {
+        for (auto *m : filtered()) if (!m->drm) m->selected = !allMediaSelected;
+    },false,selectable);
     button("view",{r.x+r.w-120,r.y+291-saved,120,36},cardView?"Подробности":"Карточки",[this]{cardView=!cardView;mediaScroll.p.target=0;});
     Rect table{r.x, r.y + 342 - saved, r.w, std::max(100.f, r.h - 462 + saved)};
     card(table);
@@ -510,10 +626,9 @@ void UI::mediaPage(Rect r) {
             auto &m=*rows[i];Rect box{body.x+int(i%columns)*cellWidth,body.y+int(i/columns)*cellHeight-mediaScroll.p.value,cellWidth-10,cellHeight-10};
             if(box.y+box.h<body.y||box.y>body.y+body.h)continue;
             auto id="tile:"+m.key;
-            c.border(box,12,m.selected?accent:edge,panel,m.selected?3.5f:1.f);
-            Rect image{box.x+6,box.y+6,box.w-12,box.h-102};
+            collectionSurface(id,box,false,m.selected,i);
+            Rect image{box.x+6,box.y+6,box.w-12,box.h-122};
             previewTile(m,image);
-            if (m.selected) c.rect(box.inset(3.5f), 9, accent.alpha(.12f));
             auto name = m.format && m.page == app.analysis.page ? app.analysis.title : m.title;
             if (name.empty()) name = "Медиа " + std::to_string(i + 1);
             c.text(name,box.x+10,box.y+box.h-75,12,text,box.w-20);
@@ -566,6 +681,8 @@ void UI::mediaPage(Rect r) {
     c.rect({table.x + 1, table.y + 1, table.w - 2, 41}, 16, mix(panel, hex(0x26354b), .3f));
     const char *heads[] = {"Тип",   "Название / ID", "Качество", "FPS",    "Видео",
                            "Аудио", "Язык",          "kbps",     "Размер", "Протокол"};
+    selectionHeading("media:sort:checked",{table.x,table.y,columns[0],42},mediaSelectedFirst);
+    c.push({table.x+columns[0],headerClip.y,std::max(0.f,headerClip.w-columns[0]),headerClip.h});
     float x = table.x + columns[0] - hx;
     for (int i = 0; i < 10; i++) {
         float cw = columns[i + 1];
@@ -585,20 +702,16 @@ void UI::mediaPage(Rect r) {
         x += cw;
     }
     c.pop();
+    c.pop();
     auto rows = filtered();
     c.push(body);
     for (size_t i = 0; i < rows.size(); i++) {
         auto *m = rows[i];
         float target = float(i) * 49;
-        auto [y, created] = rowY.try_emplace(m->key, target);
-        float a = 1 - std::exp(-dt * 18);
-        y->second += (target - y->second) * a;
-        Rect row{body.x, body.y + y->second - mediaScroll.p.value, body.w, 46};
-        if (row.y + 49 < body.y || row.y > body.y + body.h)
-            continue;
-        auto id = "row:" + m->key;
-        float h = hover(id, row), sel = to(id + ":selected", app.selectedMedia == m->key ? 1 : 0);
-        c.rect(row, 9, mix(panel, accent, .025f + (i % 2) * .025f + h * .05f + sel * .06f));
+        auto id="row:"+m->key;
+        Rect row{body.x,body.y+collectionRowY(id,target)-mediaScroll.p.value,body.w,46};
+        if(row.y+49<body.y || row.y>body.y+body.h)continue;
+        collectionSurface(id,row,true,m->selected,i);
         hit(id, row, [this, key = m->key] { app.selectedMedia = key; });
         check(id + ":check", {row.x + 5, row.y, 30, row.h}, m->selected, [this, key = m->key] {
             for (auto &m : app.media)
@@ -735,18 +848,43 @@ void UI::browserPage(Rect r) {
     c.pop();
     scrollbar("browser:scroll", view, browserScroll);
 }
+void UI::collectionSurface(const std::string &id, Rect row, bool details, bool selected, size_t index) {
+    float h=hover(id,row);
+    float selectedMix=app.reduced?float(selected):to(id+":surface",selected?1.f:0.f);
+    if(details) {
+        c.rect(row,9,mix(panel,accent,.025f+(index%2)*.025f+h*.05f+selectedMix*.12f));
+    } else {
+        c.border(row,12,mix(edge,accent,selectedMix),mix(panel,accent,h*.035f),1.f+2.5f*selectedMix);
+    }
+}
+float UI::collectionRowY(const std::string &id,float target) {
+    auto &y=rowY.try_emplace(id,target).first->second;
+    y+=(target-y)*(app.reduced?1.f:1-std::exp(-dt*18));
+    return y;
+}
+void UI::selectionHeading(const std::string &id,Rect area,bool &selectedFirst) {
+    float h=hover(id,area);
+    c.rect(area.inset(3),7,accent.alpha((selectedFirst?.16f:0.f)+h*.07f));
+    c.text(selectedFirst?"✓ ↑":"✓",area.x+10,area.y+26,11,selectedFirst?accent:muted,area.w-12);
+    hit(id,area,[&selectedFirst]{selectedFirst=!selectedFirst;});
+}
 void UI::downloadsPage(Rect r) {
     c.text("Загрузки · "+std::to_string(app.jobs.size()), r.x, r.y + 28, 20, text, r.w - 400);
-    button("jobs:view", {r.x + r.w - 390, r.y + 8, 140, 38}, compactJobs ? "Карточки" : "Компактно", [this] { compactJobs = !compactJobs; jobsScroll.p.target = jobsScroll.p.value = 0; });
+    button("jobs:view", {r.x + r.w - 390, r.y + 8, 140, 38}, jobDetails ? "Карточки" : "Подробности", [this] { jobDetails = !jobDetails; jobsScroll.p.target = jobsScroll.p.value = 0; });
     choice(
         "parallel", {r.x + r.w - 240, r.y + 8, 240, 38},
         {"1 задача одновременно", "2 задачи одновременно", "3 задачи одновременно", "4 задачи одновременно"},
         app.getParallel() - 1, [this](int i) { app.setParallel(i + 1); });
     float topWidth = (r.w - 40) / 5;
-    button("jobs:selectAll", {r.x, r.y + 54, topWidth, 34}, "Выбрать все", [this] { app.action("selectAllJobs"); }, false, !app.jobs.empty());
+    const bool allJobsSelected=!app.jobs.empty() && std::all_of(app.jobs.begin(),app.jobs.end(),
+        [this](const auto &job){return app.selectedJobs.count(job->id)!=0;});
+    button("jobs:selectAll", {r.x,r.y+54,topWidth,34}, allJobsSelected?"Снять все галочки":"Выбрать все", [this,allJobsSelected] {
+        if(allJobsSelected) app.selectedJobs.clear();
+        else app.action("selectAllJobs");
+    },false,!app.jobs.empty());
     button("jobs:clearSelected", {r.x + topWidth + 10, r.y + 54, topWidth, 34}, "Убрать выбранные", [this] { app.action("clearSelectedJobs"); }, false, !app.selectedJobs.empty());
     button("jobs:clearFinished", {r.x + 2*(topWidth + 10), r.y + 54, topWidth, 34}, "Очистить завершённые", [this] { app.action("clearFinishedJobs"); }, false, !app.jobs.empty());
-    button("jobs:constructor", {r.x + 3*(topWidth + 10), r.y + 54, topWidth, 34}, "Конструктор", [this] { cancelInput(); app.openConstructor(true,true); });
+    button("jobs:constructor", {r.x + 3*(topWidth + 10), r.y + 54, topWidth, 34}, "Конструктор", [this] { cancelInput(); app.openConstructor(true); });
     button("jobs:addLocal", {r.x + 4*(topWidth + 10), r.y + 54, topWidth, 34}, "Добавить файлы", [this] { app.action("addLocalDownloads"); });
     float viewTop = 96;
     for(const auto &job:app.jobs)if(job->id==app.selectedJob&&job->assembly&&job->decisionNeeded){
@@ -775,64 +913,197 @@ void UI::downloadsPage(Rect r) {
         auto id=job->id;button("assembly:active:cancel",{r.x+r.w-196,r.y+120,180,38},"Отменить",[this,id]{app.selectedJob=id;app.action("cancelJob");});
         viewTop=228;break;
     }
-    Rect view{r.x, r.y + viewTop, r.w, std::max(40.f, r.h - viewTop - 58)};
-    float rowHeight = compactJobs ? 54.f : height < 900 ? 106.f : 124.f;
-    struct QueueRow {int group;float y;std::shared_ptr<Job> job;};
-    std::vector<QueueRow> rows;float totalHeight=0;
-    const std::string groupNames[]={"Загрузки", "Конвертация", "Файлы с компьютера", "Сборка контейнеров"};
-    auto groupFor=[](const std::shared_ptr<Job> &job){
-        if(job->localFile)return 2;
-        if(job->conversionSource||(job->assembly&&std::any_of(job->sources.begin(),job->sources.end(),[](const auto &source){return source.enabled&&source.codec>0;})))return 1;
-        return job->assembly||job->mux?3:0;
+    static constexpr std::array<const char *, 11> headings={
+        "Название", "Статус", "Тип", "Формат", "Качество", "Кодеки", "Язык", "Размер", "Длительность", "Готово", "Протокол"
     };
-    for(int group=0;group<4;++group){
-        bool first=true;for(const auto &job:app.jobs)if(groupFor(job)==group){
-            if(first){rows.push_back({group,totalHeight,{}});totalHeight+=34;first=false;}
-            rows.push_back({group,totalHeight,job});totalHeight+=rowHeight;
+    static constexpr std::array<float, 11> widths={.195f,.135f,.08f,.06f,.105f,.10f,.05f,.065f,.075f,.065f,.07f};
+    const std::array<const char *, 4> groupNames={"Загрузки", "Конвертация", "Файлы с компьютера", "Сборка контейнеров"};
+    struct QueueRow {
+        std::shared_ptr<Job> job;
+        int group;
+        float y=0;
+        int slot=0;
+        std::array<std::string, headings.size()> values{};
+        double duration=0;
+    };
+    auto groupFor=[](const Job &job){
+        if(job.localFile)return 2;
+        if(job.conversionSource||(job.assembly&&std::any_of(job.sources.begin(),job.sources.end(),[](const auto &source){return source.enabled&&source.codec>0;})))return 1;
+        return job.assembly||job.mux?3:0;
+    };
+    std::vector<QueueRow> rows;
+    rows.reserve(app.jobs.size());
+    for (const auto &job : app.jobs) {
+        QueueRow row{job,groupFor(*job)};
+        const auto &m=job->item;
+        std::string format=m.ext;
+        if(!job->output.empty()){
+            auto extension=utf8(fs::path(wide(job->output)).extension().wstring());
+            if(extension.size()>1)format=extension.substr(1);
+        } else if((job->assembly || job->mux) && job->muxOptions.container>=0 && job->muxOptions.container<4) {
+            format=muxContainer(job->muxOptions);
+        }
+        std::string codecs;
+        if(!m.vcodec.empty() && m.vcodec!="none") codecs=m.vcodec;
+        if(!m.acodec.empty() && m.acodec!="none") codecs+=(codecs.empty()?"":" / ")+m.acodec;
+        std::string quality=m.quality;
+        if(m.fps>0)quality+=(quality.empty()?"":" · ")+std::to_string(int(m.fps))+" FPS";
+        if(m.rate>0 && m.rate<1e9)quality+=(quality.empty()?"":" · ")+std::to_string(int(m.rate))+" кбит/с";
+        row.duration=number(m.data,"duration");
+        std::string duration;
+        if(row.duration>0 && row.duration<1e10){
+            auto seconds=static_cast<long long>(row.duration);
+            duration=std::to_string(seconds/60)+":"+(seconds%60<10?"0":"")+std::to_string(seconds%60);
+        }
+        row.values={job->title,job->state,m.category,std::move(format),std::move(quality),std::move(codecs),
+                    m.language,m.size>0?sizeText(m.size,m.approx):"",std::move(duration),
+                    job->percent>=0?std::to_string(int(std::clamp(job->percent,0.,100.)))+"%":"",m.protocol};
+        rows.push_back(std::move(row));
+    }
+    if(jobDetails){
+        std::stable_sort(rows.begin(),rows.end(),[this](const QueueRow &a,const QueueRow &b){
+            auto column=jobSortColumn;
+            int order=0;
+            if(column>=7 && column<=9){
+                auto value=[column](const QueueRow &row){
+                    if(column==7)return row.job->item.size;
+                    if(column==8)return row.duration;
+                    return row.job->percent;
+                };
+                double left=value(a),right=value(b);
+                order=left<right?-1:left>right?1:0;
+            } else {
+                auto left=wide(a.values[column]),right=wide(b.values[column]);
+                order=CompareStringOrdinal(left.c_str(),-1,right.c_str(),-1,TRUE)-CSTR_EQUAL;
+            }
+            return jobsDescending?order>0:order<0;
+        });
+        if(jobsSelectedFirst)std::stable_partition(rows.begin(),rows.end(),[this](const QueueRow &row){
+            return app.selectedJobs.count(row.job->id)!=0;
+        });
+    } else {
+        std::stable_sort(rows.begin(),rows.end(),[](const QueueRow &a,const QueueRow &b){return a.group<b.group;});
+    }
+    const float rowHeight=jobDetails?49.f:(height<760?234.f:258.f);
+    const float headerHeight=jobDetails&&!rows.empty()?42.f:0.f;
+    Rect view{r.x,r.y+viewTop+headerHeight,r.w,std::max(40.f,r.h-viewTop-headerHeight-58)};
+    float totalHeight=0;
+    int previous=-1, slot=0;
+    const int cardsPerRow=jobDetails?1:std::max(1,int((r.w-18)/224));
+    for(auto &row:rows){
+        if(!jobDetails && row.group!=previous){
+            if(slot){totalHeight+=rowHeight;slot=0;}
+            totalHeight+=34;
+            previous=row.group;
+        }
+        row.y=totalHeight;
+        row.slot=slot++;
+        if(slot==cardsPerRow){totalHeight+=rowHeight;slot=0;}
+    }
+    if(slot)totalHeight+=rowHeight;
+    jobsScroll.bounds(totalHeight,view.h);
+    const float rowWidth=r.w-(jobsScroll.maximum>0?18.f:0.f);
+    const float cardWidth=(rowWidth-(cardsPerRow-1)*10)/cardsPerRow;
+    const float columnsWidth=rowWidth-42;
+    if(headerHeight>0){
+        Rect header{view.x,view.y-headerHeight,rowWidth,headerHeight};
+        c.rect(header,16,mix(panel,hex(0x26354b),.3f));
+        selectionHeading("jobs:sort:checked",{header.x,header.y,42,header.h},jobsSelectedFirst);
+        float x=header.x+42;
+        for(int i=0;i<int(headings.size());++i){
+            float w=columnsWidth*widths[i];
+            bool selected=jobSortColumn==i;
+            float h=hover("job:sort:"+std::to_string(i),{x,header.y,w,header.h});
+            c.rect({x,header.y+3,w-4,35},7,accent.alpha(h*.07f));
+            c.text(std::string(headings[i])+(selected?(jobsDescending?" ↓":" ↑"):""),x+4,header.y+27,10,selected?accent:muted,w-7);
+            hit("job:sort:"+std::to_string(i),{x,header.y,w,header.h},[this,i]{
+                jobsDescending=jobSortColumn==i?!jobsDescending:false;
+                jobSortColumn=i;
+                jobsScroll.p.target=jobsScroll.p.value=0;
+            });
+            x+=w;
         }
     }
-    jobsScroll.bounds(totalHeight, view.h);
     c.push(view);
-    if (app.jobs.empty()) {
-        card({r.x, view.y + 4, r.w, 170});
-        c.text("Здесь появятся ваши загрузки", r.x + 28, view.y + 55, 22, text);
-        c.text("Выберите медиа в обзоре или перетащите сюда файлы из Проводника.", r.x + 28, view.y + 91, 13, muted);
+    if(rows.empty()){
+        card({r.x,view.y+4,r.w,170});
+        c.text("Здесь появятся ваши загрузки",r.x+28,view.y+55,22,text);
+        c.text("Выберите медиа в обзоре или перетащите сюда файлы из Проводника.",r.x+28,view.y+91,13,muted);
     }
-    for (const auto &entry:rows) {
-        if(!entry.job){float y=view.y+entry.y-jobsScroll.p.value;if(y+34>=view.y&&y<view.y+view.h)c.text(groupNames[entry.group],r.x+12,y+24,12,accent,r.w-40);continue;}
-        auto j = entry.job;
-        Rect row{r.x, view.y + entry.y - jobsScroll.p.value, r.w - (jobsScroll.maximum > 0 ? 18.f : 0.f), rowHeight - 12};
-        if (row.y + row.h < view.y || row.y > view.y + view.h)
-            continue;
-        float h = hover("job:" + j->id, row),
-              sel = to("job:" + j->id + ":sel", app.selectedJobs.count(j->id) ? 1 : 0);
-        card(row);
+    previous=-1;
+    for(size_t index=0;index<rows.size();++index){
+        const auto &entry=rows[index];
+        const auto &j=entry.job;
+        const auto &values=entry.values;
+        auto id="job:"+j->id;
+        float y=jobDetails?collectionRowY(id,entry.y):entry.y;
+        Rect row{view.x+entry.slot*(cardWidth+10),view.y+y-jobsScroll.p.value,cardWidth,rowHeight-(jobDetails?3.f:10.f)};
+        if(!jobDetails && entry.group!=previous){
+            c.text(groupNames[entry.group],row.x+12,row.y-10,12,accent,rowWidth-24);
+            previous=entry.group;
+        }
+        if(row.y+row.h<view.y || row.y>view.y+view.h)continue;
         bool checked=app.selectedJobs.count(j->id)!=0;
-        c.border(row, 20, checked?accent:edge, panel, checked?3.5f:1.f);
-        if (!compactJobs) previewTile(j->item,{row.x+12,row.y+10,90,row.h-38});
-        if (sel > .001f) c.rect(row.inset(3.5f), 16, accent.alpha(.12f * sel));
-        label("job:" + j->id + ":title", j->title, row.x + (compactJobs ? 48 : 114), row.y + (compactJobs ? 25 : 31), compactJobs ? 12 : 14, text, row.w - (compactJobs ? 230 : 295));
-        label("job:" + j->id + ":state", j->state, row.x + row.w - 160, row.y + (compactJobs ? 25 : 31), 12,
-              j->state == "Ошибка" ? hex(0xff9292) : accent, 140);
-        if (!compactJobs) c.text(j->detail.empty() && !j->done ? "Обработка…" : j->detail, row.x + 114, row.y + 59, 11, muted, row.w - 135);
-        bool processing=j->state=="Сборка контейнера"||j->state=="Проверка результата"||j->state=="Объединение"||j->state=="Скачивание";
-        float progress = to("job:" + j->id + ":progress", std::clamp(float(j->percent / 100),0.f,1.f), 0, 4, 1);
-        Rect track{row.x + 22, row.y + row.h - (compactJobs ? 5 : 19), row.w - 44, compactJobs ? 2.f : 5.f};
-        c.rect(track,3,edge);
-        if(processing && j->percent<0) {
-            float segment=track.w*.2f,offset=(track.w-segment)*float(.5+.5*std::sin(clock*2.4));
-            c.rect({track.x+offset,track.y,segment,track.h},3,accent);
-        } else if(progress>0)c.rect({track.x,track.y,track.w*progress,track.h},3,accent);
-        hit("job:" + j->id, row, [this, j] { app.selectedJob = j->id; if (app.selectedJobs.count(j->id)) app.selectedJobs.erase(j->id); else app.selectedJobs.insert(j->id); });
-        check("job:" + j->id + ":check", {row.x + (compactJobs ? 7 : 15), row.y + (compactJobs ? 6 : 10), 30, 30}, app.selectedJobs.count(j->id) != 0, [this, j] {
-            app.selectedJob = j->id;
-            if (app.selectedJobs.count(j->id)) app.selectedJobs.erase(j->id); else app.selectedJobs.insert(j->id);
-        });
+        auto stateColor=j->state=="Ошибка"?hex(0xff9292):accent;
+        collectionSurface(id,row,jobDetails,checked,index);
+        if(!jobDetails)previewTile(j->item,{row.x+6,row.y+6,row.w-12,row.h-122});
+        const bool processing=!j->done && (j->state=="Сборка контейнера" ||
+            j->state=="Проверка результата" || j->state=="Объединение" || j->state=="Скачивание");
+        const float progress=to(id+":progress",processing && j->percent>=0
+            ?std::clamp(float(j->percent/100),0.f,1.f):0.f,0,4,1);
+        if(processing){
+            Rect fill=row.inset(checked?2.f:1.f);
+            Rect visible=fill;
+            if(j->percent<0){
+                visible.w=fill.w*.24f;
+                const float phase=app.reduced?.5f:float(std::fmod(clock,1.6)/1.6);
+                visible.x+=(fill.w-visible.w)*phase;
+            } else {
+                visible.w*=app.reduced?std::clamp(float(j->percent/100),0.f,1.f):progress;
+            }
+            if(visible.w>0){
+                c.push(visible);
+                c.rect(fill,jobDetails?8:11,accent.alpha(.20f));
+                c.pop();
+            }
+        }
+        if(jobDetails){
+            float x=row.x+42;
+            for(int i=0;i<int(headings.size());++i){
+                float w=columnsWidth*widths[i];
+                c.text(values[i].empty()?"—":values[i],x+4,row.y+28,11,i==1?stateColor:i==0?text:muted,w-7);
+                x+=w;
+            }
+        } else {
+            float x=row.x+10,w=row.w-20;
+            float y=row.y+row.h-100;
+            c.text(values[0],x,y,12,text,w);
+            c.text(values[1]+(values[9].empty()?"":" · "+values[9]),x,y+16,10,stateColor,w);
+            const int pairs[][2]={{2,3},{4,5},{7,8},{6,10}};
+            int detailRow=0;
+            for(const auto &pair:pairs){
+                std::string info;
+                for(int index:pair) if(index>=0 && !values[index].empty()){
+                    if(!info.empty())info+="   ·   ";
+                    info+=std::string(headings[index])+"  "+values[index];
+                }
+                if(!info.empty())c.text(info,x,y+32+15*detailRow++,10,muted,w);
+            }
+            auto detail=j->detail.empty()?j->output:j->detail;
+            if(!detail.empty())c.text(detail,x,y+32+15*detailRow,10,muted,w);
+        }
+        auto select=[this,j]{
+            app.selectedJob=j->id;
+            if(app.selectedJobs.count(j->id))app.selectedJobs.erase(j->id);
+            else app.selectedJobs.insert(j->id);
+        };
+        hit(id,row,select);
+        check(id+":check",{row.x+(jobDetails?5:6),row.y+(jobDetails?0:7),30,jobDetails?row.h:30},checked,select);
     }
     c.pop();
-    scrollbar("jobs:scroll", view, jobsScroll);
+    scrollbar("jobs:scroll",view,jobsScroll);
     float y = r.y + r.h - 52;
-    std::vector<std::pair<std::string, std::string>> actions = {{"cancelJob", "Отменить"},
+    std::vector<std::pair<std::string, std::string>> actions = {{"cancelSelectedJobs", "Остановить"},
                                                                 {"retryJob", "Повторить"},
                                                                 {"openJobFolder", "Открыть папку"},
                                                                 {"openJobFile", "Открыть файл"},
@@ -842,7 +1113,7 @@ void UI::downloadsPage(Rect r) {
     for (auto &[cmd, name] : actions) {
         button(
             "jobs:" + cmd, {x, y, actionWidth, 38}, name, [this, cmd] { app.action(cmd); }, false,
-            !app.selectedJob.empty());
+            !app.selectedJob.empty() || (cmd=="cancelSelectedJobs" && !app.selectedJobs.empty()));
         x += actionWidth + 10;
     }
 }
@@ -897,7 +1168,7 @@ void UI::logsPage(Rect r) {
     hit("log:select",view,[this,position]{editing=nullptr;focus="log:selection";logAnchor=logCaret=position(mx,my);},true);
     c.pop();scrollbar("logs:scroll",view,logScroll);
     input("terminal:command",{r.x,r.y+r.h-38,r.w-126,36},app.terminalCommand,"Команда Windows…");
-    button("terminal:run",{r.x+r.w-116,r.y+r.h-38,116,36},"Выполнить",[this]{app.action("runTerminal");},true,!app.terminalCommand.empty());
+    button("terminal:run",{r.x+r.w-116,r.y+r.h-38,116,36},"Выполнить",[this]{runTerminalCommand();},true,!app.terminalCommand.empty());
 }
 void UI::settingsPage(Rect r) {
     Rect view{r.x, r.y, r.w, r.h};
@@ -972,7 +1243,7 @@ void UI::aboutPage(Rect r) {
     card({r.x, y, r.w, 152});
     c.text("KRECHETOV LABS", r.x + 24, y + 30, 11, accent, r.w - 48);
     c.text("StreamShelf", r.x + 24, y + 69, 25, text, r.w - 48);
-    c.text("Версия 2.2 Beta · Windows x64", r.x + 24, y + 100, 12, muted, r.w - 48);
+    c.text("Версия 2.2.1 Beta · Windows x64", r.x + 24, y + 100, 12, muted, r.w - 48);
     c.text("Разработчик: Арсений Кречетов", r.x + 24, y + 126, 12, muted, r.w - 48);
     y += 168;
     card({r.x, y, r.w, 220});
@@ -1003,7 +1274,27 @@ void UI::aboutPage(Rect r) {
     c.pop();
     scrollbar("about:scroll", view, aboutScroll);
 }
+void UI::acceptSuggestion(int index) {
+    if (!editing || suggestionField != focus || index < 0 || index >= int(suggestions.size())) return;
+    *editing = suggestions[index].first;
+    suggestionDismissedValue = *editing;
+    carets[focus] = anchors[focus] = wide(*editing).size();
+    suggestions.clear();
+}
 void UI::overlays() {
+    if ((app.constructorOpen || focus=="terminal:command") && editing && suggestionField == focus && !suggestions.empty() && !menuOpen && app.modalTitle.empty()) {
+        float heightBox = float(suggestions.size()) * 30 + 8;
+        float y = suggestionAnchor.y + suggestionAnchor.h + 4;
+        if (y + heightBox > height - 10) y = suggestionAnchor.y - heightBox - 4;
+        Rect box{suggestionAnchor.x, y, suggestionAnchor.w, heightBox};
+        c.border(box, 10, edge, panel);
+        for (int i = 0; i < int(suggestions.size()); ++i) {
+            Rect row{box.x + 4, box.y + 4 + i * 30, box.w - 8, 28};
+            if (i == suggestionIndex) c.rect(row, 6, accent.alpha(.20f));
+            c.text(suggestions[i].second, row.x + 8, row.y + 19, 12, text, row.w - 16);
+            hit("suggestion:" + std::to_string(i), row, [this, i] { acceptSuggestion(i); }, true);
+        }
+    }
     float menu = to("menu:visibility", menuOpen ? 1 : 0, 0, 6, 1);
     if (menu > .002f && !menuId.empty()) {
         hits.clear();
@@ -1191,6 +1482,9 @@ void UI::cancelInput() {
     lostCapture();
     focus.clear();
     editing = nullptr;
+    suggestions.clear();
+    suggestionField.clear();
+    suggestionDismissedValue.reset();
 }
 void UI::wheel(float d, bool shift) {
     lostCapture();
@@ -1226,7 +1520,7 @@ void UI::wheel(float d, bool shift) {
 }
 void UI::character(wchar_t ch) {
     static wchar_t high = 0;
-    if (!editing || focus.empty() || ch < 32)
+    if (!editing || focus.empty() || ch < 32 || ch == 127)
         return;
     if (IS_HIGH_SURROGATE(ch)) {
         high = ch;
@@ -1251,7 +1545,35 @@ void UI::character(wchar_t ch) {
     p = a = left + value.size();
     *editing = utf8(w);
 }
+void UI::runTerminalCommand() {
+    const auto command=app.terminalCommand;
+    app.action("runTerminal");
+    focus="terminal:command";
+    editing=&app.terminalCommand;
+    carets[focus]=anchors[focus]=wide(*editing).size();
+    if(!app.terminalCommand.empty()) return;
+    if(command.find_first_not_of(" \t")!=std::string::npos && (terminalHistory.empty() || terminalHistory.back()!=command)){
+        terminalHistory.push_back(command);
+        if(terminalHistory.size()>200) terminalHistory.erase(terminalHistory.begin());
+    }
+    terminalHistoryIndex=terminalHistory.size();
+    terminalDraft.clear();
+    suggestions.clear();
+    suggestionDismissedValue.reset();
+}
 void UI::key(int k, bool ctrl, bool shift) {
+    const bool terminal=focus=="terminal:command" && editing && app.modalTitle.empty();
+    if(terminal && k==VK_ESCAPE && !suggestions.empty() && suggestionField==focus){
+        suggestionDismissedValue=*editing;
+        suggestions.clear();
+        return;
+    }
+    if(terminal && k==VK_RETURN){runTerminalCommand();return;}
+    if(terminal && k==VK_INSERT && (ctrl || shift)){
+        k=ctrl?'C':'V';
+        ctrl=true;
+        shift=false;
+    }
     if (k == VK_ESCAPE) {
         menuOpen = false;
         if (!app.modalTitle.empty()) {
@@ -1278,7 +1600,29 @@ void UI::key(int k, bool ctrl, bool shift) {
             startMediaAnalysis(false);
         return;
     }
-    if(focus=="terminal:command" && k==VK_RETURN){app.action("runTerminal");return;}
+    if (suggestionField == focus && !suggestions.empty() && !ctrl && !shift) {
+        if (k == VK_DOWN || k == VK_UP) {
+            int count = int(suggestions.size());
+            suggestionIndex = (suggestionIndex + (k == VK_DOWN ? 1 : count - 1)) % count;
+            return;
+        }
+        if (k == VK_RETURN || k == VK_TAB) { acceptSuggestion(suggestionIndex); return; }
+    }
+    if(terminal && (k==VK_UP || k==VK_DOWN) && !ctrl && !shift){
+        if(terminalHistoryIndex==terminalHistory.size()) terminalDraft=*editing;
+        if(k==VK_UP && terminalHistoryIndex>0) --terminalHistoryIndex;
+        if(k==VK_DOWN && terminalHistoryIndex<terminalHistory.size()) ++terminalHistoryIndex;
+        *editing=terminalHistoryIndex==terminalHistory.size()?terminalDraft:terminalHistory[terminalHistoryIndex];
+        carets[focus]=anchors[focus]=wide(*editing).size();
+        suggestionDismissedValue=*editing;
+        return;
+    }
+    if(terminal && ctrl && k=='L'){app.action("clearLogs");return;}
+    if(terminal && ctrl && k=='U'){
+        editing->clear();carets[focus]=anchors[focus]=0;
+        terminalHistoryIndex=terminalHistory.size();
+        return;
+    }
     auto w = wide(*editing);
     auto &p = carets[focus];
     auto &a = anchors[focus];
@@ -1288,6 +1632,26 @@ void UI::key(int k, bool ctrl, bool shift) {
     if (ctrl && k == 'A') {
         a = 0;
         p = w.size();
+        return;
+    }
+    if(terminal && ctrl && k=='C' && left==right){app.action("interruptTerminal");return;}
+    if(terminal && ctrl && (k==VK_LEFT || k==VK_RIGHT || k==VK_BACK || k=='W')){
+        auto boundary=p;
+        if(k==VK_RIGHT){
+            while(boundary<w.size() && !std::iswspace(w[boundary])) ++boundary;
+            while(boundary<w.size() && std::iswspace(w[boundary])) ++boundary;
+        } else {
+            while(boundary>0 && std::iswspace(w[boundary-1])) --boundary;
+            while(boundary>0 && !std::iswspace(w[boundary-1])) --boundary;
+        }
+        if(k==VK_BACK || k=='W'){
+            w.erase(left==right?boundary:left,right-(left==right?boundary:left));
+            *editing=utf8(w);
+            p=a=left==right?boundary:left;
+        } else {
+            p=boundary;
+            if(!shift)a=p;
+        }
         return;
     }
     if (ctrl && (k == 'C' || k == 'X')) {

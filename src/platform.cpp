@@ -117,7 +117,7 @@ std::string sha256(const fs::path &p) {
     return out.str();
 }
 ProcessResult runProcess(const fs::path &exe, const std::vector<std::wstring> &args, Log log,
-                         std::atomic_bool &cancel, bool capture, bool shellCommand) {
+                         std::atomic_bool &cancel, bool capture, bool shellCommand, const fs::path &extraPath) {
     std::wstring cmd = quoteWide(exe.wstring());
     std::string display = utf8(exe.filename().wstring());
     if(shellCommand && !args.empty()) {
@@ -164,9 +164,33 @@ ProcessResult runProcess(const fs::path &exe, const std::vector<std::wstring> &a
         DeleteProcThreadAttributeList(sx.lpAttributeList);
         throw std::runtime_error("Handle list");
     }
+    // Build a private environment for the child; never change the application's
+    // environment while other worker threads may be starting processes.
+    std::vector<wchar_t> environment;
+    if (!extraPath.empty()) {
+        LPWCH block = GetEnvironmentStringsW();
+        if (!block) { DeleteProcThreadAttributeList(sx.lpAttributeList); throw std::runtime_error("Не удалось прочитать окружение процесса"); }
+        bool hasPath = false;
+        for (const wchar_t *entry = block; *entry; entry += wcslen(entry) + 1) {
+            std::wstring value(entry);
+            if (value.size() >= 5 && _wcsnicmp(value.c_str(), L"PATH=", 5) == 0) {
+                value = L"PATH=" + extraPath.wstring() + L";" + value.substr(5);
+                hasPath = true;
+            }
+            environment.insert(environment.end(), value.begin(), value.end());
+            environment.push_back(L'\0');
+        }
+        FreeEnvironmentStringsW(block);
+        if (!hasPath) {
+            auto value = L"PATH=" + extraPath.wstring();
+            environment.insert(environment.end(), value.begin(), value.end());
+            environment.push_back(L'\0');
+        }
+        environment.push_back(L'\0');
+    }
     BOOL started = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
-                                  CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr,
-                                  nullptr, &sx.StartupInfo, &pi);
+                                  CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | (environment.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT),
+                                  environment.empty() ? nullptr : environment.data(), nullptr, &sx.StartupInfo, &pi);
     DeleteProcThreadAttributeList(sx.lpAttributeList);
     if (!started)
         throw std::runtime_error("Не удалось запустить " + utf8(exe.filename().wstring()));
