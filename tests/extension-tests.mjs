@@ -3,6 +3,7 @@ let count=0;
 for(const family of ['chromium','firefox']) {
  const manifest=JSON.parse(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/manifest.json`));
  if(family==='chromium') {
+  assert.equal(manifest.version,'1.0.3');count++;
   const digest=crypto.createHash('sha256').update(Buffer.from(manifest.key,'base64')).digest('hex').slice(0,32);
   const id=[...digest].map(x=>String.fromCharCode(97+parseInt(x,16))).join('');
   assert.equal(id,'cjhiagnpgpmaagnoinjnkipimjlplcpe');count++;
@@ -19,7 +20,7 @@ for(const family of ['chromium','firefox']) {
   assert(Number(gecko.strict_min_version.split('.')[0])>=140);
   for(const required of ['browsingActivity','websiteContent','authenticationInfo']) assert(gecko.data_collection_permissions.required.includes(required));
   assert(manifest.permissions.includes('alarms'));
-  assert.equal(manifest.version,'1.0.2');
+  assert.equal(manifest.version,'1.0.3');
   assert(manifest.description.length>20);
   for(const size of [16,32,48,96,256]) {
    const path=manifest.icons[size];const image=fs.readFileSync(`extension/firefox-development/${path}`);
@@ -98,7 +99,7 @@ console.log(`${count} extension checks passed`);
   let closed=0,requestCount=0,connectCount=0;
   const button={disabled:false,onclick:null},status={textContent:''},win={close(){closed++;}};
   const api={permissions:{contains:async()=>preGranted,request:()=>{requestCount++;return Promise.resolve(true);}},
-   extension:{getViews:()=>[win]},runtime:{getManifest:()=>({version:'1.0.2'}),sendMessage:async m=>{if(m.type==='connectExtension'){connectCount++;return {ok:true};}return {connected:false};}}};
+   extension:{getViews:()=>[win]},runtime:{getManifest:()=>({version:'1.0.3'}),sendMessage:async m=>{if(m.type==='connectExtension'){connectCount++;return {ok:true};}return {connected:false};}}};
   const context=vm.createContext({browser:api,window:win,document:{querySelector:s=>s==='#connect'?button:status},Promise});
   vm.runInContext(popupCode,context);
   await new Promise(resolve=>setTimeout(resolve,0));

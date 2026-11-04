@@ -3,6 +3,7 @@
 #include "extension_installer.hpp"
 #include "mux_options.hpp"
 #include "assembly_source.hpp"
+#include "component_manager.hpp"
 #include <deque>
 #include <array>
 #include <shared_mutex>
@@ -44,7 +45,7 @@ class App {
     std::shared_ptr<std::atomic_bool> terminalCancel;
     std::shared_ptr<std::atomic_bool> analysisCancel = std::make_shared<std::atomic_bool>(false);
     uint64_t analysisGeneration = 0;
-    uint64_t scanGeneration = 0;
+    uint64_t scanGeneration = 0, silentScanStop = 0;
     std::shared_ptr<std::atomic_bool> probeCancel = std::make_shared<std::atomic_bool>(false);
     uint64_t nextScanGeneration() { *probeCancel = true; readyCv.notify_all(); probeCancel = std::make_shared<std::atomic_bool>(false); return scanGeneration = std::max(scanGeneration + 1, uint64_t(GetTickCount64()) * 100); }
     std::shared_mutex toolsMutex;
@@ -62,6 +63,8 @@ class App {
     void enqueueProbe(const Media &, const std::shared_ptr<Session> &, uint64_t, int);
     void probeLoop();
     void seedAndUpdate(bool);
+    void scanToolComponents(bool install);
+    void refreshToolFiles();
     void downloadLoop();
     void download(const std::shared_ptr<Job> &);
     void saveHistory();
@@ -75,6 +78,12 @@ class App {
     Connector connector;
     ExtensionInstaller extensionInstaller;
     bool preparingInstaller = false;
+    bool componentsBusy = false, componentsScanned = false, componentsDirty = false;
+    uint64_t componentsRevision = 0;
+    std::string componentsActivity;
+    bool componentProgressVisible = false;
+    ComponentProgress componentProgress;
+    std::vector<Component> components;
     std::string installerBrowserExecutable;
     std::vector<Browser> browsers;
     std::set<std::string> customBrowserPaths;

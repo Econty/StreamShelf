@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "StreamShelf Connector",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Связь Firefox со StreamShelf: поиск медиа на открытой странице и передача данных локальной программе.",
   "icons": {
     "16": "icons/icon-16.png",

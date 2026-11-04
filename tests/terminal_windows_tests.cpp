@@ -1,4 +1,5 @@
 #include "platform.hpp"
+#include "component_manager.hpp"
 #include <iostream>
 using namespace ss;
 int main() {
@@ -17,6 +18,21 @@ int main() {
         auto result = run(L"streamshelf-test-tool /d /c echo STREAMSHELF_TERMINAL_OK", folder);
         if (result.code || result.output.find("STREAMSHELF_TERMINAL_OK") == std::string::npos)
             throw std::runtime_error("tool in Unicode path with spaces was not found");
+        std::vector<std::string> observed;
+        auto firstLine = runProcess(shell, {L"/d", L"/c", L"chcp 65001>nul & echo VERSION_FIRST_LINE"},
+            [&](const std::string &line) { observed.push_back(line); }, cancel, true, true, folder);
+        if (firstLine.code || observed.empty() || observed.front().find("VERSION_FIRST_LINE") == std::string::npos)
+            throw std::runtime_error("first command output line was lost");
+        auto fakeYt = folder / L"yt-dlp.exe";
+        fs::copy_file(shell, fakeYt, fs::copy_options::overwrite_existing);
+        auto resolved = terminalComponentCommand(L"yt-dlp /d /c echo COMPONENT_PATH_OK", folder);
+        auto resolvedResult = run(L"chcp 65001>nul & " + resolved, {});
+        if (resolvedResult.code || resolvedResult.output.find("COMPONENT_PATH_OK") == std::string::npos)
+            throw std::runtime_error("terminal did not execute exact component path");
+        fs::remove(fakeYt);
+        bool missingRejected = false;
+        try { terminalComponentCommand(L"yt-dlp --version", folder); } catch (...) { missingRejected = true; }
+        if (!missingRejected) throw std::runtime_error("terminal searched PATH for missing component");
         auto inherited = run(L"streamshelf-test-tool /d /c echo UNEXPECTED", {});
         if (inherited.code == 0) throw std::runtime_error("tool path leaked into parent environment");
         auto builtin = run(L"echo BUILTIN_OK", folder);

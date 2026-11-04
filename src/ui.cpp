@@ -1,3 +1,4 @@
+#include "terminal_selection.hpp"
 #include <cwctype>
 #include "app.hpp"
 #include "media_display.hpp"
@@ -5,6 +6,8 @@
 #include <windowsx.h>
 #include <set>
 #include <numeric>
+#include <iomanip>
+#include <sstream>
 namespace ss {
 float UI::to(const std::string &id, float target, float initial, float freq, float damping) {
     auto [i, newly] = motion.try_emplace(id, initial);
@@ -81,7 +84,7 @@ void UI::toggle(const std::string &id, Rect r, bool on, std::function<void()> f)
 }
 static std::vector<std::pair<std::string,std::string>> terminalCompletions(const std::string &value) {
     static const std::vector<std::string> commands={
-        "yt-dlp", "ffmpeg", "ffprobe", "deno", "assoc", "attrib", "call", "cd", "chcp", "chdir", "choice", "cls", "cmd", "color", "copy", "date", "del", "dir", "echo", "endlocal", "erase", "exit", "fc", "find", "findstr", "for", "ftype", "help", "if", "ipconfig", "md", "mkdir", "more", "move", "path", "pause", "ping", "popd", "pushd", "rd", "ren", "rename", "rmdir", "robocopy", "set", "setlocal", "sort", "start", "systeminfo", "tasklist", "time", "timeout", "title", "tree", "type", "ver", "where", "whoami", "xcopy", "/help", "/clear"
+        "yt-dlp", "ffmpeg", "ffprobe", "deno", "assoc", "attrib", "call", "cd", "chcp", "chdir", "choice", "cls", "cmd", "color", "copy", "date", "del", "dir", "echo", "endlocal", "erase", "exit", "fc", "find", "findstr", "for", "ftype", "help", "if", "ipconfig", "md", "mkdir", "more", "move", "path", "pause", "ping", "popd", "pushd", "rd", "ren", "rename", "rmdir", "robocopy", "set", "setlocal", "sort", "start", "systeminfo", "tasklist", "time", "timeout", "title", "tree", "type", "ver", "where", "whoami", "xcopy", "/help", "/clear", "/versions"
     };
     static const std::map<std::string,std::vector<std::string>> flags={
         {"yt-dlp",{"--version","--help","--list-formats","--dump-json","--no-playlist","--output","--format"}},
@@ -337,7 +340,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
         c.circle(cx + 11, cy - 105 + drift, 2.5f + pulse, hex(0x8be2d1));
         centered("KRECHETOV LABS", cy - 48, 13, hex(0x8be2d1));
         centered("StreamShelf", cy + 5, 36, hex(0xeef3fc));
-        centered("Версия 2.2.1 Beta", cy + 41, 12, hex(0x8999b4));
+        centered("Версия 2.3 Beta", cy + 41, 12, hex(0x8999b4));
         c.rect({cx - 50, cy + 69, 100, 2}, 1, hex(0x2a374b));
         c.rect({cx - 50, cy + 69, 100 * std::clamp(elapsedSeconds / float(app.splashSeconds), 0.f, 1.f), 2}, 1, hex(0x8be2d1));
         c.opacity = 1; c.render(); return;
@@ -380,8 +383,12 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     c.glow({width * .25f, -360, width * .9f, 820}, accent.alpha(.075f));
     c.glow({-250, height * .4f, 600, 650}, hex(0x577cff, .07f));
     c.text("STREAMSHELF", 25, 36, 15, text);
+    if (lastToast != app.toastSerial) { lastToast = app.toastSerial; toastTime = clock; }
+    const bool showMessage = !app.toast.empty() && clock - toastTime < 6 && app.modalTitle.empty();
     c.circle(260, 34, 3.5f, app.busy ? hex(0xffd697) : accent);
-    if(app.busy||app.scanning){
+    if (showMessage) {
+        c.text(app.toast, 273, 39, 11, accent, width - 585);
+    } else if(app.busy||app.scanning){
         float pulse=app.reduced?1.f:float(.5+.5*std::sin(clock*5));
         c.circle(260,34,3.5f+2*pulse,accent.alpha(.55f+.45f*pulse));
         c.text((app.busy?"Анализ страницы":"Поиск медиа")+std::string(" · найдено ")+std::to_string(app.media.size()),273,39,11,accent,width-585);
@@ -445,7 +452,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     c.circle(40, height - 28, 3, app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady ? accent : muted);
     if(!compactMenu)c.text(app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady?"Браузер подключён":"Нет соединения",52,height-24,10,muted,150);
     if (!compactMenu) {
-        c.text("KRECHETOV LABS · StreamShelf 2.2.1 Beta", 25, height - 80, 9, muted, 195);
+        c.text("KRECHETOV LABS · StreamShelf 2.3 Beta", 25, height - 80, 9, muted, 195);
         c.text("Разработчик: Арсений Кречетов", 25, height - 59, 9, muted, 195);
     }
     float contentLeft=compactMenu?76.f:226.f;
@@ -1136,7 +1143,8 @@ void UI::logsPage(Rect r) {
     if (lines.size() > 1500)
         lines.erase(lines.begin(), lines.end() - 1500);
     float old = logScroll.maximum;
-    bool follow = logScroll.p.target >= old - 2;
+    const bool selectingLog = down && capture && capture->id == "log:select";
+    bool follow = !selectingLog && !(focus == "log:selection" && logAnchor != logCaret) && logScroll.p.target >= old - 2;
     logScroll.bounds(lines.size() * 25, view.h);
     if (follow)
         logScroll.p.target = logScroll.maximum;
@@ -1157,7 +1165,14 @@ void UI::logsPage(Rect r) {
         for(size_t n=0;n<=wideLines[line].size();++n){if(n>0&&n<wideLines[line].size()&&IS_LOW_SURROGATE(wideLines[line][n]))continue;float d=std::abs(c.measure(utf8(wideLines[line].substr(0,n)),12)-dx);if(d<distance){distance=d;best=n;}}
         return offsets[line]+best;
     };
-    if(down&&capture&&capture->id=="log:select"&&std::hypot(mx-downX,my-downY)>3)logCaret=position(mx,my);
+    if (selectingLog && std::hypot(mx-downX,my-downY)>3) {
+        const float delta = terminalSelectionScroll(my, view.y, view.h, dt);
+        if (delta != 0) {
+            logScroll.p.value = std::clamp(logScroll.p.value + delta, 0.f, logScroll.maximum);
+            logScroll.p.target = logScroll.p.value; logScroll.p.velocity = 0;
+        }
+        logCaret=position(mx,std::clamp(my,view.y,view.y+view.h-1));
+    }
     c.push(view);
     if(lines.empty())c.text("Журнал пока пуст",view.x+3,view.y+26,13,muted);
     size_t lo=std::min(logAnchor,logCaret),hi=std::max(logAnchor,logCaret);
@@ -1173,7 +1188,7 @@ void UI::logsPage(Rect r) {
 }
 void UI::settingsPage(Rect r) {
     Rect view{r.x, r.y, r.w, r.h};
-    settingsScroll.bounds(1000, view.h);
+    settingsScroll.bounds(1280, view.h);
     if (settingsScroll.maximum > 0) r.w -= 18;
     c.push(view);
     float y = view.y - settingsScroll.p.value;
@@ -1188,21 +1203,58 @@ void UI::settingsPage(Rect r) {
     toggle("settings:reduced", {r.x + r.w - 80, y + 148, 51, 28}, app.reduced,
            [this] { app.reduced = !app.reduced; });
     y += 249;
-    card({r.x, y, r.w, 237});
-    c.text("ДВИЖОК И ИНСТРУМЕНТЫ", r.x + 24, y + 32, 10, accent);
-    label("engine:status", app.status, r.x + 24, y + 71, 14, text, r.w - 60);
-    c.text("Проверять официальный стабильный выпуск yt-dlp при запуске", r.x + 24, y + 111, 13, text,
-           r.w - 140);
-    toggle("settings:update", {r.x + r.w - 80, y + 93, 51, 28}, app.autoUpdate,
-           [this] { app.autoUpdate = !app.autoUpdate; });
-    button(
-        "settings:updateNow", {r.x + 24, y + 146, 237, 40}, "Проверить обновление",
-        [this] { app.action("update"); }, true);
-    button("settings:data", {r.x + 276, y + 146, 210, 40}, "Папка данных",
-           [this] { app.action("dataFolder"); });
-    c.text("yt-dlp · FFmpeg · Deno. Обновления проверяются по SHA-256.", r.x + 24, y + 218, 11, muted,
-           r.w - 48);
-    y += 253;
+    card({r.x, y, r.w, 495});
+    c.text("КОМПОНЕНТЫ", r.x + 24, y + 32, 10, accent);
+    c.text(app.componentsBusy ? app.componentsActivity : "Проверяйте версии и устанавливайте отсутствующие компоненты.", r.x + 24, y + 61, 13, text, r.w - 48);
+    c.text("Автоматически обновлять yt-dlp при запуске", r.x + 24, y + 95, 12, muted, r.w - 130);
+    toggle("settings:update", {r.x + r.w - 80, y + 77, 51, 28}, app.autoUpdate, [this] { app.autoUpdate = !app.autoUpdate; });
+    static const wchar_t *files[] = {L"yt-dlp.exe", L"ffmpeg.exe", L"ffprobe.exe", L"deno.exe"};
+    static const auto componentsRoot = dataRoot() / L"tools";
+    for (size_t i = 0; i < 4; ++i) {
+        const float row = y + 127 + float(i) * 53;
+        if (i < app.components.size()) {
+            const auto &component = app.components[i];
+            c.text(component.name, r.x + 24, row, 14, text, 130);
+            const bool filePresent = componentFilePresent(componentsRoot / files[i]);
+            const auto version = "Установлена: " + (!filePresent || component.installed.empty() ? std::string("нет") : component.installed) + "   ·   Доступна: " + (component.latest.empty() ? std::string("неизвестно") : component.latest);
+            c.text(version, r.x + 160, row, 12, muted, r.w - 190);
+            c.text(filePresent ? component.status : "Файл отсутствует", r.x + 160, row + 19, 11, (!filePresent || component.update) ? accent : muted, r.w - 190);
+        } else {
+            static const char *names[] = {"yt-dlp", "FFmpeg", "FFprobe", "Deno"};
+            c.text(names[i], r.x + 24, row, 14, text, 130);
+            c.text("Нажмите «Проверить компоненты»", r.x + 160, row, 12, muted, r.w - 190);
+        }
+    }
+    if (app.componentProgressVisible) {
+        const auto &progress = app.componentProgress;
+        const double percent = componentProgressPercent(progress);
+        std::ostringstream description;
+        if (progress.phase == ComponentPhase::Downloading) {
+            description << "Скачано " << std::fixed << std::setprecision(1)
+                        << double(progress.received) / (1024.0 * 1024.0) << " МиБ";
+            if (progress.total) description << " / " << double(progress.total) / (1024.0 * 1024.0)
+                                            << " МиБ · " << int(percent) << "%";
+            else description << " · размер неизвестен";
+        } else description << "Обработка скачанного компонента…";
+        c.text(description.str(), r.x + 24, y + 337, 11, muted, r.w - 48);
+        Rect track{r.x + 24, y + 345, r.w - 48, 6};
+        c.rect(track, 3, edge);
+        if (percent >= 0) {
+            c.rect({track.x, track.y, track.w * float(percent / 100.0), track.h}, 3, accent);
+        } else {
+            const float segment = track.w * .22f;
+            const float position = app.reduced ? 0.0f : float(.5 + .5 * std::sin(clock * 2.4));
+            c.rect({track.x + (track.w - segment) * position, track.y, segment, track.h}, 3, accent);
+        }
+    }
+    const bool available = std::any_of(app.components.begin(), app.components.end(), [](const Component &c) { return c.update; });
+    button("settings:scanComponents", {r.x + 24, y + 405, 220, 40}, app.componentsBusy ? "Выполняется…" : "Проверить компоненты", [this] { app.action("update"); }, true, !app.componentsBusy);
+    button("settings:installComponents", {r.x + 254, y + 405, 220, 40}, "Установить / обновить", [this] { app.action("installComponents"); }, false, !app.componentsBusy && app.componentsScanned && available);
+    button("settings:data", {r.x + 484, y + 405, 170, 40}, "Папка компонентов", [this] { app.action("dataFolder"); }, false, !app.componentsBusy);
+    static const auto toolsPath = utf8((dataRoot() / L"tools").wstring());
+    c.text("Папка: " + toolsPath, r.x + 24, y + 464, 11, muted, r.w - 48);
+    c.text("yt-dlp и Deno — GitHub; FFmpeg и FFprobe — gyan.dev. Проверка SHA-256.", r.x + 24, y + 485, 10, muted, r.w - 48);
+    y += 511;
     card({r.x, y, r.w, 217});
     c.text("ЗАГРУЗКИ И ПОДКЛЮЧЕНИЕ", r.x + 24, y + 32, 10, accent);
     c.text("Параллельные фрагменты на одну загрузку", r.x + 24, y + 77, 13, text);
@@ -1244,7 +1296,7 @@ void UI::aboutPage(Rect r) {
     card({r.x, y, r.w, 152});
     c.text("KRECHETOV LABS", r.x + 24, y + 30, 11, accent, r.w - 48);
     c.text("StreamShelf", r.x + 24, y + 69, 25, text, r.w - 48);
-    c.text("Версия 2.2.1 Beta · Windows x64", r.x + 24, y + 100, 12, muted, r.w - 48);
+    c.text("Версия 2.3 Beta · Windows x64", r.x + 24, y + 100, 12, muted, r.w - 48);
     c.text("Разработчик: Арсений Кречетов", r.x + 24, y + 126, 12, muted, r.w - 48);
     y += 168;
     card({r.x, y, r.w, 220});
@@ -1415,22 +1467,7 @@ void UI::overlays() {
         c.opacity = appearance.value;
         overlayInput = false;
     }
-    if (lastToast != app.toastSerial) {
-        lastToast = app.toastSerial;
-        toastTime = clock;
-    }
-    float tv = to("toast:visibility",
-                  !app.toast.empty() && clock - toastTime < 6 && app.modalTitle.empty() && mv < .01f ? 1 : 0,
-                  0, 5, 1);
-    if (tv > .002f) {
-        Rect r{width / 2 - 260, height - 78 + (1 - tv) * 16, 520, 43};
-        c.opacity *= tv;
-        c.border(r, 14, accent.alpha(.35f), panel);
-        c.text(app.toast, r.x + 16, r.y + 27, 12, text, r.w - 50);
-        if (mv < .01f)
-            hit("toast", r, [this] { toastTime = -100; });
-        c.opacity = appearance.value;
-    }
+
 }
 void UI::mouse(float x, float y) {
     mx = x / scale;
@@ -1488,7 +1525,7 @@ void UI::cancelInput() {
     suggestionDismissedValue.reset();
 }
 void UI::wheel(float d, bool shift) {
-    lostCapture();
+    if (!preserveTerminalSelectionOnWheel(page == 3, down, capture && capture->id == "log:select")) lostCapture();
     if (!app.modalTitle.empty()) {
         modalScroll.wheel(d);
         return;

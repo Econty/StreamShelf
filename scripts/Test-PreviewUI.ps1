@@ -20,7 +20,7 @@ function Read-Frame {
 }
 try{
  [void]$process.Start()
- Send-Frame @{type='hello';protocol=1;version='1.0.0';instanceId=[Guid]::NewGuid().ToString();browser='Локальная проверка миниатюр'}
+ Send-Frame @{type='hello';protocol=1;version='1.0.3';instanceId=[Guid]::NewGuid().ToString();browser='Локальная проверка миниатюр'}
  $reply=Read-Frame;if($reply.type -ne 'helloAck'){throw 'Handshake failed'}
  $base="http://127.0.0.1:$Port"
  Send-Frame @{type='tabSelected';tabId=424243;url="$base/";title='ТЕСТ — собственные локальные изображения и видео'}

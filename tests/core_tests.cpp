@@ -3,6 +3,7 @@
 #include "media_display.hpp"
 #include "mux_options.hpp"
 #include "firefox_guide_state.hpp"
+#include "terminal_selection.hpp"
 #include <iostream>
 #include <stdexcept>
 using namespace ss;
@@ -31,6 +32,13 @@ template <typename F> void rejects(F f) {
     check(threw, "Expected rejection");
 }
 int main() {
+    test("Terminal selection survives scrolling and follows the pointer", [] {
+        check(preserveTerminalSelectionOnWheel(true,true,true), "wheel preserves active log selection");
+        check(!preserveTerminalSelectionOnWheel(true,false,true) && !preserveTerminalSelectionOnWheel(false,true,true), "ordinary wheel input releases capture");
+        check(terminalSelectionScroll(105,100,400,.05f)<0, "drag near top scrolls up");
+        check(terminalSelectionScroll(495,100,400,.05f)>0, "drag near bottom scrolls down");
+        check(terminalSelectionScroll(300,100,400,.05f)==0, "drag in middle does not scroll");
+    });
     test("Data sources retain their own analysis snapshot", [] {
         auto first = parseAnalysis(Json{{"title", "First"}, {"description", "first description"}, {"chapters", Json::array({Json{{"title", "first chapter"}}})}}, "https://example.com/first");
         auto second = parseAnalysis(Json{{"title", "Second"}, {"description", "second description"}, {"chapters", Json::array({Json{{"title", "second chapter"}}})}}, "https://example.com/second");
@@ -52,9 +60,14 @@ int main() {
         o.installPrompt = true; check(firefoxGuideStage(o) == FirefoxGuideStage::ConfirmInstall, "confirm browser prompt");
         o.installPrompt = o.picker = false; o.awaitingInstall = true;
         check(firefoxGuideStage(o) == FirefoxGuideStage::ConfirmInstall, "picker closing waits for the browser instead of restarting");
-        o.awaitingInstall = false;
+        o.awaitingInstall = false; o.addedNotice = true; o.installedKnown = o.installed = o.enabledKnown = true;
+        check(firefoxGuideStage(o) == FirefoxGuideStage::ConfirmInstall, "acknowledge added notification before enabling");
+        o.addedNotice = false; o.enabledKnown = false;
+        check(firefoxGuideStage(o) == FirefoxGuideStage::Enable, "unknown switch state asks to check enablement");
         o.installPrompt = o.picker = o.menu = false; o.installedKnown = o.installed = o.enabledKnown = true;
         check(firefoxGuideStage(o) == FirefoxGuideStage::Enable, "resume disabled add-on");
+        check(firefoxCardSwitch(458, 413, 700, 435, 1109, 412, 1149, 432, 96), "Firefox card switch beside the title");
+        check(!firefoxCardSwitch(458, 413, 700, 435, 1109, 520, 1149, 540, 96), "neighbouring row is not the switch");
         o.enabled = true; check(firefoxGuideStage(o) == FirefoxGuideStage::Connect, "enabled alone is not success");
         o.connectionConfirmed = true; check(firefoxGuideStage(o) == FirefoxGuideStage::Done, "verified connection");
         o.connectionConfirmed = o.installed = o.enabled = false;

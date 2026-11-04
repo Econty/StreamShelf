@@ -212,12 +212,16 @@ void Connector::start() {
                         if (!frameRead(s->pipe, j, true) || str(j, "type") != "hello" ||
                             number(j, "protocol") != 1)
                             throw std::runtime_error("Несовместимое расширение");
+                        if (!compatibleExtensionHello(j)) {
+                            if (message) message(nullptr, {{"type", "connectorError"}, {"message", "Установлено устаревшее расширение StreamShelf Connector. Установите текущую версию и перезагрузите расширение в браузере."}});
+                            throw std::runtime_error("Устаревшее расширение");
+                        }
                         {
                             std::lock_guard sl(s->mutex);
                             s->id = str(j, "instanceId");
                             s->browser = str(j, "browser");
                         }
-                        s->send({{"type", "helloAck"}, {"protocol", 1}, {"version", "1.0.0"}});
+                        s->send({{"type", "helloAck"}, {"protocol", 1}, {"version", ConnectorVersion}});
                         s->verifyConnection();
                         if (message)
                             message(s, j);
@@ -320,30 +324,12 @@ static std::vector<std::wstring> vendors() {
             L"Vivaldi",        L"Yandex\\YandexBrowser", L"Opera Software"};
 }
 void updateConnectorExtensions(const fs::path &app) {
-    auto dir = dataRoot() / L"connector";
-    auto ext = app.parent_path() / L"extensions";
-    if (!fs::exists(ext))
-        ext = app.parent_path() / L"extension";
-    // Firefox is installed from the signed XPI in the application bundle.
-    // Its native host registration only needs FirefoxId, not unpacked sources.
-    auto source = ext / L"chromium-development";
-    for (auto name : {L"manifest.json", L"background.js", L"content.js"})
+    // Load Chromium directly from the application bundle, so the wizard's path
+    // and the files that will be loaded by the browser are always the same.
+    auto source = app.parent_path() / L"extensions" / L"chromium-development";
+    for (auto name : {L"manifest.json", L"background.js", L"content.js", L"popup.html", L"popup.js"})
         if (!fs::is_regular_file(source / name))
-            throw std::runtime_error("В сборке отсутствует файл расширения Chromium: " + utf8(name));
-    auto dest = dir / L"extensions" / L"chromium";
-    fs::create_directories(dest);
-    for (auto &entry : fs::recursive_directory_iterator(source)) {
-        if (!entry.is_regular_file()) continue;
-        auto target = dest / fs::relative(entry.path(), source);
-        fs::create_directories(target.parent_path());
-        if (fs::exists(target) && readFile(entry.path()) == readFile(target)) continue;
-        auto temporary = target; temporary += L".streamshelf-update";
-        try {
-            fs::copy_file(entry.path(), temporary, fs::copy_options::overwrite_existing);
-            if (!MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-                throw std::runtime_error("Не удалось обновить файл расширения: " + utf8(target.wstring()));
-        } catch (...) { std::error_code ec; fs::remove(temporary, ec); throw; }
-    }
+            throw std::runtime_error("В папке программы отсутствует файл расширения Chromium: " + utf8((source / name).wstring()));
 }
 void installConnector(const fs::path &app) {
     auto dir = dataRoot() / L"connector";

@@ -71,6 +71,11 @@ std::wstring pipeName();
 int nativeHostMain();
 void installConnector(const fs::path &);
 void updateConnectorExtensions(const fs::path &);
+// Both browser extensions use the same release version.
+inline constexpr const char *ConnectorVersion = "1.0.3";
+inline bool compatibleExtensionHello(const Json &hello) {
+    return str(hello, "version") == ConnectorVersion;
+}
 void unregisterConnector();
 struct Session {
     HANDLE pipe = INVALID_HANDLE_VALUE;

@@ -30,7 +30,7 @@ try {
   New-Item -ItemType Directory -Force -Path $destination | Out-Null
   Get-ChildItem -LiteralPath $directory | Where-Object { $directory -ne 'extension' -or $_.Name -ne 'firefox-development' } | Copy-Item -Destination $destination -Recurse -Force
  }
- foreach($required in @('extensions\chromium-development\manifest.json','extensions\chromium-development\background.js','extensions\chromium-development\content.js','extensions\firefox-signed\StreamShelf-Connector-1.0.2.xpi')) {
+ foreach($required in @('extensions\chromium-development\manifest.json','extensions\chromium-development\background.js','extensions\chromium-development\content.js','extensions\firefox-signed\StreamShelf-Connector-1.0.3.xpi')) {
   if(!(Test-Path -LiteralPath (Join-Path 'release\StreamShelf-2.2.1' $required) -PathType Leaf)){throw "Missing packaged extension file: $required"}
  }
  Write-Output 'Application compiled: build-local/StreamShelf-beta-build.exe'

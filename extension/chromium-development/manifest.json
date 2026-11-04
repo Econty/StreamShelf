@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "StreamShelf Connector",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "Поиск медиа в выбранной вкладке и передача выбранной сессии в локальный StreamShelf.",
   "icons": {
     "16": "icons/icon-16.png",

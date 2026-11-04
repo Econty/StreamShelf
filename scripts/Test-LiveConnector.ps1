@@ -27,7 +27,7 @@ function Read-Frame([int]$timeout=90000){
 }
 try{
  [void]$process.Start()
- Send-Frame @{type='hello';protocol=1;version='1.0.0';instanceId=[Guid]::NewGuid().ToString();browser='StreamShelf local regression test'}
+ Send-Frame @{type='hello';protocol=1;version='1.0.3';instanceId=[Guid]::NewGuid().ToString();browser='StreamShelf local regression test'}
  $reply=Read-Frame 5000
  if($reply.type -ne 'helloAck'){throw 'Handshake failed'}
  Send-Frame @{type='tabSelected';tabId=424242;url='https://example.org/streamshelf-regression';title='Локальная проверка соединения'}

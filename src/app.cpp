@@ -224,8 +224,8 @@ void App::error(const std::string &s) {
 }
 fs::path App::tool(const wchar_t *n) {
     auto p = dataRoot() / L"tools" / n;
-    if (!fs::exists(p))
-        throw std::runtime_error("Инструмент отсутствует: " + utf8(n));
+    if (!componentFilePresent(p))
+        throw std::runtime_error("Инструмент отсутствует в папке компонентов или является ссылкой: " + utf8(n));
     return p;
 }
 void App::start() {
@@ -299,8 +299,9 @@ void App::start() {
             }
             if (type == "scanState") {
                 scanning = j.value("scanning", false);
-                notify(str(j, "message",
-                           scanning ? "Поиск включён. Воспроизведите медиа." : "Поиск остановлен"));
+                const bool expectedStop = !scanning && j.value("scanId", uint64_t(0)) == silentScanStop && str(j, "message").empty();
+                if (expectedStop) silentScanStop = 0;
+                else notify(str(j, "message", scanning ? "Поиск включён. Воспроизведите медиа." : "Поиск остановлен"));
             } else if (type == "resource" && scanning && j.contains("item")) {
                 auto &i = j["item"];
                 auto u = str(i, "url");
@@ -379,6 +380,23 @@ void App::start() {
     });
     detectVideoEncoders();
     work([this] {
+        auto fingerprint = componentFingerprint(dataRoot() / L"tools");
+        while (!stopping) {
+            std::unique_lock lock(readyMutex);
+            readyCv.wait_for(lock, std::chrono::seconds(1), [this] { return stopping.load(); });
+            lock.unlock();
+            if (stopping) break;
+            auto current = componentFingerprint(dataRoot() / L"tools");
+            if (current == fingerprint) continue;
+            fingerprint = std::move(current);
+            post([this] {
+                if (!componentFilePresent(dataRoot() / L"tools" / L"yt-dlp.exe")) status = "yt-dlp отсутствует · установите в настройках";
+                if (componentsBusy) { componentsDirty = true; return; }
+                if (componentsScanned) refreshToolFiles();
+            });
+        }
+    });
+    work([this] {
         while (!stopping) {
             for (auto &s : connector.list()) {
                 bool awaiting;
@@ -425,18 +443,12 @@ void App::start() {
 }
 void App::seedAndUpdate(bool update) {
     std::unique_lock lock(toolsMutex);
-    auto root = dataRoot() / L"tools", bundle = executable().parent_path() / L"bundled-tools";
-    if (fs::exists(bundle / L"checksums.json")) {
-        auto sums = Json::parse(readFile(bundle / L"checksums.json"));
-        for (auto name : {"yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe"})
-            if (!fs::exists(root / wide(name))) {
-                if (sha256(bundle / wide(name)) != str(sums, name))
-                    throw std::runtime_error("Повреждён bundled-tools: " + std::string(name));
-                fs::copy_file(bundle / wide(name), root / wide(name), fs::copy_options::overwrite_existing);
-                log("SHA-256 проверен: " + std::string(name));
-            }
+    auto root = dataRoot() / L"tools";
+    if (!componentFilePresent(root / L"yt-dlp.exe")) {
+        post([this] { status = "yt-dlp отсутствует · установите в настройках"; });
+        return;
     }
-    if (update || !fs::exists(root / L"yt-dlp.exe")) {
+    if (update) {
         post([this] { status = "Проверка официального выпуска yt-dlp…"; });
         try {
             auto j = Json::parse(
@@ -489,6 +501,73 @@ void App::seedAndUpdate(bool update) {
         }
     } else
         post([this] { status = "yt-dlp · движок готов"; });
+}
+void App::scanToolComponents(bool install) {
+    if (componentsBusy) return;
+    componentsBusy = true;
+    ++componentsRevision;
+    componentsActivity = install ? "Подготовка загрузки…" : "Проверяем версии…";
+    componentProgressVisible = false;
+    auto pending = components;
+    log(install ? "Установка компонентов запущена" : "Проверка компонентов запущена");
+    work([this, install, pending] {
+        std::string problem;
+        try {
+            if (install) {
+                std::unique_lock lock(toolsMutex);
+                auto current = refreshInstalledComponents(dataRoot() / L"tools", pending, stopping);
+                ULONGLONG lastProgressAt = 0;
+                std::string lastProgressName;
+                auto lastPhase = ComponentPhase::Downloading;
+                installComponents(dataRoot() / L"tools", current, stopping,
+                    [this](const std::string &message) { log(message); post([this, message] { componentsActivity = message; }); },
+                    [this, &lastProgressAt, &lastProgressName, &lastPhase](const ComponentProgress &p) {
+                        const auto now = GetTickCount64();
+                        const bool transition = p.name != lastProgressName || p.phase != lastPhase;
+                        const bool complete = p.total && p.received >= p.total;
+                        if (!transition && !complete && now - lastProgressAt < 100) return;
+                        lastProgressAt = now; lastProgressName = p.name; lastPhase = p.phase;
+                        post([this, p] {
+                            componentProgressVisible = true;
+                            componentProgress = p;
+                            const auto name = p.name == "FFmpeg" ? "FFmpeg и FFprobe" : p.name;
+                            switch (p.phase) {
+                            case ComponentPhase::Downloading: componentsActivity = "Загрузка: " + name; break;
+                            case ComponentPhase::Verifying: componentsActivity = "Проверка SHA-256: " + name; break;
+                            case ComponentPhase::Extracting: componentsActivity = "Распаковка: " + name; break;
+                            case ComponentPhase::Installing: componentsActivity = "Установка: " + name; break;
+                            }
+                        });
+                    });
+            }
+        } catch (const std::exception &e) { problem = e.what(); }
+        if (install) post([this] { componentProgressVisible = false; componentsActivity = "Проверяем установленные версии…"; });
+        std::vector<Component> result;
+        try { std::shared_lock lock(toolsMutex); result = scanComponents(dataRoot() / L"tools", stopping, [this](const std::string &line) { log(line); }); }
+        catch (const std::exception &e) { if (problem.empty()) problem = e.what(); }
+        post([this, result = std::move(result), problem, install] {
+            componentsBusy = false;
+            componentProgressVisible = false;
+            if (!result.empty()) { components = result; componentsScanned = true; }
+            if (componentsDirty) { componentsDirty = false; if (componentsScanned) refreshToolFiles(); }
+            if (!problem.empty()) { log("Компоненты: " + problem); error("Не удалось установить все выбранные компоненты: " + problem); }
+            else { log(install ? "Установка и проверка компонентов завершены" : "Проверка компонентов завершена"); notify(install ? "Установка завершена. Версии компонентов проверены." : "Проверка компонентов завершена"); }
+        });
+    });
+}
+void App::refreshToolFiles() {
+    const auto revision = ++componentsRevision;
+    const auto snapshot = components;
+    work([this, revision, snapshot] {
+        std::vector<Component> refreshed;
+        { std::shared_lock lock(toolsMutex); refreshed = refreshInstalledComponents(dataRoot() / L"tools", snapshot, stopping); }
+        post([this, revision, refreshed = std::move(refreshed)]() mutable {
+            if (revision != componentsRevision || componentsBusy) return;
+            components = std::move(refreshed);
+            if (!components.empty() && components[0].installed.empty()) status = "yt-dlp отсутствует · установите в настройках";
+            else if (status == "yt-dlp отсутствует · установите в настройках") status = "yt-dlp · движок готов";
+        });
+    });
 }
 void App::refreshSessions() {
     auto previous = session();
@@ -659,6 +738,7 @@ void App::analyze(const std::string &u, bool deep) {
     }
     scanning = false;
     const auto stopId = nextScanGeneration();
+    silentScanStop = stopId;
     if (auto previous = session()) work([previous, stopId] { try { previous->send({{"type", "scanStop"}, {"scanId", stopId}}); } catch (...) {} });
     *analysisCancel = true;
     auto cancel = analysisCancel = std::make_shared<std::atomic_bool>(false);
@@ -680,7 +760,7 @@ void App::analyze(const std::string &u, bool deep) {
             TempCookie file(cred.first);
             auto args = headersArgs(cred.second);
             args.insert(args.end(),
-                        {L"--ignore-config", L"--encoding", L"utf-8", L"--no-playlist", L"--no-warnings",
+                        {L"--ignore-config", L"--encoding", L"utf-8", L"--no-playlist",
                          L"--quiet", L"--dump-single-json", L"--skip-download", L"--allow-unplayable-formats",
                          L"--js-runtimes", L"deno:" + (dataRoot() / L"tools" / L"deno.exe").wstring()});
             if (!file.path.empty()) {
@@ -699,6 +779,15 @@ void App::analyze(const std::string &u, bool deep) {
                     throw std::runtime_error("yt-dlp не поддерживает эту страницу. Откройте «Подключение», "
                         "нажмите «Обновить вкладку и искать» и запустите видео или аудио в выбранной вкладке. "
                         "Найденные прямые ссылки появятся в «Обзоре медиа». Поиск расширением работает отдельно от анализа yt-dlp.");
+                if (details.find("Requested format is not available") != std::string::npos) {
+                    std::string advice = "yt-dlp не получил доступные форматы для этой страницы.";
+                    if (!fs::is_regular_file(dataRoot() / L"tools" / L"deno.exe"))
+                        advice += " Не найден Deno, необходимый для обработки многих страниц YouTube.";
+                    advice += " Проверьте, что ролик воспроизводится в подключённом браузере, затем повторите анализ. Доступность форматов также зависит от YouTube и учётной записи.";
+                    throw std::runtime_error(advice + "\n\n" + redact(details));
+                }
+                if (details.find("Sign in to confirm") != std::string::npos || details.find("HTTP Error 429") != std::string::npos)
+                    throw std::runtime_error("YouTube ограничил запрос или запросил подтверждение входа. Проверьте воспроизведение в подключённом браузере и повторите попытку позже.\n\n" + redact(details));
                 throw std::runtime_error(redact(details));
             }
             if (!result.error.empty())
@@ -1456,12 +1545,12 @@ void App::action(const std::string &cmd) {
                 post([this, selected, profile] {
                     preparingInstaller = false;
                     try {
-                    auto folder = dataRoot() / L"connector" / L"extensions" /
-                        (selected.family == "firefox" ? L"firefox" : L"chromium");
+                    auto folder = executable().parent_path() / L"extensions" /
+                        (selected.family == "firefox" ? L"firefox-signed" : L"chromium-development");
                     if (guidedBrowser(selected) != GuidedBrowser::None) {
                         auto guideTarget = guidedBrowser(selected) == GuidedBrowser::Firefox
-                            ? executable().parent_path() / L"extensions" / L"firefox-signed" / L"StreamShelf-Connector-1.0.2.xpi" : folder;
-                        if (guidedBrowser(selected) == GuidedBrowser::Firefox && !fs::is_regular_file(guideTarget)) throw std::runtime_error("Подписанный файл расширения Firefox не найден в комплекте программы.");
+                            ? executable().parent_path() / L"extensions" / L"firefox-signed" / L"StreamShelf-Connector-1.0.3.xpi" : folder;
+                        if (guidedBrowser(selected) == GuidedBrowser::Firefox && !fs::is_regular_file(guideTarget)) throw std::runtime_error("Подписанный файл расширения Firefox версии 1.0.3 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.3.xpi рядом с программой.");
                         extensionInstaller.start(hwnd, selected, profile ? &*profile : nullptr, guideTarget, reduced, light);
                         auto checkConnection = [this, expected = selected.exe] {
                             for (auto &existing : sessions) {
@@ -1484,7 +1573,7 @@ void App::action(const std::string &cmd) {
                         notify("Мастер установки открыт. Следуйте подсказкам поверх браузера.");
                     } else {
                         auto signedDir = executable().parent_path() / L"extensions" / L"firefox-signed";
-                        auto signedXpi = signedDir / L"StreamShelf-Connector-1.0.2.xpi";
+                        auto signedXpi = signedDir / L"StreamShelf-Connector-1.0.3.xpi";
                         bool signedAvailable = selected.family == "firefox" && fs::is_regular_file(signedXpi);
                         openPath(signedAvailable ? signedDir : folder);
                         modalTitle = "Ручная установка расширения";
@@ -1500,10 +1589,9 @@ void App::action(const std::string &cmd) {
                 });
             });
         } else if (cmd == "extensionFolder")
-            openPath(dataRoot() / L"connector" / L"extensions" /
-                     (browserIndex < int(browsers.size()) && browsers[browserIndex].family == "firefox"
-                          ? L"firefox"
-                          : L"chromium"));
+            openPath(browserIndex < int(browsers.size()) && browsers[browserIndex].family == "firefox"
+                         ? executable().parent_path() / L"extensions" / L"firefox-signed"
+                         : executable().parent_path() / L"extensions" / L"chromium-development");
         else if (cmd == "scan" || cmd == "reloadScan" || cmd == "stopScan") {
             auto s = session();
             if (!s)
@@ -1575,9 +1663,14 @@ void App::action(const std::string &cmd) {
             fs::remove(dataRoot() / L"cookies.dpapi");
             notify("Импортированные cookies удалены");
         } else if (cmd == "update")
-            work([this] { seedAndUpdate(true); });
-        else if (cmd == "dataFolder")
-            openPath(dataRoot());
+            scanToolComponents(false);
+        else if (cmd == "installComponents")
+            scanToolComponents(true);
+        else if (cmd == "dataFolder") {
+            auto folder = dataRoot() / L"tools";
+            fs::create_directories(folder);
+            openPath(folder);
+        }
         else if (cmd == "copyLogs") {
             std::string text;
             for (auto &line : logs)
@@ -1598,8 +1691,17 @@ void App::action(const std::string &cmd) {
             else {normalized.erase(0,firstNonspace);auto last=normalized.find_last_not_of(" \t");normalized.resize(last+1);}
             std::transform(normalized.begin(),normalized.end(),normalized.begin(),[](unsigned char c){return char(std::tolower(c));});
             if(normalized=="clear"||normalized=="cls"||normalized=="/clear")logs.clear();
-            else if(normalized=="/help")log("Команды Windows и утилиты StreamShelf: yt-dlp, ffmpeg, ffprobe, deno. /clear очищает журнал. Каждая команда запускается отдельно.");
-            else if(!normalized.empty()){
+            else if(normalized=="/help") {
+                log("> " + command);
+                log("/versions — версии компонентов; /clear — очистить журнал. Отдельно: yt-dlp --version, ffmpeg -version, ffprobe -version, deno --version.");
+            } else if(normalized=="/versions") {
+                log("> " + command);
+                work([this] {
+                    std::vector<Component> versions;
+                    { std::shared_lock lock(toolsMutex); versions=refreshInstalledComponents(dataRoot()/L"tools",{},stopping); }
+                    for(const auto &c:versions) log(c.name + ": " + (c.installed.empty()?"не установлен или не запускается":c.installed));
+                });
+            } else if(!normalized.empty()){
                 auto cancel=std::make_shared<std::atomic_bool>(false);
                 terminalCancel=cancel;
                 work([this,command,cancel]{
@@ -1608,12 +1710,13 @@ void App::action(const std::string &cmd) {
                         wchar_t shell[MAX_PATH]{};
                         if(!GetSystemDirectoryW(shell,MAX_PATH))throw std::runtime_error("Не найден системный командный процессор");
                         auto exe=fs::path(shell)/L"cmd.exe";log("> "+command);
-                        bool first=true;
-                        auto result=runProcess(exe,{L"/d",L"/s",L"/c",wide("chcp 65001>nul & "+command)},
-                            [this,&first](const std::string &line){if(first){first=false;return;}log(line);},
+                        auto resolved = terminalComponentCommand(wide(command), dataRoot()/L"tools");
+                        auto result=runProcess(exe,{L"/d",L"/s",L"/c",L"chcp 65001>nul & " + resolved},
+                            [this](const std::string &line){log(line);},
                             *cancel,true,true,dataRoot()/L"tools");
                         log(*cancel?"Команда прервана":"Команда завершена: код "+std::to_string(result.code));
-                    } catch (...) {finished();throw;}
+                    } catch (const std::exception &e) { log(std::string("Ошибка команды: ") + e.what()); finished(); throw; }
+                    catch (...) { finished(); throw; }
                     finished();
                 });
             }

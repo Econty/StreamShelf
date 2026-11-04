@@ -107,8 +107,9 @@ struct Scene {
     std::wstring internalUrl;
     GuideObservation facts;
     Control developer, load, confirm, enable, connect, popupConnect, permissionAllow;
-    Control toolbarAction, firefoxGear, firefoxMenu, firefoxAdd, firefoxOpen;
-    bool firefoxFileReady = false;
+    Control toolbarAction, firefoxGear, firefoxMenu, firefoxAdd, firefoxOpen, firefoxFile, firefoxOk;
+    bool firefoxAddedNotice = false;
+    bool firefoxFileReady = false, firefoxFileSelected = false;
     bool connectorPopup = false;
     Json toolbarControls = Json::array();
     int enableCandidates = 0;
@@ -274,8 +275,8 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
     wchar_t cls[100]{}; GetClassNameW(window, cls, 100);
     bool dialog = std::wstring(cls) == L"#32770";
     bool addressEditing = false;
-    Control popupEnable, popupAllow; bool permissionRequest = false;
-    struct FlatCandidate { RECT rect{}; std::optional<bool> enabled; bool explicitId = false; };
+    Control popupEnable, popupAllow; bool permissionRequest = false, firefoxAddedText = false;
+    struct FlatCandidate { RECT rect{}; std::optional<bool> enabled; bool explicitId = false; bool toggle = false; };
     std::vector<RECT> flatTitles, flatRemoveButtons;
     std::vector<FlatCandidate> flatSwitches;
     std::vector<IUIAutomationElement *> titleElements;
@@ -291,6 +292,7 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
         bool offscreen = cachedInt(element.p, UIA_IsOffscreenPropertyId).value_or(1) != 0;
         if (name.find(L"streamshelf connector") != std::wstring::npos) { ++scene.ownNamesSeen; if (offscreen) ++scene.ownNamesOffscreen; }
         if (offscreen) continue;
+        if (firefox && contains(name, {L"было добавлено", L"was added", L"has been added"})) firefoxAddedText = true;
         if (contains(name, {L"просмотр и изменение ваших данных на всех сайтах", L"read and change all your data on all websites", L"дополнительные разрешения", L"additional permissions", L"доступ к вашим данным для всех веб-сайтов", L"access your data for all websites"})) permissionRequest = true;
         auto value = cachedString(element.p, UIA_ValueValuePropertyId);
         if (value.empty()) value = cachedString(element.p, UIA_LegacyIAccessibleValuePropertyId);
@@ -312,11 +314,19 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
             auto id = cachedString(element.p, UIA_AutomationIdPropertyId);
             if (!dialog && button && (id == L"addon-page-options-button" || contains(name, {L"инструменты для всех дополнений", L"tools for all add-ons"}))) scene.firefoxGear = {rect, true};
             if (!dialog && (button || type == UIA_MenuItemControlTypeId || type == UIA_HyperlinkControlTypeId) && contains(name, {L"установить дополнение из файла", L"install add-on from file"})) scene.firefoxMenu = {rect, true};
-            if (dialog && button && (name == L"открыть" || name == L"open")) scene.firefoxOpen = {rect, true};
+            if (dialog && button && (name == L"открыть" || name == L"open") &&
+                rect.right - rect.left >= int(50 * GetDpiForWindow(window) / 96)) scene.firefoxOpen = {rect, true};
+            if (dialog && (type == UIA_ListItemControlTypeId || type == UIA_DataItemControlTypeId) &&
+                name == lower(fs::path(folder).filename().wstring())) {
+                scene.firefoxFile = {rect, true};
+                scene.firefoxFileSelected = cachedInt(element.p, UIA_SelectionItemIsSelectedPropertyId).value_or(0) != 0;
+            }
             if (dialog && type == UIA_EditControlTypeId && mentionsPath(value, folder)) scene.firefoxFileReady = true;
             if (!dialog && button && (name == L"добавить" || name == L"add")) scene.firefoxAdd = {rect, true};
+            if (!dialog && button && (name == L"ok" || name == L"ок")) scene.firefoxOk = {rect, true};
         }
         bool titleAnchor = name.rfind(L"streamshelf connector", 0) == 0 &&
+            (!firefox || !contains(name, {L"удален", L"удалён", L"removed", L"добавлено", L"added"})) &&
             (type == UIA_TextControlTypeId || type == UIA_HeaderControlTypeId || type == UIA_CustomControlTypeId);
         if (titleAnchor && std::none_of(flatTitles.begin(), flatTitles.end(), [&](const RECT &other) { return EqualRect(&other, &rect); })) flatTitles.push_back(rect);
         if ((button || type == UIA_HyperlinkControlTypeId || type == UIA_MenuItemControlTypeId) && removeName(name) &&
@@ -326,7 +336,7 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
         bool actionable = button || type == UIA_CheckBoxControlTypeId || type == UIA_CustomControlTypeId || type == UIA_RadioButtonControlTypeId;
         bool forbiddenName = contains(name, {L"разработчик", L"developer", L"удалить", L"remove", L"ошибк", L"error", L"сведения", L"details", L"инкогнито", L"incognito"});
         if (!forbiddenName && (switchId || (actionable && (enableControl(element.p, type, name) || cachedInt(element.p, UIA_IsKeyboardFocusablePropertyId).value_or(0)))))
-            flatSwitches.push_back({rect, enabledValue(element.p, type, name), switchId});
+            flatSwitches.push_back({rect, enabledValue(element.p, type, name), switchId, enableControl(element.p, type, name)});
         if ((button || type == UIA_MenuItemControlTypeId) && ownExtensionName(name) && !removeName(name)) {
             if (!contains(name, {L"закрепить", L"открепить", L"pin to", L"unpin", L"управление", L"manage"}) &&
                 (type == UIA_MenuItemControlTypeId || toolbarAncestor(automation, element.p))) scene.toolbarAction = {rect, true};
@@ -355,6 +365,8 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
     if (firefox && dialog && scene.firefoxOpen.found) scene.facts.folderDialog = true;
     if (firefox && !dialog && scene.firefoxGear.found) { scene.facts.page = true; scene.internalUrl = L"about:addons"; }
     if (firefox && scene.ownNamesSeen == 0) scene.firefoxAdd.found = false;
+    scene.firefoxAddedNotice = firefox && firefoxAddedText && scene.ownNamesSeen && scene.firefoxOk.found;
+    if (!scene.firefoxAddedNotice) scene.firefoxOk.found = false;
     if (!scene.facts.folderDialog && GetWindow(window, GW_OWNER) && scene.ownNamesSeen && popupEnable.found) {
         scene.facts.confirmationDialog = true; scene.facts.installedCard = true;
         scene.facts.enabledKnown = true; scene.facts.enabled = false; scene.enable = popupEnable;
@@ -405,6 +417,22 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
         if (matches.size() == 1) {
             scene.enable = {matches[0].rect, true}; scene.facts.installedCard = true;
             scene.liveCardFound = true; scene.enableCandidates = int(flatSwitches.size());
+            if (matches[0].enabled.has_value()) { scene.facts.enabledKnown = true; scene.facts.enabled = *matches[0].enabled; scene.liveEnabledKnown = true; }
+        }
+    }
+    // Firefox's add-on card has a switch and a three-dot menu, not a visible
+    // Remove button. Restrict matching to a single toggle on the title's row.
+    if (firefox && !dialog && pageLike && !scene.enable.found) {
+        std::vector<FlatCandidate> matches;
+        const auto dpi = GetDpiForWindow(window);
+        for (const auto &title : flatTitles) for (const auto &candidate : flatSwitches) {
+            if (!candidate.toggle || !firefoxCardSwitch(title.left, title.top, title.right, title.bottom,
+                    candidate.rect.left, candidate.rect.top, candidate.rect.right, candidate.rect.bottom, dpi)) continue;
+            if (std::none_of(matches.begin(), matches.end(), [&](const FlatCandidate &other) { return EqualRect(&other.rect, &candidate.rect); })) matches.push_back(candidate);
+        }
+        if (matches.size() == 1) {
+            scene.enable = {matches[0].rect, true}; scene.facts.installedCard = true;
+            scene.liveCardFound = true; scene.enableCandidates = 1;
             if (matches[0].enabled.has_value()) { scene.facts.enabledKnown = true; scene.facts.enabled = *matches[0].enabled; scene.liveEnabledKnown = true; }
         }
     }
@@ -596,6 +624,7 @@ std::wstring extensionPageUrl(GuidedBrowser kind) {
 struct ExtensionInstaller::Impl {
     bool firefox = false;
     bool firefoxSawPicker = false;
+    bool firefoxAcknowledgement = false;
     ULONGLONG firefoxPickerClosedAt = 0;
     HWND panel{}, marker{}, dimmer{}, owner{}, browserWindow{}, picker{};
     std::function<void()> retryConnection;
@@ -905,7 +934,7 @@ struct ExtensionInstaller::Impl {
             L"Нажмите обведённую кнопку «Выбор папки» / Select folder. Нужная папка уже открыта. После появления карточки расширения шаг сменится автоматически.",
             L"Ожидаю StreamShelf Connector. Если расширение добавлено, найдите его карточку. Если вы отменили выбор папки или браузер показал ошибку, нажмите «Повторить загрузку».",
             L"На карточке StreamShelf Connector включите переключатель. Если браузер открыл отдельное окно подтверждения, проверьте разрешения и нажмите обведённую кнопку «Включить». Далее мастер перейдёт автоматически.",
-            L"Откройте меню расширений на панели браузера, выберите StreamShelf Connector и нажмите «Подключить расширение». Прочитайте запрос браузера и разрешите доступ ко всем сайтам.",
+            L"Окно StreamShelf Connector откроется автоматически. Нажмите «Подключить расширение», затем прочитайте запрос браузера и разрешите доступ к сайтам, если согласны.",
             L"Связь с расширением подтверждена."
         };
         const wchar_t *firefoxTitles[] = {L"Откройте дополнения Firefox", L"Откройте меню настроек", L"Установите дополнение из файла", L"Выберите подписанный файл", L"Подтвердите установку", L"Включите расширение", L"Подключите расширение", L"Браузер подключён"};
@@ -916,7 +945,7 @@ struct ExtensionInstaller::Impl {
             L"В окне выбора укажите подписанный файл XPI. Можно скопировать путь кнопкой ниже и вставить его в поле имени файла.",
             L"Прочитайте разрешения Firefox и нажмите «Добавить», если согласны.",
             L"Включите StreamShelf Connector на странице дополнений Firefox.",
-            L"Откройте StreamShelf Connector, нажмите «Подключить расширение» и подтвердите доступ к сайтам.",
+            L"Окно расширения откроется автоматически. Нажмите «Подключить расширение», затем прочитайте запрос Firefox и подтвердите доступ к сайтам, если согласны.",
             L"Связь с расширением подтверждена."
         };
         int s = std::clamp(int(flow.stage), 0, 7);
@@ -932,8 +961,8 @@ struct ExtensionInstaller::Impl {
         canvas.border({8, 8, width - 16, height - 16}, 20, edge, panelInk);
         canvas.text("STREAMSHELF  /  УСТАНОВКА РАСШИРЕНИЯ", 24, 32, 11, accent, width - 48);
         canvas.text(utf8(browserName), 24, 57, 12, muted, width - 48);
-        canvas.text(utf8(firefox ? firefoxTitles[s] : titles[s]), 24, 94 + (1 - t) * 4, 21, ink.alpha(t), width - 48);
-        wrapped(utf8(firefox ? firefoxBodies[s] : bodies[s]), 24, 128 + (1 - t) * 4, width - 48, 13, 4, ink.alpha(t));
+        canvas.text(utf8(firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall) ? L"Расширение добавлено" : firefox ? firefoxTitles[s] : titles[s]), 24, 94 + (1 - t) * 4, 21, ink.alpha(t), width - 48);
+        wrapped(utf8(firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall) ? L"Нажмите «OK» в уведомлении Firefox. Затем при необходимости включите расширение переключателем в его карточке." : firefox ? firefoxBodies[s] : bodies[s]), 24, 128 + (1 - t) * 4, width - 48, 13, 4, ink.alpha(t));
         canvas.border({20, 218, width - 40, 45}, 12, edge, bg.alpha(.7f));
         canvas.text(firefox ? "Подписанный файл расширения" : "Папка расширения", 32, 235, 10, muted, width - 64);
         canvas.text(utf8(extension.wstring()), 32, 253, 11, ink, width - 64);
@@ -1063,7 +1092,7 @@ struct ExtensionInstaller::Impl {
         }
         RECT intersection{};
         if (IntersectRect(&intersection, &control.rect, &windowRect)) {
-            if (scene.permissionAllow.found || scene.firefoxAdd.found) showIfChanged(dimmer, false); else shade(control.rect);
+            if (scene.permissionAllow.found || scene.firefoxAdd.found || scene.firefoxAddedNotice) showIfChanged(dimmer, false); else shade(control.rect);
             outline(control.rect);
         } else hideFocus();
     }
@@ -1075,6 +1104,7 @@ struct ExtensionInstaller::Impl {
             observation.menu = scene.firefoxMenu.found;
             observation.picker = scene.facts.folderDialog;
             observation.installPrompt = scene.firefoxAdd.found;
+            observation.addedNotice = scene.firefoxAddedNotice;
             observation.installedKnown = scene.facts.installedCard || scene.profileAbsenceKnown;
             observation.installed = scene.facts.installedCard;
             observation.enabledKnown = scene.facts.enabledKnown;
@@ -1093,21 +1123,25 @@ struct ExtensionInstaller::Impl {
         } else if (current && !observation.picker) firefoxPickerAttempted = nullptr;
         auto stage = firefoxGuideStage(observation);
         auto previous = flow.stage;
+        if (firefoxAcknowledgement != observation.addedNotice) { firefoxAcknowledgement = observation.addedNotice; InvalidateRect(panel, nullptr, FALSE); }
         flow.stage = static_cast<GuideStage>(int(stage));
         if (flow.stage != previous) { setNotice(L""); InvalidateRect(panel, nullptr, FALSE); }
         if (stage == FirefoxGuideStage::Connect && browser && extensionRunning && !setupRequested && openSetup && openSetup()) setupRequested = true;
-        if (stage == FirefoxGuideStage::Connect) setNotice(L"Если окно расширения не открылось, выберите StreamShelf Connector в меню расширений Firefox.");
+        if (stage == FirefoxGuideStage::Connect) setNotice(L"Открываю окно расширения автоматически. Если оно не появилось, нажмите «Проверить связь».");
         showIfChanged(panel, true);
         if ((!own && !browser) || !current) { hideFocus(); return; }
         Control control;
         if (stage == FirefoxGuideStage::OpenMenu) control = scene.firefoxGear;
         else if (stage == FirefoxGuideStage::InstallFile) control = scene.firefoxMenu;
-        else if (stage == FirefoxGuideStage::ConfirmInstall) control = scene.firefoxAdd;
-        else if (stage == FirefoxGuideStage::SelectFile && scene.firefoxFileReady) control = scene.firefoxOpen;
+        else if (stage == FirefoxGuideStage::ConfirmInstall) control = scene.firefoxAddedNotice ? scene.firefoxOk : scene.firefoxAdd;
+        else if (stage == FirefoxGuideStage::SelectFile) {
+            if (scene.firefoxFile.found && !scene.firefoxFileSelected) control = scene.firefoxFile;
+            else if (scene.firefoxFileReady || scene.firefoxFileSelected) control = scene.firefoxOpen;
+        }
         else if (stage == FirefoxGuideStage::Enable) control = scene.enable;
-        else if (stage == FirefoxGuideStage::Connect) control = scene.permissionAllow.found ? scene.permissionAllow : scene.popupConnect.found ? scene.popupConnect : scene.toolbarAction.found ? scene.toolbarAction : scene.connect;
-        if (stage == FirefoxGuideStage::SelectFile) setNotice(scene.firefoxFileReady ? L"Путь к подписанному файлу указан. Нажмите «Открыть»." : L"Если путь не подставлен, вставьте его в поле имени файла и нажмите «Открыть».");
-        if (stage == FirefoxGuideStage::ConfirmInstall && !scene.firefoxAdd.found) setNotice(L"Ожидаю подтверждение Firefox. Если выбор отменён, откройте меню установки снова.");
+        else if (stage == FirefoxGuideStage::Connect) control = scene.permissionAllow.found ? scene.permissionAllow : scene.popupConnect;
+        if (stage == FirefoxGuideStage::SelectFile) setNotice(scene.firefoxFile.found && !scene.firefoxFileSelected ? L"Выберите файл StreamShelf Connector в списке." : (scene.firefoxFileReady || scene.firefoxFileSelected) ? L"Файл указан. Нажмите кнопку «Открыть»." : L"Вставьте путь в поле имени файла и нажмите «Открыть».");
+        if (stage == FirefoxGuideStage::ConfirmInstall && !scene.firefoxAdd.found && !scene.firefoxAddedNotice) setNotice(L"Ожидаю подтверждение Firefox. Если выбор отменён, откройте меню установки снова.");
         if (stage == FirefoxGuideStage::Enable && !control.found) setNotice(L"Включите StreamShelf Connector в списке дополнений Firefox.");
         highlightTarget(scene, control);
     }
@@ -1192,7 +1226,7 @@ struct ExtensionInstaller::Impl {
             InvalidateRect(panel, nullptr, FALSE);
         }
         if (autoCloseOnEnabled && pageVerified && (flow.stage == GuideStage::Connect || flow.stage == GuideStage::Done)) {
-            setNotice(extensionReloadRequired ? L"Обновите StreamShelf Connector на странице расширений (значок обновления на карточке), затем подключите расширение." : L"Если окно не открылось, нажмите значок расширений на панели браузера и выберите StreamShelf Connector. Затем нажмите «Подключить расширение».");
+            setNotice(extensionReloadRequired ? L"Обновите StreamShelf Connector на странице расширений (значок обновления на карточке), затем подключите расширение." : L"Открываю окно расширения автоматически. Если оно не появилось, нажмите «Проверить связь».");
         }
         showIfChanged(panel, true);
         if ((!own && !browser) || !current) { hideFocus(); return; }
@@ -1204,7 +1238,7 @@ struct ExtensionInstaller::Impl {
         if (flow.stage == GuideStage::Confirm && scene.facts.folderDialog) control = scene.confirm;
         if (flow.stage == GuideStage::Enable && (scene.facts.page || scene.facts.confirmationDialog)) control = scene.enable;
         if (flow.stage == GuideStage::Connect || flow.stage == GuideStage::Done)
-            control = scene.permissionAllow.found ? scene.permissionAllow : scene.popupConnect.found ? scene.popupConnect : scene.toolbarAction.found ? scene.toolbarAction : scene.connect;
+            control = scene.permissionAllow.found ? scene.permissionAllow : scene.popupConnect;
         if (!control.found) {
             if (flow.stage == GuideStage::Enable && scene.facts.page)
                 setNotice(L"Найдите карточку StreamShelf Connector и прокрутите её в видимую область: мастер ищет её переключатель.");
@@ -1322,7 +1356,7 @@ struct ExtensionInstaller::Impl {
                     if (self->flow.stage == GuideStage::Connect || self->flow.stage == GuideStage::Done) {
                         self->setupRequested = false;
                         if (self->retryConnection) self->retryConnection();
-                        self->setNotice(L"Проверяю связь и разрешение. Откройте меню расширений, подключите StreamShelf Connector и подтвердите доступ к сайтам.");
+                        self->setNotice(L"Проверяю связь и открываю окно StreamShelf Connector. Подтвердите доступ к сайтам, если согласны.");
                         break;
                     }
                     if (!self->firefox && self->flow.stage == GuideStage::Verify) { self->flow.retryInstallation(); InvalidateRect(h, nullptr, FALSE); }

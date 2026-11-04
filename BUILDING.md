@@ -24,6 +24,6 @@ cmake --install build/release --prefix release/StreamShelf-Native
 
 ## Инструменты и расширения для выпуска
 
-Сборка не создаёт `bundled-tools`: подготовьте отдельно совместимые yt-dlp, FFmpeg/FFprobe и Deno, `checksums.json`, сведения об источниках и лицензии. `scripts/Build.ps1 -IncludeTools` копирует заранее подготовленную папку `artifacts/bundled-tools`; сама эта команда не подтверждает происхождение файлов. См. README и THIRD_PARTY.md.
+Программа устанавливает yt-dlp, FFmpeg/FFprobe и Deno через раздел «Настройки → Компоненты» в `%LOCALAPPDATA%\StreamShelfNative\tools`. Компоненты из `bundled-tools` программа не использует. См. README и THIRD_PARTY.md.
 
 В комплект входят исходники Chromium-расширения и имеющийся подписанный Firefox XPI. После изменения исходников Firefox прежний XPI не обновляется автоматически: для выпуска требуется новая подписанная версия, см. FIREFOX-SIGNING.md. Для подтверждения выпуска отдельно проверьте установку, тесты и загрузку медиа на Windows; исторический VERIFICATION.md не является результатом для текущего коммита.

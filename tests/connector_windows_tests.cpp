@@ -112,6 +112,11 @@ void cancelRead() {
 }
 #ifndef STREAMSHELF_BASELINE
 void identityAndRetry() {
+    check("current Firefox accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.3"}}));
+    check("old Firefox rejected", !compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.0"}}) && !compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.2"}}));
+    check("current Chromium accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.3"}}));
+    check("old Chromium rejected", !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.0"}}) && !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.1"}}) && !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.2"}}));
+    check("missing version rejected", !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}}));
     std::map<DWORD, DWORD> parents{{10, 20}, {20, 30}, {30, 30}};
     std::map<DWORD, std::wstring> paths{{10, L"C:\\App\\StreamShelf.Host.exe"}, {20, L"C:\\Windows\\System32\\cmd.exe"}, {30, L"C:\\Browser\\Chrome.exe"}};
     auto path = browserFromAncestors(10, parents, [&](DWORD pid) { return paths[pid]; });
