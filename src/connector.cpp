@@ -156,33 +156,42 @@ Json Session::credentials(const std::string &url, std::atomic_bool &cancel) {
             throw std::runtime_error(str(result, "message", "Ошибка расширения"));
         if (str(result, "url") != url)
             throw std::runtime_error("Адрес снимка cookies не совпал");
-        if (epoch == credentialEpoch) credentialSnapshots.insert_or_assign(url, result);
+        if (epoch == credentialEpoch) {
+            if (credentialSnapshots.size() >= 128 && !credentialSnapshots.count(url)) {
+                auto oldest=std::min_element(credentialSnapshots.begin(),credentialSnapshots.end(),[](const auto &a,const auto &b){return a.second.captured<b.second.captured;});
+                credentialSnapshots.erase(oldest);
+            }
+            credentialSnapshots.insert_or_assign(url, CredentialSnapshot{result,GetTickCount64()});
+        }
         return result;
     } catch (...) {
         if (cancel) throw;
         std::lock_guard lock(mutex);
         auto cached = credentialSnapshots.find(url);
-        if (epoch == credentialEpoch && cached != credentialSnapshots.end()) return cached->second;
+        if (epoch == credentialEpoch && cached != credentialSnapshots.end() && GetTickCount64()-cached->second.captured <= 300000) return cached->second.data;
         throw;
     }
 }
 void Connector::start() {
     acceptThread = std::thread([this] {
         acceptId = GetCurrentThreadId();
+        try {
+        bool firstInstance=true;
         while (!stopping) {
             PSECURITY_DESCRIPTOR sd = nullptr;
             auto acl = L"D:P(A;;GA;;;" + userSid() + L")";
             if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(acl.c_str(), SDDL_REVISION_1, &sd,
                                                                       nullptr))
-                break;
+                throw std::runtime_error("Не удалось подготовить права канала расширения");
             SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
             HANDLE p =
-                CreateNamedPipeW(pipeName().c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                CreateNamedPipeW(pipeName().c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (firstInstance ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
                                  PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                                  16, MaxFrame, MaxFrame, 0, &sa);
             LocalFree(sd);
             if (p == INVALID_HANDLE_VALUE)
-                break;
+                throw std::runtime_error("Не удалось создать канал расширения (код " + std::to_string(GetLastError()) + ")");
+            firstInstance=false;
             BOOL connected = pipeio::connect(p, stopping);
             if (!connected || stopping) {
                 CloseHandle(p);
@@ -201,7 +210,7 @@ void Connector::start() {
                             throw std::runtime_error("Stopped");
                         Json j;
                         if (!frameRead(s->pipe, j, true) || str(j, "type") != "hello" ||
-                            number(j, "protocol") != 1 || str(j, "version") != "1.0.0")
+                            number(j, "protocol") != 1)
                             throw std::runtime_error("Несовместимое расширение");
                         {
                             std::lock_guard sl(s->mutex);
@@ -251,11 +260,23 @@ void Connector::start() {
                 });
             }
         }
+        } catch (const std::exception &e) {
+            if (!stopping && message) message(nullptr, {{"type","connectorError"},{"message",e.what()}});
+        } catch (...) {
+            if (!stopping && message) message(nullptr, {{"type","connectorError"},{"message","Ошибка канала расширения"}});
+        }
         acceptEnded = true;
     });
 }
 std::vector<std::shared_ptr<Session>> Connector::list() {
     std::lock_guard l(mutex);
+    for (size_t i=0; i<sessions.size();) {
+        if (sessions[i]->readerEnded) {
+            if (readers[i].joinable()) readers[i].join();
+            sessions.erase(sessions.begin()+i);
+            readers.erase(readers.begin()+i);
+        } else ++i;
+    }
     std::vector<std::shared_ptr<Session>> out;
     for (auto &s : sessions) {
         std::lock_guard sl(s->mutex);
@@ -413,6 +434,7 @@ int nativeHostMain() {
         } else
             Sleep(5);
     }
+
     quit = true;
     CancelIoEx(pipe, nullptr);
     while (!ended) {

@@ -139,11 +139,39 @@ std::wstring quoteWide(const std::wstring &s) {
     return out + L'\"';
 }
 std::string redact(std::string s) {
-    static const std::regex header(R"((Authorization|Cookie|Set-Cookie|X-Api-Key)\s*[:=][^\r\n]*)",
-                                   std::regex::icase),
-        url(R"((https?://[^\s?"<>]+)\?[^\s"<>]*)", std::regex::icase);
-    s = std::regex_replace(s, header, "$1: [скрыто]");
-    return std::regex_replace(s, url, "$1?[скрыто]");
+    auto lower=[](unsigned char c){return char(std::tolower(c));};
+    auto matches=[&](size_t pos, const char *word) {
+        for (; *word; ++word, ++pos) if (pos>=s.size() || lower(s[pos])!=*word) return false;
+        return true;
+    };
+    for (size_t i=0; i<s.size();) {
+        size_t length=0;
+        static constexpr std::pair<const char *,size_t> names[]={{"authorization",13},{"set-cookie",10},{"cookie",6},{"x-api-key",9}};
+        for (const auto &[name, nameLength] : names)
+            if (matches(i,name)) { length=nameLength; break; }
+        if (!length) { ++i; continue; }
+        size_t end=i+length;
+        while (end<s.size() && std::isspace(static_cast<unsigned char>(s[end])) && s[end]!='\r' && s[end]!='\n') ++end;
+        if (end==s.size() || (s[end]!=':' && s[end]!='=')) { ++i; continue; }
+        auto lineEnd=s.find_first_of("\r\n",end);
+        if (lineEnd==std::string::npos) lineEnd=s.size();
+        const std::string replacement=": [скрыто]";
+        s.replace(i+length,lineEnd-(i+length),replacement);
+        i+=length+replacement.size();
+    }
+    for (size_t i=0; i<s.size();) {
+        size_t scheme=matches(i,"https://")?8:matches(i,"http://")?7:0;
+        if (!scheme) { ++i; continue; }
+        size_t pos=i+scheme;
+        while (pos<s.size() && !std::isspace(static_cast<unsigned char>(s[pos])) && s[pos]!='?' && s[pos]!='"' && s[pos]!='<' && s[pos]!='>') ++pos;
+        if (pos==s.size() || s[pos]!='?') { i=pos; continue; }
+        size_t end=pos+1;
+        while (end<s.size() && !std::isspace(static_cast<unsigned char>(s[end])) && s[end]!='"' && s[end]!='<' && s[end]!='>') ++end;
+        const std::string hidden="?[скрыто]";
+        s.replace(pos,end-pos,hidden);
+        i=pos+hidden.size();
+    }
+    return s;
 }
 std::string cookies(const Json &a) {
     if (!a.is_array())

@@ -233,6 +233,8 @@ void App::start() {
     connector.message = [this](std::shared_ptr<Session> s, const Json &j) {
         post([this, s, j] {
             auto type = str(j, "type");
+            if (type == "connectorError") { error(str(j, "message")); return; }
+            if (!s) return;
             if (type == "pong") {
                 std::string actual; { std::lock_guard lock(s->mutex); actual = s->browserExecutable; }
                 bool matching = sameBrowserExecutable(actual, installerBrowserExecutable);
@@ -285,16 +287,8 @@ void App::start() {
                 }
                 return;
             }
-            if (type == "scanCredentials") {
-                auto target = str(j, "url");
-                std::lock_guard lock(s->mutex);
-                if (httpUrl(target) && s->credentialScanId &&
-                    j.value("scanId", uint64_t(0)) == s->credentialScanId &&
-                    j.contains("cookies") && j["cookies"].is_array() &&
-                    j.contains("headers") && j["headers"].is_object())
-                    s->credentialSnapshots.insert_or_assign(target, j);
-                return;
-            }
+            // Older signed extensions may send unsolicited snapshots; do not retain them.
+            if (type == "scanCredentials") return;
             if (session() != s)
                 return;
             if (type == "scanState" || type == "resource") {

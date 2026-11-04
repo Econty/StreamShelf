@@ -7,7 +7,7 @@ inline std::string browserFromAncestors(DWORD pid, const std::map<DWORD, DWORD> 
         fs::path path(pathForPid(pid));
         auto name = path.filename().wstring();
         if (!name.empty()) CharLowerBuffW(name.data(), DWORD(name.size()));
-        if (name == L"chrome.exe" || name == L"browser.exe" || name == L"firefox.exe") return utf8(path.wstring());
+        if (name == L"chrome.exe" || name == L"browser.exe" || name == L"firefox.exe" || name == L"msedge.exe" || name == L"brave.exe" || name == L"vivaldi.exe" || name == L"opera.exe") return utf8(path.wstring());
         auto it = parents.find(pid);
         if (it == parents.end() || it->second == pid) break;
         pid = it->second;

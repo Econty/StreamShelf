@@ -80,7 +80,8 @@ struct Session {
     std::set<std::string> pendingCredentials;
     void acceptCredentialReply(const Json &);
     // Snapshots belong to this browser session and the exact requested URL.
-    std::map<std::string, Json> credentialSnapshots;
+    struct CredentialSnapshot { Json data; ULONGLONG captured; };
+    std::map<std::string, CredentialSnapshot> credentialSnapshots;
     uint64_t credentialEpoch = 0, credentialScanId = 0;
     std::atomic_bool alive{true};
     std::atomic<DWORD> readerId{0};

@@ -173,6 +173,8 @@ int main() {
     test("Secrets are removed from log text", [] {
         auto s = redact("Authorization: Bearer ABC\nhttps://x.test/video?token=SECRET");
         check(s.find("ABC") == s.npos && s.find("SECRET") == s.npos, "Leak");
+        auto longLine=redact(std::string(65536,'x')+" https://example.test/file?token=LONGSECRET");
+        check(longLine.find("LONGSECRET")==std::string::npos && longLine.size()>65536,"Long line redaction");
     });
     Json sample = {
         {"title", "Тест"},

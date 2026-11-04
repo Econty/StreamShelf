@@ -31,11 +31,12 @@ for(const family of ['chromium','firefox']) {
  }
  let siteAccess=true;const stored={instanceId:'test'};const sent=[],listeners={};const event=key=>({addListener:f=>listeners[key]=f});
  const port={postMessage:m=>sent.push(m),onDisconnect:event('disconnect'),onMessage:event('native')};
- const api={runtime:{onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),connectNative:()=>port,lastError:null},storage:{local:{get:async key=>({[key]:stored[key]}),set:async values=>Object.assign(stored,values)}},tabs:{get:async id=>({id,url:id===99?'chrome://extensions/':'https://example.com/watch',title:'Test',cookieStoreId:'firefox-container-1'}),query:async()=>[{id:99}],reload:async()=>{},sendMessage:async()=>{},onActivated:event('activated'),onUpdated:event('updated'),onRemoved:event('removed')},windows:{WINDOW_ID_NONE:-1,get:async()=>({focused:true}),onFocusChanged:event('focus')},alarms:{create:()=>{},onAlarm:event('alarm')},permissions:{contains:async()=>siteAccess,onAdded:event('permissionAdded'),onRemoved:event('permissionRemoved')},scripting:{executeScript:async()=>{}},cookies:{getAll:async options=>{assert.equal(options.storeId,'firefox-container-1');return [{domain:'example.com',name:'session',value:'SECRET',path:'/',secure:true,httpOnly:true,partitionKey:{topLevelSite:'https://example.com'}}];}},webRequest:{onBeforeSendHeaders:event('request'),onHeadersReceived:event('response'),onErrorOccurred:event('error')}};
+ const api={runtime:{getManifest:()=>manifest,onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),connectNative:()=>port,lastError:null},storage:{local:{get:async key=>({[key]:stored[key]}),set:async values=>Object.assign(stored,values)}},tabs:{get:async id=>({id,url:id===99?'chrome://extensions/':'https://example.com/watch',title:'Test',...(family==='firefox'?{cookieStoreId:'firefox-container-1'}:{incognito:true})}),query:async()=>[{id:99}],reload:async()=>{},sendMessage:async()=>{},onActivated:event('activated'),onUpdated:event('updated'),onRemoved:event('removed')},windows:{WINDOW_ID_NONE:-1,get:async()=>({focused:true}),onFocusChanged:event('focus')},alarms:{create:()=>{},onAlarm:event('alarm')},permissions:{contains:async()=>siteAccess,onAdded:event('permissionAdded'),onRemoved:event('permissionRemoved')},scripting:{executeScript:async()=>{}},cookies:{getAllCookieStores:async()=>[{id:'private-store',tabIds:[7,8,9]}],getAll:async options=>{assert.equal(options.storeId,family==='firefox'?'firefox-container-1':'private-store');return [{domain:'example.com',name:'session',value:'SECRET',path:'/',secure:true,httpOnly:true,partitionKey:{topLevelSite:'https://example.com'}}];}},webRequest:{onBeforeSendHeaders:event('request'),onHeadersReceived:event('response'),onErrorOccurred:event('error')}};
  const context=vm.createContext({chrome:api,browser:family==='firefox'?api:undefined,URL,crypto:crypto.webcrypto,navigator:{userAgent:'Firefox/Test'},Map,Set,setTimeout,clearTimeout,console});
  vm.runInContext(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/background.js`,'utf8'),context);
  if(['chromium','firefox'].includes(family)){listeners.installed();await new Promise(resolve=>setTimeout(resolve,0));assert(sent.some(m=>m.type==='hello'&&m.allowLaunch===false));count++;}
  assert.equal(vm.runInContext("classify('https://e.com/file','video/mp4')",context),'Видео');count++;
+ assert.equal(vm.runInContext('VERSION',context),manifest.version);count++;
  assert.equal(vm.runInContext("classify('https://e.com/segment.ts','video/mp2t')",context),'Сегмент');count++;
  assert.equal(vm.runInContext("classify('https://e.com/file','application/vnd.apple.mpegurl')",context),'HLS');count++;
  assert.equal(vm.runInContext("cleanUrl('file:///etc/passwd')",context),null);count++;
@@ -52,13 +53,13 @@ for(const family of ['chromium','firefox']) {
  listeners.request({tabId:7,url:'https://example.com/media.mp4?token=SIGNED',requestId:'ok',requestHeaders:[{name:'Authorization',value:'Bearer SECRET'}]});
  listeners.response({tabId:7,url:'https://example.com/media.mp4?token=SIGNED',requestId:'ok',responseHeaders:[{name:'Content-Type',value:'video/mp4'}]});
  await new Promise(resolve=>setTimeout(resolve,0));
- const snapshot=sent.find(m=>m.type==='scanCredentials');
- assert.equal(snapshot?.url,'https://example.com/media.mp4?token=SIGNED');
- assert.equal(snapshot?.headers.Authorization,'Bearer SECRET');
- assert.equal(snapshot?.cookies[0].partitioned,true);count+=3;
+ assert(!sent.some(m=>m.type==='scanCredentials'));count++;
  const found=sent.find(m=>m.type==='resource');assert.equal(found.item.url,'https://example.com/media.mp4?token=SIGNED');assert(!JSON.stringify(found).includes('SECRET'));count++;
  await vm.runInContext("handleCommand({type:'credentials',requestId:'r',tabId:7,url:'https://example.com/media.mp4?token=SIGNED'})",context);
  const creds=sent.find(m=>m.type==='credentialsResult');assert.equal(creds.cookies[0].partitioned,true);assert.equal(creds.headers.Authorization,'Bearer SECRET');count++;
+ await vm.runInContext("handleCommand({type:'credentials',requestId:'canonical',tabId:7,url:'https://EXAMPLE.COM/watch'})",context);assert.equal(sent.find(m=>m.requestId==='canonical').url,'https://EXAMPLE.COM/watch');count++;
+ assert.equal(vm.runInContext("classify('https://e.com/license.mp4','video/mp4')",context),'Видео');count++;
+ listeners.request({tabId:7,url:'https://example.com/favicon.ico',requestId:'favicon',requestHeaders:[]});const notices=sent.filter(m=>m.type==='notice').length;listeners.response({tabId:7,url:'https://example.com/favicon.ico',requestId:'favicon',statusCode:404,responseHeaders:[]});assert.equal(sent.filter(m=>m.type==='notice').length,notices);count++;
  await assert.rejects(vm.runInContext("handleCommand({type:'credentials',requestId:'bad',tabId:7,url:'https://not-observed.example/'})",context));count++;
  await vm.runInContext("handleCommand({type:'scanStop'})",context);
  const before=sent.filter(m=>m.type==='resource').length;
