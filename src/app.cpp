@@ -97,6 +97,7 @@ App::App() {
                 job->assemblyInput = v.value("assemblyInput",false);
                 job->localFile=v.value("localFile",false);job->conversionSource=v.value("conversionSource",false);
                 job->assembly = v.value("assembly",false);
+                job->singleExport=v.value("singleExport",false);job->exportFormat=v.value("exportFormat",0);job->exportQuality=v.value("exportQuality",1);
                 job->assemblyMetadataTitle = str(v,"assemblyMetadataTitle"); job->assemblyArtist = str(v,"assemblyArtist"); job->assemblyDescription = str(v,"assemblyDescription");
                 for (const auto &source : v.value("sources",Json::array())) { auto entry=assemblyFrom(source); if(source.contains("media"))entry.media=mediaFrom(source["media"]); job->sources.push_back(entry); }
                 job->mux = v.value("mux", false);
@@ -860,7 +861,38 @@ std::shared_ptr<Preview> App::requestPreview(const Media &item) {
         try {
             std::string thumbnail=item.thumbnail;
             if(thumbnail.empty()&&(item.category=="Изображения"||item.category=="Превью"))thumbnail=item.url;
-            if(httpUrl(thumbnail)) {
+            if(thumbnail.rfind("assembly-cover:",0)==0) {
+                message="Вложенная обложка не найдена";
+                auto separator=thumbnail.find('|',15);
+                if(separator==std::string::npos)throw std::runtime_error("Нет пути к контейнеру");
+                auto input=fs::path(wide(thumbnail.substr(separator+1)));
+                std::atomic_bool cancel{false},finished{false};
+                std::thread watchdog([&]{for(int i=0;i<150&&!finished&&!stopping;i++)Sleep(100);if(!finished)cancel=true;});
+                try {
+                    auto probe=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-of",L"json",input.wstring()},nullptr,cancel,true);
+                    auto data=Json::parse(probe.output,nullptr,false);
+                    int coverIndex=-1;
+                    if(!probe.code && data.is_object())for(const auto &stream:data.value("streams",Json::array())) {
+                        auto codec=str(stream,"codec_name");
+                        if(codec!="mjpeg" && codec!="png")continue;
+                        auto filename=str(stream.value("tags",Json::object()),"filename");
+                        std::transform(filename.begin(),filename.end(),filename.begin(),[](unsigned char c){return char(std::tolower(c));});
+                        if(number(stream.value("disposition",Json::object()),"attached_pic")!=0 || filename=="cover.jpg" || filename=="cover.png") {
+                            coverIndex=int(number(stream,"index",-1));break;
+                        }
+                    }
+                    if(coverIndex>=0 && !cancel) {
+                        static std::atomic_uint64_t coverSerial{0};
+                        auto path=dataRoot()/L"temp"/(L"cover-preview-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++coverSerial)+L".png");
+                        struct Cleanup {fs::path path;~Cleanup(){std::error_code ec;fs::remove(path,ec);}} cleanup{path};
+                        fs::create_directories(path.parent_path());
+                        auto result=runProcess(tool(L"ffmpeg.exe"),{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-i",input.wstring(),L"-map",L"0:"+std::to_wstring(coverIndex),L"-frames:v",L"1",L"-vf",L"scale=480:270:force_original_aspect_ratio=decrease",L"-update",L"1",L"-y",path.wstring()},nullptr,cancel,true);
+                        if(!result.code && fs::is_regular_file(path))image=decodePreview(readFile(path,8*1024*1024));
+                        else message="Не удалось прочитать вложенную обложку";
+                    }
+                } catch(...) {finished=true;watchdog.join();throw;}
+                finished=true;watchdog.join();
+            } else if(httpUrl(thumbnail)) {
                 Json headers=Json::object();std::string cookieText;
                 if(selectedSession){try{auto cred=credentials(selectedSession,thumbnail,stopping);cookieText=cred.first;headers=cred.second;}catch(...){}}
                 image=decodePreview(httpPreview(thumbnail,stopping,headers,cookieText));
@@ -913,7 +945,7 @@ void App::saveHistory() {
                      {"local", j->local},
                      {"output", j->output},
                      {"outputDirectory", j->outputDirectory},
-                     {"assembly", j->assembly}, {"assemblyInput",j->assemblyInput}, {"localFile",j->localFile}, {"conversionSource",j->conversionSource}, {"sources", sources}, {"assemblyMetadataTitle",j->assemblyMetadataTitle}, {"assemblyArtist",j->assemblyArtist}, {"assemblyDescription",j->assemblyDescription},
+                     {"assembly", j->assembly}, {"singleExport",j->singleExport}, {"exportFormat",j->exportFormat}, {"exportQuality",j->exportQuality}, {"assemblyInput",j->assemblyInput}, {"localFile",j->localFile}, {"conversionSource",j->conversionSource}, {"sources", sources}, {"assemblyMetadataTitle",j->assemblyMetadataTitle}, {"assemblyArtist",j->assemblyArtist}, {"assemblyDescription",j->assemblyDescription},
                      {"item", mediaJson(j->item)}, {"mux", j->mux}, {"muxInputs", j->muxInputs}, {"muxChapters", j->muxChapters},
                      {"muxOptions", {{"container", j->muxOptions.container}, {"video", j->muxOptions.video}, {"audio", j->muxOptions.audio}, {"subtitles", j->muxOptions.subtitles}}}});
     }

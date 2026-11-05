@@ -1,5 +1,6 @@
 #pragma once
 #include "core.hpp"
+#include <iomanip>
 namespace ss {
 struct MuxOptions { int container = 0, video = 0, audio = 0, subtitles = 0; };
 inline bool supportsExtendedTrackTags(int container) {
@@ -9,8 +10,8 @@ inline bool supportsForcedSubtitles(int container) {
     return container == 0 || container == 1 || container == 3;
 }
 inline std::string muxContainer(const MuxOptions &o) {
-    static const char *v[] = {"mkv", "mp4", "mov", "webm"};
-    if (o.container < 0 || o.container >= 4) throw std::runtime_error("Неизвестный контейнер");
+    static const char *v[] = {"mkv", "mp4", "mov", "webm", "mp3", "m4a", "flac"};
+    if (o.container < 0 || o.container >= 7) throw std::runtime_error("Неизвестный контейнер");
     return v[o.container];
 }
 inline std::vector<std::wstring> muxCodecArgs(const MuxOptions &o) {
@@ -26,6 +27,21 @@ inline double muxDuration(const Json &object) {
     try { double value=std::stod(str(object,"duration","0")); return std::isfinite(value)&&value>0?value:0; }
     catch (...) {return 0;}
 }
+inline Json chaptersFromProbe(const Json &probe) {
+    auto entries=probe.value("chapters",Json::array());
+    if(!entries.is_array() || entries.empty())throw std::runtime_error("Список глав пуст или имеет неверный формат");
+    Json result=Json::array();
+    for(const auto &entry:entries) {
+        double start=-1,end=-1;
+        try {
+            auto parse=[](const Json &j,const char *key) {auto value=j.at(key);return value.is_number()?value.get<double>():std::stod(value.get<std::string>());};
+            start=parse(entry,"start_time");end=parse(entry,"end_time");
+        } catch (...) {throw std::runtime_error("Не удалось определить границы глав");}
+        if(!std::isfinite(start)||!std::isfinite(end)||start<0||end<=start||end>100000000)throw std::runtime_error("Не удалось определить границы глав");
+        result.push_back({{"start_time",start},{"end_time",end},{"title",str(entry.value("tags",Json::object()),"title","Глава")}});
+    }
+    return result;
+}
 inline std::string chaptersToFfmetadata(const Json &chapters) {
     if (!chapters.is_array() || chapters.empty()) throw std::runtime_error("Список глав пуст или имеет неверный формат");
     std::string out = ";FFMETADATA1\n";
@@ -39,5 +55,24 @@ inline std::string chaptersToFfmetadata(const Json &chapters) {
         out += "[CHAPTER]\nTIMEBASE=1/1000\nSTART=" + std::to_string((long long)std::llround(start * 1000)) + "\nEND=" + std::to_string((long long)std::llround(end * 1000)) + "\ntitle=" + escaped + "\n";
     }
     return out;
+}
+inline std::vector<std::pair<std::string,std::string>> flacChapterTags(const Json &chapters,double duration) {
+    if(!chapters.is_array() || chapters.empty() || chapters.size()>1000)
+        throw std::runtime_error("FLAC поддерживает от 1 до 1000 глав. Выберите M4A или сохраните главы отдельно.");
+    if(!std::isfinite(duration) || duration<=0)throw std::runtime_error("Не удалось определить длительность аудио для глав FLAC.");
+    std::vector<std::pair<std::string,std::string>> result;
+    double previousEnd=-1;
+    for(size_t n=0;n<chapters.size();++n) {
+        const auto &chapter=chapters[n];auto start=number(chapter,"start_time",-1),end=number(chapter,"end_time",-1);
+        if(!std::isfinite(start) || !std::isfinite(end) || start<0 || end<=start || end>=360000 || std::llround(start*1000)>=360000000 || (n>0 && std::abs(start-previousEnd)>0.0015))
+            throw std::runtime_error("FLAC сохраняет главы без промежутков и длительностью до 100 часов. Выберите M4A или сохраните главы отдельно.");
+        previousEnd=end;auto milliseconds=static_cast<long long>(std::llround(start*1000));
+        std::ostringstream key,time;key<<"CHAPTER"<<std::setfill('0')<<std::setw(3)<<n;
+        time<<std::setfill('0')<<std::setw(2)<<(milliseconds/3600000)<<":"<<std::setw(2)<<((milliseconds/60000)%60)<<":"<<std::setw(2)<<((milliseconds/1000)%60)<<"."<<std::setw(3)<<(milliseconds%1000);
+        auto title=str(chapter,"title","Глава");for(auto &ch:title)if(ch=='\r'||ch=='\n')ch=' ';
+        result.emplace_back(key.str(),time.str());result.emplace_back(key.str()+"NAME",std::move(title));
+    }
+    if(std::abs(previousEnd-duration)>0.005)throw std::runtime_error("Для FLAC конец последней главы должен совпадать с концом аудио. Выберите M4A или сохраните главы отдельно.");
+    return result;
 }
 }

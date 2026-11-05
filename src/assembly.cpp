@@ -3,11 +3,13 @@
 #include <fstream>
 namespace ss {
 void App::openConstructor(bool completed) {
-    sourcePool.clear(); draft.clear(); draftSelection=-1;
+    sourcePool.clear(); draft.clear(); draftSelection=-1; singleExportMode=false;constructorModeManual=false;constructorFormatManual=false;
     assemblyName = title.empty() ? "Мой контейнер" : title; assemblyMetadataTitle.clear(); assemblyArtist.clear(); assemblyDescription.clear();
     if(completed) for(const auto &job:jobs) if(job->id==selectedJob&&job->assembly){
+        singleExportMode=job->singleExport;
         sourcePool=job->sources;assemblyName=job->title;assemblyMetadataTitle=job->assemblyMetadataTitle;assemblyArtist=job->assemblyArtist;assemblyDescription=job->assemblyDescription;muxOptions=job->muxOptions;
         for(auto &source:sourcePool){
+            if(job->singleExport){source.exportFormat=job->exportFormat;source.exportQuality=job->exportQuality;}
             if(!source.dependency.empty())for(const auto &child:jobs)if(child->id==source.dependency&&child->done&&child->state=="Готово")source.path=child->output;
             source.dependency.clear();source.enabled=true;
         }
@@ -35,14 +37,33 @@ void App::openConstructor(bool completed) {
             }
         }
     }
+    singleExportMode=!sourcePool.empty() && std::all_of(sourcePool.begin(),sourcePool.end(),[](const auto &s){return s.role>=2;});
     constructorOpen=true; downloadChoice=false; requestedPage=0;
     muxOptions={};
+    if(std::any_of(sourcePool.begin(),sourcePool.end(),[](const auto &s){return s.role==1;}) &&
+       std::none_of(sourcePool.begin(),sourcePool.end(),[](const auto &s){return s.role==0;})) {
+        muxOptions.container=5;
+        for(auto &source:sourcePool)if(source.role==1 && audioEncoders[1])source.codec=1;
+    }
 
+}
+void App::updateConstructorRecommendation() {
+    if(draft.empty())return;
+    bool video=false,audio=false;
+    for(const auto &source:draft){video|=source.role==0;audio|=source.role==1;}
+    if(!constructorModeManual)singleExportMode=!video && !audio;
+    if(!constructorFormatManual && !singleExportMode) {
+        if(video && muxOptions.container>=4)muxOptions.container=0;
+        else if(audio && !video && muxOptions.container==0) {
+            muxOptions.container=5;
+            if(audioEncoders[1])for(auto &source:draft)if(source.role==1 && source.codec==0)source.codec=1;
+        }
+    }
 }
 void App::autoConstruct() {
     for (const auto &source : sourcePool) {
         bool alreadyAdded = std::any_of(draft.begin(), draft.end(), [&](const auto &item) {
-            if (source.role >= 3) return item.role == source.role;
+            if (source.role >= 3 && !singleExportMode) return item.role == source.role;
             return item.role == source.role && item.path == source.path &&
                    item.stream == source.stream && item.media.key == source.media.key &&
                    item.media.id == source.media.id;
@@ -57,6 +78,7 @@ void App::autoConstruct() {
         if (first!=draft.end()) first->primary=true;
     }
     draftSelection=draft.empty()?-1:0;
+    updateConstructorRecommendation();
 }
 void App::importAssemblyFile() {
     work([this] {
@@ -64,12 +86,13 @@ void App::importAssemblyFile() {
         Media m; m.title=utf8(fs::path(wide(path)).filename().wstring());
         auto ext=fs::path(wide(path)).extension().wstring(); std::transform(ext.begin(),ext.end(),ext.begin(),::towlower);
         m.ext=utf8(ext.empty()?L"":ext.substr(1)); m.key="local:"+path;
+        if(m.ext=="ffmetadata") {m.category="Данные";m.id="chapters";post([this,m,path]{sourcePool.push_back(assemblySource(m,path));});return;}
         if(m.ext=="json") { m.category="Данные"; m.id="chapters";
             auto data=Json::parse(readFile(wide(path),4*1024*1024),nullptr,false);
             if(!data.is_array() && !(data.is_object() && data.contains("chapters") && data["chapters"].is_array()))m.id="metadata";
             post([this,m,path]{sourcePool.push_back(assemblySource(m,path));}); return;
         }
-        if(m.ext=="png"||m.ext=="jpg"||m.ext=="jpeg") {
+        if(m.ext=="png"||m.ext=="jpg"||m.ext=="jpeg"||m.ext=="webp"||m.ext=="avif"||m.ext=="bmp"||m.ext=="gif") {
             m.category="Изображения"; post([this,m,path]{sourcePool.push_back(assemblySource(m,path));});return;
         }
         std::atomic_bool cancel{false},finished{false};
@@ -131,6 +154,9 @@ void App::readDroppedMetadata(const AssemblySource &original) {
                 if(original.stream>=0 && number(stream,"index")!=original.stream) continue;
                 if(original.role==0 && number(stream.value("disposition",Json::object()),"attached_pic")==1) continue;
                 it->metadataStream=int(number(stream,"index",-1));
+                it->probedCodec=str(stream,"codec_name");
+                if(original.role==0)it->media.vcodec=it->probedCodec;
+                else if(original.role==1)it->media.acodec=it->probedCodec;
                 auto tags=stream.value("tags",Json::object());
                 auto fill=[&](std::string AssemblySource::*member,std::initializer_list<const char *> keys) {
                     auto value=metadataTag(tags,keys);
@@ -157,6 +183,62 @@ void App::readDroppedMetadata(const AssemblySource &original) {
 void App::enqueueAssembly() {
     if(std::any_of(draft.begin(),draft.end(),[](const auto &s){return s.metadataPending;}))
         throw std::runtime_error("Дождитесь чтения метаданных дорожек");
+    if(singleExportMode) {
+        if(draft.empty() || draft.size()>64)throw std::runtime_error("Выберите от 1 до 64 источников.");
+        if(!fs::path(wide(destination)).is_absolute())throw std::runtime_error("Выберите полную папку сохранения");
+        if(assemblyName.empty())throw std::runtime_error("Укажите имя итогового файла");
+        for(const auto &source:draft) {
+            auto exportFormat=source.exportFormat, exportQuality=source.exportQuality;
+            if(exportQuality<0 || exportQuality>2)throw std::runtime_error("Проверьте качество сохранения.");
+            if(source.media.drm)throw std::runtime_error("Защищённые потоки нельзя скачать");
+            if(!source.path.empty()&&!fs::is_regular_file(wide(source.path)))throw std::runtime_error("Локальный файл недоступен");
+            int maxFormat=source.role==3?3:source.role==2?4:source.role==4?2:source.role==5?1:source.role<2?3:0;
+            if(exportFormat<0||exportFormat>maxFormat)throw std::runtime_error("Проверьте формат сохранения.");
+            if(exportFormat>0 && exportFormat!=4 && source.role==2 && isBitmapSubtitleCodec(source.probedCodec))
+                throw std::runtime_error("Субтитры состоят из изображений: выберите исходный формат или используйте распознавание текста.");
+            if(source.role==2 && exportFormat==4) {
+                if(!source.probedCodec.empty() && !isBitmapSubtitleCodec(source.probedCodec))throw std::runtime_error("Распознавание применяется к графическим субтитрам. Для текста выберите SRT, WebVTT или ASS.");
+                if(source.ocrExecutable.empty() || !fs::path(wide(source.ocrExecutable)).is_absolute() || !fs::is_regular_file(wide(source.ocrExecutable)))throw std::runtime_error("Укажите полный путь к установленному tesseract.exe.");
+                if(source.ocrLanguage.empty() || source.ocrLanguage.size()>64 || !std::all_of(source.ocrLanguage.begin(),source.ocrLanguage.end(),[](unsigned char c){return std::isalnum(c)||c=='_'||c=='+'||c=='-';}))throw std::runtime_error("Укажите языки Tesseract, например eng или rus+eng.");
+            }
+            if(exportFormat>0 && exportFormat!=4 && (source.role==2 || source.role==3)) {
+                bool available=source.role==3?imageEncoders[exportFormat]:subtitleEncoders[exportFormat==1?1:exportFormat==2?3:4];
+                if(!available)throw std::runtime_error(videoEncodersReady?"Преобразователь выбранного формата недоступен. Выберите исходный или другой формат.":"Дождитесь проверки доступных преобразователей.");
+            }
+            if(exportFormat>0 && source.role<2) {
+                int encoder=source.role==0?(exportFormat==3?3:1):(exportFormat==1?3:exportFormat==2?1:4);
+                bool available=source.role==0?videoEncoders[encoder]:audioEncoders[encoder];
+                if(!available)throw std::runtime_error(videoEncodersReady?"Кодировщик выбранного формата недоступен. Выберите исходный или другой формат.":"Дождитесь проверки доступных кодировщиков.");
+            }
+        }
+        std::vector<std::shared_ptr<Job>> queued;
+        for(auto source:draft) {
+            auto parent=std::make_shared<Job>();parent->assembly=true;parent->singleExport=true;parent->exportFormat=source.exportFormat;parent->exportQuality=source.exportQuality;
+            parent->id=std::to_string(GetTickCount64())+"-"+std::to_string(++jobSerial);parent->title=draft.size()==1?assemblyName:(source.name.empty()?assemblyName:source.name);parent->item=source.media;parent->item.title=parent->title;
+            parent->item.category=source.role==0?"Видео":source.role==1?"Аудио":source.role==2?"Субтитры":source.role==3?"Изображения":"Данные";
+            if(draft.size()>1 && !source.media.ext.empty()) {
+                auto suffix="."+source.media.ext;
+                if(parent->title.size()>suffix.size() && _stricmp(parent->title.c_str()+parent->title.size()-suffix.size(),suffix.c_str())==0)
+                    parent->title.resize(parent->title.size()-suffix.size());
+                parent->item.title=parent->title;
+            }
+            parent->folder=utf8((fs::path(wide(destination))/wide(parent->id+"-export")).wstring());parent->outputDirectory=destination;parent->waitingSources=true;parent->state="Ожидание источника";
+            if(source.path.empty()) {
+                auto child=std::make_shared<Job>();child->id=std::to_string(GetTickCount64())+"-"+std::to_string(++jobSerial);
+                child->item=source.media;child->title=source.name;child->page=source.media.page;child->assemblyInput=true;
+                child->folder=utf8((fs::path(wide(destination))/wide(parent->id+"-sources")/wide(child->id)).wstring());
+                child->outputDirectory=utf8((fs::path(wide(destination))/wide(parent->id+"-sources")).wstring());
+                auto it=mediaSessions.find(source.media.key);child->session=it==mediaSessions.end()?session():it->second;
+                if(child->item.category=="Данные")child->local=dataSourceContent(child->item);
+                source.dependency=child->id;queued.push_back(child);
+            }
+            source.enabled=true;parent->sources.push_back(source);queued.push_back(parent);selectedJob=parent->id;
+        }
+        {std::lock_guard lock(jobsMutex);jobs.insert(jobs.end(),queued.begin(),queued.end());}
+        constructorOpen=false;requestedPage=2;saveHistory();jobsCv.notify_all();notify("Отдельное сохранение добавлено в очередь: "+std::to_string(draft.size()));return;
+    }
+    if(std::any_of(draft.begin(),draft.end(),[](const auto &s){return s.metadataPending;}))
+        throw std::runtime_error("Дождитесь чтения метаданных дорожек");
     if(draft.empty())throw std::runtime_error("Добавьте медиа в конструктор");
     if(draft.size()>64)throw std::runtime_error("В одной сборке допускается до 64 источников");
     if(!fs::path(wide(destination)).is_absolute())throw std::runtime_error("Выберите полную папку сохранения");
@@ -164,6 +246,22 @@ void App::enqueueAssembly() {
     (void)muxContainer(muxOptions);
     int primary[3]{}; bool playable=false; int cover=0,chapters=0,metadata=0;
     for(const auto &s:draft) {
+        if(muxOptions.container>=4) {
+            if(s.role==0 || s.role==2)throw std::runtime_error("MP3, M4A и FLAC поддерживают одну аудиодорожку без видео и субтитров. Выберите другой формат или удалите лишние источники.");
+            int required=muxOptions.container==4?3:muxOptions.container==5?1:4;
+            if(s.role==1 && s.codec!=0 && s.codec!=required)throw std::runtime_error("Для выбранного формата выберите соответствующий аудиокодек или исходный кодек.");
+        }
+        if(s.role==2 && s.codec>0 && isBitmapSubtitleCodec(s.probedCodec))throw std::runtime_error("Графические субтитры нельзя преобразовать в текст без распознавания. Оставьте исходный формат или выберите другой источник.");
+        if(auto conflict=assemblyCodecConflict(muxOptions.container,s);!conflict.empty())throw std::runtime_error(conflict);
+        if(s.codec==0 && !s.probedCodec.empty()) {
+            auto conflict=assemblyProbedCodecConflict(muxOptions.container,s.role,s.probedCodec);
+            if(!conflict.empty())throw std::runtime_error(conflict);
+        }
+        if(s.codec==0 && s.role<2) {
+            auto conflict=assemblyCopiedCodecConflict(muxOptions.container,s.role,s.role==0?s.media.vcodec:s.media.acodec);
+            if(!conflict.empty())throw std::runtime_error(conflict);
+        }
+        if(s.role==3 && (s.coverFormat<0||s.coverFormat>1))throw std::runtime_error("Выберите формат обложки PNG или JPG");
         if(s.role<0||s.role>5||s.codec<0||s.codec>(s.role==0?10:4)||s.quality<0||s.quality>2)throw std::runtime_error("Некорректные параметры дорожки");
         auto numeric=[](const std::string &v,int limit){if(v.empty())return true;if(v.size()>7||!std::all_of(v.begin(),v.end(),[](unsigned char c){return std::isdigit(c);}))return false;try{int n=std::stoi(v);return n>0&&n<=limit;}catch(...){return false;}};
         if(!numeric(s.bitrate,1000000)||!numeric(s.maxrate,1000000)||!numeric(s.bufsize,2000000)||!numeric(s.sampleRate,384000)||!numeric(s.frameRate,240)||!numeric(s.width,16384))throw std::runtime_error("Проверьте числовые параметры перекодирования: укажите положительные значения без единиц измерения");
@@ -193,8 +291,9 @@ void App::enqueueAssembly() {
         if(!s.path.empty()&&!fs::is_regular_file(wide(s.path)))throw std::runtime_error("Локальный файл недоступен");
     }
     if(!playable)throw std::runtime_error("Добавьте видео или аудио");
+    if(muxOptions.container>=4 && std::count_if(draft.begin(),draft.end(),[](const auto &s){return s.role==1;})!=1)throw std::runtime_error("Для MP3, M4A и FLAC выберите ровно одну аудиодорожку.");
     if(cover>1||chapters>1||metadata>1)throw std::runtime_error("Выберите одну обложку, один источник глав и один источник метаданных");
-    if(cover&&muxOptions.container!=0)throw std::runtime_error("Для вложенной обложки выберите MKV");
+    if(cover && muxOptions.container==3)throw std::runtime_error("Для вложенной обложки выберите MKV, MP4 или MOV; WebM не поддерживается.");
     auto parent=std::make_shared<Job>();parent->assembly=true;parent->mux=true;parent->muxOptions=muxOptions;
     parent->id=std::to_string(GetTickCount64())+"-"+std::to_string(++jobSerial);
     parent->title=assemblyName;parent->item.title=assemblyName;parent->item.category="Требуют проверки";
@@ -233,7 +332,7 @@ void App::resolveAssembly(const std::shared_ptr<Job> &parent,bool partial) {
         }
         bool exists=!s.path.empty()&&fs::is_regular_file(wide(s.path));
         if(!exists){missing=true;if(partial)s.enabled=false;}
-        if(exists&&s.enabled&&s.role<2)playable=true;
+        if(exists&&s.enabled&&(s.role<2 || parent->singleExport))playable=true;
     }
     if(missing&&!partial)throw std::runtime_error("Часть источников не скачана");
     if(!playable)throw std::runtime_error("Нет сохранённых видео- или аудиодорожек для сборки. Файлы остальных типов остаются на диске.");

@@ -16,6 +16,8 @@ struct Job {
     std::shared_ptr<Session> session;
     bool mux = false;
     bool assemblyInput = false, localFile = false, conversionSource = false;
+    bool singleExport = false;
+    int exportFormat = 0, exportQuality = 1;
     bool assembly = false, waitingSources = false, decisionNeeded = false, prompted = false;
     std::vector<AssemblySource> sources;
     std::string assemblyMetadataTitle, assemblyArtist, assemblyDescription;
@@ -92,6 +94,7 @@ class App {
     std::array<bool,11> videoEncoders{true,false,false,false,false,false,false,false,false,false,false};
     std::array<bool,5> audioEncoders{true,false,false,false,false};
     std::array<bool,5> subtitleEncoders{true,false,false,false,false};
+    std::array<bool,4> imageEncoders{true,false,false,false};
     bool videoEncodersReady = false;
     void detectVideoEncoders();
     void addLocalFiles(const std::vector<std::string> &);
@@ -119,11 +122,13 @@ class App {
     bool constructorOpen = false, downloadChoice = false;
     std::vector<AssemblySource> sourcePool, draft;
     int draftSelection = -1;
+    bool singleExportMode = false, constructorModeManual = false, constructorFormatManual = false;
     std::string assemblyName = "Мой контейнер", assemblyMetadataTitle, assemblyArtist, assemblyDescription;
     void openConstructor(bool completed = false);
     void enqueueAssembly();
     void importAssemblyFile();
     void autoConstruct();
+    void updateConstructorRecommendation();
     void readDroppedMetadata(const AssemblySource &);
     uint64_t toastSerial = 0;
     int requestedPage = -1;
@@ -207,6 +212,7 @@ class UI {
     void selectionHeading(const std::string &, Rect, bool &);
     int jobSortColumn=0;
     std::map<std::string,unsigned> previewTextures;
+    std::map<uint64_t,std::string> metadataPreviews;
     void previewTile(const Media &,Rect);
     Ink bg, panel, edge, text, muted, accent;
     float to(const std::string &, float, float initial = 0, float freq = 5, float damping = .9f);

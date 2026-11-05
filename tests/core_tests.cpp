@@ -2,6 +2,7 @@
 #include "media_merge.hpp"
 #include "media_display.hpp"
 #include "mux_options.hpp"
+#include "assembly_source.hpp"
 #include "firefox_guide_state.hpp"
 #include "terminal_selection.hpp"
 #include <iostream>
@@ -84,6 +85,66 @@ int main() {
         check(text.find("START=250\nEND=1500") != std::string::npos, "chapter milliseconds");
         check(text.find("a\\=b\\;\\#\\\\c next") != std::string::npos, "escape chapter title");
         rejects([&] { chaptersToFfmetadata(Json::array({{{"start_time", 2}, {"end_time", 1}}})); });
+        auto flacChapters=Json::array({{{"start_time",0.0},{"end_time",1.0},{"title","First"}},{{"start_time",1.0},{"end_time",2.0},{"title","Second"}}});
+        auto tags=flacChapterTags(flacChapters,2.0);
+        check(tags.size()==4 && tags[0].first=="CHAPTER000" && tags[0].second=="00:00:00.000" && tags[3].second=="Second","FLAC chapter times and names");
+        auto gap=flacChapters;gap[1]["start_time"]=1.1;rejects([&]{flacChapterTags(gap,2.0);});
+        rejects([&]{flacChapterTags(flacChapters,3.0);});
+        auto normalized=chaptersFromProbe(Json{{"chapters",Json::array({{{"start_time","0.250"},{"end_time","1.500"},{"tags",{{"title","Intro"}}}}})}});
+        check(normalized[0]["start_time"]==0.25 && normalized[0]["title"]=="Intro", "probe chapters converted to JSON");
+        check(chaptersToFfmetadata(normalized).find("START=250\nEND=1500")!=std::string::npos,"probe chapter round trip");
+        rejects([&] { chaptersFromProbe(Json{{"chapters",Json::array({{{"start_time","broken"},{"end_time","1"}}})}}); });
+
+    });
+    test("Constructor rejects known incompatible codec choices", [] {
+        AssemblySource track;track.role=0;track.codec=1;
+        check(!assemblyCodecConflict(3,track).empty(),"WebM rejects H.264");
+        track.codec=3;check(assemblyCodecConflict(3,track).empty(),"WebM accepts VP9");
+        track.role=1;track.codec=1;check(!assemblyCodecConflict(3,track).empty(),"WebM rejects AAC");
+        track.codec=2;check(assemblyCodecConflict(3,track).empty(),"WebM accepts Opus");
+        track.role=2;track.codec=1;check(!assemblyCodecConflict(1,track).empty(),"MP4 rejects SRT");
+        track.codec=2;check(assemblyCodecConflict(1,track).empty(),"MP4 accepts mov_text");
+        track.codec=0;check(assemblyCodecConflict(3,track).empty(),"unknown copied stream requires probing");
+        AssemblySource image;image.role=3;image.exportFormat=2;image.exportQuality=0;
+        AssemblySource subtitles;subtitles.role=2;subtitles.exportFormat=1;subtitles.exportQuality=2;
+        auto restoredImage=assemblyFrom(assemblyJson(image)), restoredSubs=assemblyFrom(assemblyJson(subtitles));
+        check(restoredImage.exportFormat==2 && restoredImage.exportQuality==0 && restoredSubs.exportFormat==1 && restoredSubs.exportQuality==2,"each source retains its own export settings");
+        AssemblySource metadata;metadata.metadataEdit=true;metadata.metadataEditTitle="New";metadata.metadataEditArtist="Author";metadata.metadataEditDescription="Notes";
+        auto changed=Json::parse(editedMetadataJson(R"({"title":"Old","other":{"keep":7}})",metadata));
+        check(changed["title"]=="New" && changed["artist"]=="Author" && changed["other"]["keep"]==7,"metadata edits preserve other fields");
+        auto restoredMetadata=assemblyFrom(assemblyJson(metadata));
+        check(restoredMetadata.metadataEdit && restoredMetadata.metadataEditTitle=="New", "metadata edits persist with source");
+        rejects([&] {editedMetadataJson("not json",metadata);});
+        stageMetadataField(metadata,"extra",R"({"nested":[1,true,null]})",false);
+        stageMetadataField(metadata,"other","",true);
+        auto advanced=Json::parse(editedMetadataJson(R"({"title":"Old","other":5})",metadata));
+        check(!advanced.contains("other") && advanced["extra"]["nested"][1]==true,"arbitrary JSON values and deletion");
+        auto persisted=assemblyFrom(assemblyJson(metadata));
+        check(persisted.metadataOverrides.at("extra")["nested"][0]==1 && persisted.metadataRemoved.size()==1,"metadata changes persist");
+        stageMetadataField(metadata,"other","42",false);
+        check(metadata.metadataRemoved.empty() && metadata.metadataOverrides.at("other")==42,"setting a removed field cancels deletion");
+        rejects([&] {stageMetadataField(metadata,"bad","not-json",false);});
+        rejects([&] {stageMetadataField(metadata,"title","42",false);});
+        AssemblySource unchanged;auto noFields=Json::parse(editedMetadataJson(R"({"keep":1})",unchanged));
+        check(noFields.size()==1 && !noFields.contains("title"),"unedited missing fields remain absent");
+        AssemblySource nested;
+        stageMetadataField(nested,"/obj/a~1b/1","42",false);
+        stageMetadataField(nested,"/obj/a~1b/0","",true);
+        auto nestedResult=Json::parse(editedMetadataJson(R"({"obj":{"a/b":[1,2]}})",nested));
+        check(nestedResult["obj"]["a/b"].size()==1 && nestedResult["obj"]["a/b"][0]==42,"nested array edits preserve operation order");
+        auto nestedRestored=assemblyFrom(assemblyJson(nested));
+        check(nestedRestored.metadataPathEdits.size()==2,"nested edits survive history serialization");
+        auto paths=makeMetadataTree(nestedResult);
+        check(std::any_of(paths.begin(),paths.end(),[](const auto &v){return v.path=="/obj/a~1b/0" && v.value=="42";}),"tree escapes JSON pointer keys and reaches array values");
+        stageMetadataField(nested,"/obj/missing/child","1",false);
+        rejects([&] {editedMetadataJson(R"({"obj":{"a/b":[1,2]}})",nested);});
+        check(!assemblyCopiedCodecConflict(3,0,"h264").empty(),"copied H.264 rejected by WebM");
+        check(assemblyCopiedCodecConflict(3,0,"vp9").empty(),"copied VP9 accepted by WebM");
+        check(!assemblyCopiedCodecConflict(1,2,"subrip").empty(),"copied SRT rejected by MP4");
+        check(!assemblyCopiedCodecConflict(5,1,"mp3").empty(),"M4A rejects MP3 copy under AAC policy");
+        check(assemblyCopiedCodecConflict(5,1,"aac").empty(),"M4A accepts AAC copy");
+        check(assemblyCopiedCodecConflict(5,1,"mp4a.40.2").empty(),"unrecognized codec alias waits for probing");
+        check(isBitmapSubtitleCodec("hdmv_pgs_subtitle") && !isBitmapSubtitleCodec("subrip"),"bitmap subtitles need recognition before text conversion");
     });
     test("Video filter includes silent and uncertain video without mixing audio", [] {
         Media m; m.category = "Видео без звука"; m.videoOnly = true;

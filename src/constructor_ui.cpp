@@ -10,7 +10,7 @@ static bool accepts(const AssemblySource &s,int role) {
     return s.role==role||(s.role==0&&s.includeAudio&&role==1&&s.stream<0);
 }
 void UI::assemblyProgressPanel() {
-    auto processing=[](const std::shared_ptr<Job> &j){return j->state=="Сборка контейнера"||j->state=="Проверка результата"||j->state=="Объединение";};
+    auto processing=[](const std::shared_ptr<Job> &j){return j->state=="Сборка контейнера"||j->state=="Распознавание субтитров"||j->state=="Проверка результата"||j->state=="Объединение";};
     std::shared_ptr<Job> shown;int active=0;
     for(const auto &job:app.jobs)if(processing(job)){++active;if(!shown || job->id==visibleAssemblyJob)shown=job;}
     if(shown){visibleAssemblyJob=shown->id;assemblyFinishedAt=-1;}
@@ -67,7 +67,7 @@ bool UI::finishDraftDrag(const Hit &old) {
         int poolIndex;
         if(match==app.sourcePool.end()){auto returned=source;returned.uiId=0;returned.metadataPending=false;app.sourcePool.push_back(returned);poolIndex=int(app.sourcePool.size())-1;}
         else poolIndex=int(match-app.sourcePool.begin());
-        cancelInput();app.draft.erase(app.draft.begin()+index);
+        cancelInput();app.draft.erase(app.draft.begin()+index);app.updateConstructorRecommendation();
         if(app.draftSelection==index)app.draftSelection=-1;
         else if(app.draftSelection>index)--app.draftSelection;
         settlePool=true;settleIndex=poolIndex;
@@ -81,7 +81,10 @@ bool UI::finishDraftDrag(const Hit &old) {
     if(role<0)return true;
     if(!accepts(source,role)){app.notify("Этот источник не содержит медиа подходящего типа");return true;}
     cancelInput();
-    if(source.role!=role){source.role=role;source.includeAudio=false;source.primary=false;}
+    if(source.role!=role){
+        source.role=role;source.includeAudio=false;source.primary=false;source.exportFormat=0;source.metadataEdit=false;source.probedCodec.clear();
+        if(role==3){source.stream=-1;source.metadataStream=-1;source.language.clear();source.description.clear();source.artist.clear();source.date.clear();}
+    }
     if(pool){
         source.uiId=++nextTileId;
         source.metadataPending=!source.path.empty() && source.role<3;
@@ -89,7 +92,7 @@ bool UI::finishDraftDrag(const Hit &old) {
     }
     if(existing){app.draft.erase(app.draft.begin()+index);if(before>index)--before;}
     if(before<0||before>int(app.draft.size()))before=int(app.draft.size());
-    app.draft.insert(app.draft.begin()+before,source);app.draftSelection=before;draftCategory=role;
+    app.draft.insert(app.draft.begin()+before,source);app.draftSelection=before;draftCategory=role;app.updateConstructorRecommendation();
     if(pool && source.metadataPending)app.readDroppedMetadata(source);
     settlePool=false;settleIndex=before;
     return true;
@@ -98,7 +101,7 @@ void UI::constructorPage(Rect r) {
     dropGroups.clear();dropRows.clear();dragBefore=-1;
     for(auto &tile:app.draft)if(!tile.uiId)tile.uiId=++nextTileId;
     if(settling && GetTickCount64()-settleStart>=300)settling=false;
-    c.text("Конструктор контейнера",r.x,r.y+28,22,text,r.w-430);
+    c.text("Конструктор медиа",r.x,r.y+28,22,text,r.w-430);
     button("build:back",{r.x+r.w-416,r.y+4,108,36},"К обзору",[this]{cancelInput();app.constructorOpen=false;});
     button("build:auto",{r.x+r.w-298,r.y+4,146,36},"Автосборка",[this]{
         cancelInput();
@@ -136,7 +139,7 @@ void UI::constructorPage(Rect r) {
     float total=0;
     for(int i:order){const auto &s=app.sourcePool[i];
         auto color=roleColor(s.role);
-        if(previous!=s.role){c.rect({r.x+7,py,leftW-30,25},7,color.alpha(.18f));c.text(roles[s.role],r.x+12,py+19,11,text,leftW-24);py+=30;total+=30;previous=s.role;}
+        if(previous!=s.role){c.rect({r.x+7,py,leftW-30,25},7,color.alpha(.18f));c.text((app.singleExportMode && s.role==3)?"Изображения":roles[s.role],r.x+12,py+19,11,text,leftW-24);py+=30;total+=30;previous=s.role;}
         float poolWidth=to("pool:w:"+std::to_string(i),leftW-30,leftW-30,4.5f,.82f);
         Rect row{r.x+7,py,poolWidth,56};py+=64;total+=64;poolTileRects[i]=row;
         if(row.y+row.h<poolView.y||row.y>poolView.y+poolView.h)continue;
@@ -172,7 +175,7 @@ void UI::constructorPage(Rect r) {
         auto color=roleColor(role);
         bool compatible=dragging&&accepts(movingSource,role);
         c.rect(section.inset(2),10,color.alpha(over?.28f:compatible?.20f:.10f));
-        c.text(roles[role]+" · "+std::to_string(items.size()),centerX+13,headingY+20,12,text,centerW-40);
+        c.text(((app.singleExportMode && role==3)?std::string("Изображения"):roles[role])+" · "+std::to_string(items.size()),centerX+13,headingY+20,12,text,centerW-40);
         hit("tree:role:"+std::to_string(role),{centerX+8,headingY,centerW-32,28},[this,role]{cancelInput();draftCategory=role;app.draftSelection=-1;propertyScroll.p.target=0;advancedTrack=false;});
         for(int ordinal=0;ordinal<int(items.size());++ordinal){
             int i=items[ordinal];const auto &item=app.draft[i];auto key=std::to_string(item.uiId);
@@ -209,11 +212,112 @@ void UI::constructorPage(Rect r) {
     button("build:metadata",{propX+8,r.y+59,propW-16,29},"Общие метаданные",[this]{
         cancelInput();app.draftSelection=-1;propertyScroll.p.target=propertyScroll.p.value=0;
     },app.draftSelection<0);
-    propertyView={propX+8,r.y+90,propW-16,bottom-r.y-106};propertyScroll.bounds(app.draftSelection<0?260:855,propertyView.h);
+    propertyView={propX+8,r.y+90,propW-16,bottom-r.y-106};
+    float propertyContent=app.draftSelection<0?260.f:(app.singleExportMode?1100.f:855.f);
+    if(app.singleExportMode && app.draftSelection>=0 && app.draftSelection<int(app.draft.size())) {
+        const auto &item=app.draft[app.draftSelection];
+        if(item.role==5 && item.metadataEdit)propertyContent=std::max(propertyContent,820.f+float(item.metadataTree.size())*34.f);
+    }
+    propertyScroll.bounds(propertyContent,propertyView.h);
     c.push({propertyView.x,propertyView.y,propertyView.w-16,propertyView.h});float sy=propertyView.y-propertyScroll.p.value,x=propX+14,w=propW-44;
     int i=app.draftSelection;
     if(i>=0&&i<int(app.draft.size())){
-        auto &s=app.draft[i];c.text(s.metadataPending?"Читаем метаданные…":roles[s.role],x,sy+17,12,roleColor(s.role),w);
+        auto &s=app.draft[i];c.text(s.metadataPending?"Читаем метаданные…":(app.singleExportMode && s.role==3?"Изображение":roles[s.role]),x,sy+17,12,roleColor(s.role),w);
+        if(app.singleExportMode) {
+            std::vector<std::string> formats={"Исходный"};
+            if(s.role==0)formats={"Исходный","MKV · H.264","MP4 · H.264","WebM · VP9"};
+            else if(s.role==1)formats={"Исходный","MP3","M4A · AAC","FLAC"};
+            else if(s.role==3)formats={"Исходный","PNG","JPG","WebP"};
+            else if(s.role==2)formats={"Исходный","SRT","WebVTT","ASS","SRT · OCR"};
+            else if(s.role==4)formats={"Исходный","JSON","FFmetadata"};
+            else if(s.role==5)formats={"Исходный","Текст · TXT"};
+            if(s.exportFormat<0||s.exportFormat>=int(formats.size()))s.exportFormat=0;
+            c.text("Формат",x,sy+60,10,muted,w);
+            choice("export:format",{x,sy+68,w,36},formats,s.exportFormat,[this,i](int n){app.draft[i].exportFormat=n;});
+            if((s.role==3 || s.role<2) && s.exportFormat>0) {
+                c.text("Качество / сжатие",x,sy+132,10,muted,w);
+                choice("export:quality",{x,sy+140,w,36},{"Высокое","Среднее","Компактное"},s.exportQuality,[this,i](int n){app.draft[i].exportQuality=n;});
+            }
+            if(s.role==2 && s.exportFormat==4) {
+                c.text("Путь к tesseract.exe",x,sy+132,10,muted,w);input("export:ocr-path",{x,sy+140,w-44,34},s.ocrExecutable,"Полный путь к Tesseract");
+                auto sourceId=s.uiId;
+                button("export:ocr-browse",{x+w-38,sy+140,38,34},"…",[this,sourceId]{
+                    app.work([this,sourceId]{auto path=pickFile(app.hwnd);if(path.empty())return;app.post([this,sourceId,path]{
+                        if(!app.constructorOpen)return;
+                        auto it=std::find_if(app.draft.begin(),app.draft.end(),[&](const auto &item){return item.uiId==sourceId;});
+                        if(it!=app.draft.end())it->ocrExecutable=path;
+                    });});
+                });
+                c.text("Языки Tesseract",x,sy+197,10,muted,w);input("export:ocr-language",{x,sy+205,w,34},s.ocrLanguage,"eng или rus+eng");
+                c.text("После распознавания проверьте текст и время",x,sy+280,10,muted,w);
+            }
+            if(s.role==5) {
+                button("export:metadata-edit",{x,sy+195,w,34},s.metadataEdit?"Отменить редактирование":"Редактировать JSON",[this,i]{
+                    auto &source=app.draft[i];
+                    if(source.metadataEdit){source.metadataEdit=false;source.metadataOverrides.clear();source.metadataRemoved.clear();source.metadataPathEdits=Json::array();source.metadataTree.clear();source.metadataTreeReady=false;return;}
+                    try {
+                        std::string content;
+                        if(!source.path.empty())content=readFile(wide(source.path),4*1024*1024);
+                        else content=dataSourceContent(source.media);
+                        auto data=Json::parse(content,nullptr,false);
+                        if(!data.is_object())throw std::runtime_error("Редактирование доступно для JSON-объекта");
+                        source.metadataEditTitle=str(data,"title");source.metadataEditArtist=str(data,"artist");source.metadataEditDescription=str(data,"description");source.metadataEdit=true;source.metadataTreeReady=false;
+                    } catch(const std::exception &e){app.notify(e.what());}
+                },s.metadataEdit);
+                if(s.metadataEdit) {
+                    c.text("Название",x,sy+257,10,muted,w);input("export:meta-title",{x,sy+265,w,34},s.metadataEditTitle,"Название");
+                    c.text("Автор / исполнитель",x,sy+322,10,muted,w);input("export:meta-artist",{x,sy+330,w,34},s.metadataEditArtist,"Автор");
+                    c.text("Описание",x,sy+387,10,muted,w);input("export:meta-description",{x,sy+395,w,34},s.metadataEditDescription,"Описание");
+                    c.text("Поле или путь JSON",x,sy+465,10,muted,w);input("export:meta-key",{x,sy+473,w,34},s.metadataFieldKey,"Имя или /объект/поле");
+                    c.text("Значение в формате JSON",x,sy+530,10,muted,w);input("export:meta-value",{x,sy+538,w,34},s.metadataFieldValue,"\"текст\", 42, true или null");
+                    auto stage=[this,i](bool remove) {
+                        try {
+                            auto &source=app.draft[i];auto candidate=source;
+                            stageMetadataField(candidate,candidate.metadataFieldKey,candidate.metadataFieldValue,remove);
+                            std::string content=!source.path.empty()?readFile(wide(source.path),4*1024*1024):dataSourceContent(source.media);
+                            (void)editedMetadataJson(content,candidate);
+                            source.metadataOverrides=std::move(candidate.metadataOverrides);
+                            source.metadataRemoved=std::move(candidate.metadataRemoved);
+                            source.metadataPathEdits=std::move(candidate.metadataPathEdits);source.metadataTreeReady=false;
+                            app.notify(remove?"Поле будет удалено":"Изменение поля добавлено");
+                        } catch(const std::exception &e){app.notify(e.what());}
+                    };
+                    button("export:meta-apply",{x,sy+585,w,34},"Применить значение",[stage]{stage(false);});
+                    button("export:meta-delete",{x,sy+625,w,34},"Удалить поле",[stage]{stage(true);});
+                    c.text("Изменений: "+std::to_string(s.metadataOverrides.size()+s.metadataRemoved.size()+s.metadataPathEdits.size()),x,sy+685,10,muted,w);
+                    if(!s.metadataTreeReady) {
+                        try {
+                            std::string content=!s.path.empty()?readFile(wide(s.path),4*1024*1024):dataSourceContent(s.media);
+                            s.metadataTree=makeMetadataTree(Json::parse(editedMetadataJson(content,s)));
+                        } catch(...) {s.metadataTree.clear();}
+                        s.metadataTreeReady=true;
+                    }
+                    c.text("Поля JSON · выберите путь",x,sy+725,10,muted,w);
+                    for(size_t n=0;n<s.metadataTree.size();++n) {
+                        const auto item=s.metadataTree[n];
+                        button("export:meta-tree:"+std::to_string(s.uiId)+":"+std::to_string(n),{x,sy+738+float(n)*34,w,30},item.path,[this,i,item]{
+                            auto &target=app.draft[i];target.metadataFieldKey=item.path;target.metadataFieldValue=item.value;
+                            propertyScroll.p.target=std::min(440.f,propertyScroll.maximum);
+                            if(!item.editable)app.notify("Выберите вложенное поле или введите новое значение JSON.");
+                        });
+                    }
+                    if(s.metadataTree.size()>=128)c.text("Показаны первые 128 полей",x,sy+738+float(s.metadataTree.size())*34+20,10,muted,w);
+                }
+            }
+            if((s.role==5 && !s.metadataEdit) || s.role==4) {
+                auto found=metadataPreviews.find(s.uiId);
+                if(found==metadataPreviews.end()) {
+                    std::string preview;
+                    try {if(!s.path.empty())preview=readFile(wide(s.path),4*1024*1024);else if(s.media.category=="Данные")preview=dataSourceContent(s.media);}catch(...){}
+                    if(preview.size()>1200)preview.resize(1200);
+                    if(metadataPreviews.size()>=64)metadataPreviews.erase(metadataPreviews.begin());
+                    found=metadataPreviews.emplace(s.uiId,std::move(preview)).first;
+                }
+                c.text("Предпросмотр данных",x,sy+(s.role==5?255:215),10,muted,w);
+                c.text(found->second.empty()?"Предпросмотр недоступен":found->second,x,sy+(s.role==5?282:242),10,text,w);
+            }
+            if(s.role<4)c.text("Настройки применяются только к этому материалу",x,sy+330,10,muted,w);
+        } else {
         button("property:basic",{x,sy+30,(w-8)/2,34},"Метаданные",[this]{cancelInput();advancedTrack=false;propertyScroll.p.target=0;},!advancedTrack);
         button("property:advanced",{x+(w+8)/2,sy+30,(w-8)/2,34},"Кодирование",[this]{cancelInput();advancedTrack=true;propertyScroll.p.target=0;},advancedTrack,s.role<2);
         if(!advancedTrack || s.role>=2){
@@ -229,9 +333,13 @@ void UI::constructorPage(Rect r) {
             if (!supportsExtendedTrackTags(app.muxOptions.container))
                 c.text("Описание, автор и дата: MKV и WebM",x,sy+390,10,muted,w);
             } else {
-                c.text(s.role==3?"Для обложки сохраняется название":"Главы и теги берутся из файла",x,sy+170,11,muted,w);
+                if(s.role==3) {
+                    c.text("Формат обложки",x,sy+155,10,muted,w);
+                    choice("track:coverFormat",{x,sy+163,w,36},{"PNG","JPG"},s.coverFormat,[this,i](int n){app.draft[i].coverFormat=n;});
+                    c.text("Исходник: выбранное изображение",x,sy+220,10,muted,w);
+                } else c.text("Главы и теги берутся из файла",x,sy+170,11,muted,w);
                 if(!s.language.empty()||!s.description.empty()||!s.artist.empty()||!s.date.empty())
-                    button("track:clearUnsupported",{x,sy+200,w,36},"Очистить неподдерживаемые теги",[this,i]{app.draft[i].language.clear();app.draft[i].description.clear();app.draft[i].artist.clear();app.draft[i].date.clear();});
+                    button("track:clearUnsupported",{x,sy+(s.role==3?250:200),w,36},"Очистить неподдерживаемые теги",[this,i]{app.draft[i].language.clear();app.draft[i].description.clear();app.draft[i].artist.clear();app.draft[i].date.clear();});
             }
             if(s.role<3){
                 check("track:default",{x,sy+404,30,30},s.primary,[this,i]{auto role=app.draft[i].role;bool value=!app.draft[i].primary;for(auto &t:app.draft)if(t.role==role)t.primary=false;app.draft[i].primary=value;});
@@ -277,7 +385,10 @@ void UI::constructorPage(Rect r) {
         }
         button("track:up",{x,sy+745,(w-8)/2,34},"Выше ↑",[this,i]{cancelInput();for(int n=i-1;n>=0;n--)if(app.draft[n].role==app.draft[i].role){std::swap(app.draft[n],app.draft[i]);app.draftSelection=n;break;}});
         button("track:down",{x+(w+8)/2,sy+745,(w-8)/2,34},"Ниже ↓",[this,i]{cancelInput();for(int n=i+1;n<int(app.draft.size());n++)if(app.draft[n].role==app.draft[i].role){std::swap(app.draft[n],app.draft[i]);app.draftSelection=n;break;}});
-        button("track:remove",{x,sy+790,w,36},"Убрать из контейнера",[this,i]{cancelInput();app.draft.erase(app.draft.begin()+i);app.draftSelection=-1;});
+        }
+        float removeY=app.singleExportMode?1010.f:790.f;
+        if(app.singleExportMode && s.role==5 && s.metadataEdit)removeY=std::max(removeY,780.f+float(s.metadataTree.size())*34.f);
+        button("track:remove",{x,sy+removeY,w,36},"Убрать",[this,i]{cancelInput();app.draft.erase(app.draft.begin()+i);app.draftSelection=-1;app.updateConstructorRecommendation();});
     } else {
         c.text("Метаданные итогового контейнера",x,sy+23,12,accent,w);
         c.text("Название",x,sy+55,10,muted,w);
@@ -288,9 +399,42 @@ void UI::constructorPage(Rect r) {
         input("build:description",{x,sy+201,w,34},app.assemblyDescription,"Описание");
     }
     c.pop();scrollbar("scroll:property",propertyView,propertyScroll);
-    input("build:name",{r.x,bottom,r.w*.36f,36},app.assemblyName,"Имя итогового файла");
-    choice("build:container",{r.x+r.w*.36f+10,bottom,120,36},{"MKV","MP4","MOV","WebM"},app.muxOptions.container,[this](int n){app.muxOptions.container=n;});
-    button("build:start",{r.x+r.w-202,bottom,202,36},"Скачать и собрать",[this]{cancelInput();app.action("enqueueAssembly");},true,!app.draft.empty());
+    std::string compatibility;
+    if(app.singleExportMode) {
+        for(const auto &source:app.draft) {
+            int role=source.role,format=source.exportFormat;bool available=true;
+            if(format<=0)continue;
+            if(role==2 && format!=4 && isBitmapSubtitleCodec(source.probedCodec)){compatibility="Графические субтитры: выберите исходный формат или распознавание текста.";break;}
+            if(role==0 && format<=3)available=app.videoEncoders[format==3?3:1];
+            else if(role==1 && format<=3)available=app.audioEncoders[format==1?3:format==2?1:4];
+            else if(role==2 && format<=3)available=app.subtitleEncoders[format==1?1:format==2?3:4];
+            else if(role==2 && format==4)available=!source.ocrExecutable.empty() && fs::path(wide(source.ocrExecutable)).is_absolute();
+            else if(role==3 && format<=3)available=app.imageEncoders[format];
+            if(!available){compatibility=role==2 && format==4?"Укажите полный путь к установленному Tesseract.":app.videoEncodersReady?"Преобразователь недоступен; выберите исходный или другой формат.":"Проверяем доступные преобразователи…";break;}
+        }
+    }
+    else if(!app.singleExportMode && !app.draft.empty()) {
+        bool playable=false,cover=false,badAudio=false;int audio=0;
+        for(const auto &source:app.draft) {
+            playable|=source.role<2;cover|=source.role==3;audio+=source.role==1;
+            if(app.muxOptions.container>=4 && (source.role==0 || source.role==2))badAudio=true;
+        }
+        if(!playable)compatibility="Добавьте видео или аудио либо выберите отдельное сохранение.";
+        else if(cover && app.muxOptions.container==3)compatibility="Обложка недоступна в WebM; выберите MKV или MP4.";
+        else if(app.muxOptions.container>=4 && (badAudio || audio!=1))compatibility="Для аудиоформата нужна одна аудиодорожка без видео и субтитров.";
+        if(compatibility.empty())for(const auto &source:app.draft) {
+            auto conflict=assemblyCodecConflict(app.muxOptions.container,source);
+            if(conflict.empty() && source.codec==0 && !source.probedCodec.empty())conflict=assemblyProbedCodecConflict(app.muxOptions.container,source.role,source.probedCodec);
+            if(conflict.empty() && source.codec==0 && source.role<2)
+                conflict=assemblyCopiedCodecConflict(app.muxOptions.container,source.role,source.role==0?source.media.vcodec:source.media.acodec);
+            if(!conflict.empty()){compatibility=conflict;break;}
+        }
+    }
+    if(!compatibility.empty())c.text(compatibility,centerX,bottom-5,10,hex(0xffae70),centerW);
+    input("build:name",{r.x,bottom,r.w*.29f,36},app.assemblyName,"Имя итогового файла");
+    choice("build:mode",{r.x+r.w*.29f+8,bottom,126,36},{"Сборка","Отдельно"},app.singleExportMode?1:0,[this](int n){app.singleExportMode=n==1;app.constructorModeManual=true;});
+    if(!app.singleExportMode)choice("build:container",{r.x+r.w*.29f+142,bottom,110,36},{"MKV","MP4","MOV","WebM","MP3","M4A","FLAC"},app.muxOptions.container,[this](int n){app.muxOptions.container=n;app.constructorFormatManual=true;if(n>=4)for(auto &source:app.draft)if(source.role==1 && source.codec==0)source.codec=n==4?3:n==5?1:4;});
+    button("build:start",{r.x+r.w-202,bottom,202,36},app.singleExportMode?"Сохранить файл":"Скачать и собрать",[this]{cancelInput();app.action("enqueueAssembly");},true,!app.draft.empty());
     input("build:destination",{r.x,bottom+46,r.w-108,34},app.destination,"Папка сохранения");
     button("build:folder",{r.x+r.w-98,bottom+46,98,34},"Папка",[this]{app.action("folder");});
     if(down&&capture&&std::hypot(mx-downX,my-downY)>9){

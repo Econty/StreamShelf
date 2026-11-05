@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(StreamShelfNative VERSION 2.3.0 LANGUAGES CXX)
+project(StreamShelfNative VERSION 2.3.1 LANGUAGES CXX)
 
 include(CTest)
 option(STREAMSHELF_STATIC_RUNTIME "Link the C++ runtime statically" ON)

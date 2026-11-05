@@ -340,7 +340,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
         c.circle(cx + 11, cy - 105 + drift, 2.5f + pulse, hex(0x8be2d1));
         centered("KRECHETOV LABS", cy - 48, 13, hex(0x8be2d1));
         centered("StreamShelf", cy + 5, 36, hex(0xeef3fc));
-        centered("Версия 2.3 Beta", cy + 41, 12, hex(0x8999b4));
+        centered("Версия 2.3.1 Beta", cy + 41, 12, hex(0x8999b4));
         c.rect({cx - 50, cy + 69, 100, 2}, 1, hex(0x2a374b));
         c.rect({cx - 50, cy + 69, 100 * std::clamp(elapsedSeconds / float(app.splashSeconds), 0.f, 1.f), 2}, 1, hex(0x8be2d1));
         c.opacity = 1; c.render(); return;
@@ -452,7 +452,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     c.circle(40, height - 28, 3, app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady ? accent : muted);
     if(!compactMenu)c.text(app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady?"Браузер подключён":"Нет соединения",52,height-24,10,muted,150);
     if (!compactMenu) {
-        c.text("KRECHETOV LABS · StreamShelf 2.3 Beta", 25, height - 80, 9, muted, 195);
+        c.text("KRECHETOV LABS · StreamShelf 2.3.1 Beta", 25, height - 80, 9, muted, 195);
         c.text("Разработчик: Арсений Кречетов", 25, height - 59, 9, muted, 195);
     }
     float contentLeft=compactMenu?76.f:226.f;
@@ -948,12 +948,29 @@ void UI::downloadsPage(Rect r) {
         if(!job->output.empty()){
             auto extension=utf8(fs::path(wide(job->output)).extension().wstring());
             if(extension.size()>1)format=extension.substr(1);
-        } else if((job->assembly || job->mux) && job->muxOptions.container>=0 && job->muxOptions.container<4) {
+        } else if(job->singleExport && !job->sources.empty()) {
+            auto role=job->sources[0].role;auto selected=job->exportFormat;
+            if(selected>0) {
+                if(role==0 && selected<=3)format=selected==1?"mkv":selected==2?"mp4":"webm";
+                else if(role==1 && selected<=3)format=selected==1?"mp3":selected==2?"m4a":"flac";
+                else if(role==2 && selected<=4)format=(selected==1||selected==4)?"srt":selected==2?"vtt":"ass";
+                else if(role==3 && selected<=3)format=selected==1?"png":selected==2?"jpg":"webp";
+                else if(role==4 && selected<=2)format=selected==1?"json":"ffmetadata";
+                else if(role==5 && selected==1)format="txt";
+            } else if(role==5 && job->sources[0].metadataEdit)format="json";
+        } else if((job->assembly || job->mux) && job->muxOptions.container>=0 && job->muxOptions.container<7) {
             format=muxContainer(job->muxOptions);
         }
         std::string codecs;
         if(!m.vcodec.empty() && m.vcodec!="none") codecs=m.vcodec;
         if(!m.acodec.empty() && m.acodec!="none") codecs+=(codecs.empty()?"":" / ")+m.acodec;
+        if(job->singleExport && job->exportFormat>0 && !job->sources.empty()) {
+            auto role=job->sources[0].role;auto selected=job->exportFormat;
+            if(role==0 && selected<=3)codecs=selected==3?"VP9":"H.264";
+            else if(role==1 && selected<=3)codecs=selected==1?"MP3":selected==2?"AAC":"FLAC";
+            else if(role==2 && selected<=4)codecs=selected==4?"SRT · OCR":selected==1?"SRT":selected==2?"WebVTT":"ASS";
+            else if(role==3 && selected<=3)codecs=selected==1?"PNG":selected==2?"JPEG":"WebP";
+        }
         std::string quality=m.quality;
         if(m.fps>0)quality+=(quality.empty()?"":" · ")+std::to_string(int(m.fps))+" FPS";
         if(m.rate>0 && m.rate<1e9)quality+=(quality.empty()?"":" · ")+std::to_string(int(m.rate))+" кбит/с";
@@ -1054,9 +1071,14 @@ void UI::downloadsPage(Rect r) {
         bool checked=app.selectedJobs.count(j->id)!=0;
         auto stateColor=j->state=="Ошибка"?hex(0xff9292):accent;
         collectionSurface(id,row,jobDetails,checked,index);
-        if(!jobDetails)previewTile(j->item,{row.x+6,row.y+6,row.w-12,row.h-122});
+        if(!jobDetails) {
+            auto previewItem=j->item;
+            if(j->assembly && !j->singleExport && j->done && j->state=="Готово" && !j->output.empty())
+                previewItem.thumbnail="assembly-cover:"+j->id+"|"+j->output;
+            previewTile(previewItem,{row.x+6,row.y+6,row.w-12,row.h-122});
+        }
         const bool processing=!j->done && (j->state=="Сборка контейнера" ||
-            j->state=="Проверка результата" || j->state=="Объединение" || j->state=="Скачивание");
+            j->state=="Проверка результата" || j->state=="Распознавание субтитров" || j->state=="Объединение" || j->state=="Скачивание");
         const float progress=to(id+":progress",processing && j->percent>=0
             ?std::clamp(float(j->percent/100),0.f,1.f):0.f,0,4,1);
         if(processing){
@@ -1296,7 +1318,7 @@ void UI::aboutPage(Rect r) {
     card({r.x, y, r.w, 152});
     c.text("KRECHETOV LABS", r.x + 24, y + 30, 11, accent, r.w - 48);
     c.text("StreamShelf", r.x + 24, y + 69, 25, text, r.w - 48);
-    c.text("Версия 2.3 Beta · Windows x64", r.x + 24, y + 100, 12, muted, r.w - 48);
+    c.text("Версия 2.3.1 Beta · Windows x64", r.x + 24, y + 100, 12, muted, r.w - 48);
     c.text("Разработчик: Арсений Кречетов", r.x + 24, y + 126, 12, muted, r.w - 48);
     y += 168;
     card({r.x, y, r.w, 220});

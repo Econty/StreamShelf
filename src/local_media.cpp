@@ -23,7 +23,8 @@ void App::detectVideoEncoders() {
         listFinished=true;listWatchdog.join();
         std::array<bool,5> video{true,false,false,false,false},audio{true,false,false,false,false},subs{true,false,false,false,false};
         for(int i=1;i<5;++i){video[i]=available.count(videoNames[i])!=0;audio[i]=available.count(audioNames[i])!=0;subs[i]=available.count(subNames[i])!=0;}
-        if(!stopping)post([this,video,audio,subs]{for(int i=1;i<5;++i)videoEncoders[i]=video[i];audioEncoders=audio;subtitleEncoders=subs;});
+        std::array<bool,4> images{true,available.count("png")!=0,available.count("mjpeg")!=0,available.count("libwebp")!=0};
+        if(!stopping)post([this,video,audio,subs,images]{for(int i=1;i<5;++i)videoEncoders[i]=video[i];audioEncoders=audio;subtitleEncoders=subs;imageEncoders=images;});
         for(int i=0;i<6&&!stopping;++i) {
             if(!available.count(gpuNames[i]))continue;
             std::atomic_bool cancelled{false},finished{false};
@@ -54,7 +55,8 @@ void App::addLocalFiles(const std::vector<std::string> &paths) {
                 if(!path.is_absolute()||!fs::is_regular_file(path)){++rejected;continue;}
                 auto ext=path.extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),::towlower);
                 Media item;item.key="local:"+value;item.id=item.key;item.title=utf8(path.filename().wstring());item.ext=utf8(ext.empty()?L"":ext.substr(1));
-                if(ext==L".jpg"||ext==L".jpeg"||ext==L".png"||ext==L".webp"||ext==L".avif")item.category="Изображения";
+                if(ext==L".jpg"||ext==L".jpeg"||ext==L".png"||ext==L".webp"||ext==L".avif"||ext==L".bmp"||ext==L".gif")item.category="Изображения";
+                else if(ext==L".ffmetadata"){item.category="Данные";item.id="chapters";}
                 else if(ext==L".json"){item.category="Данные";auto json=Json::parse(readFile(path,4*1024*1024),nullptr,false);item.id=json.is_array()?"chapters":"metadata";}
                 else {
                     std::atomic_bool cancelled{false},finished{false};
