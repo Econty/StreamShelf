@@ -88,6 +88,14 @@ for(const family of ['chromium','firefox']) {
   listeners.updated(9,{url:'https://example.com/watch'},{active:true,windowId:1});await new Promise(resolve=>setTimeout(resolve,0));
   assert.equal(vm.runInContext('tabId',context),9);count++;
  }
+ if(family==='chromium') {
+  const beforeReconnect=sent.filter(m=>m.type==='hello').length;
+  listeners.disconnect();
+  await new Promise(resolve=>setTimeout(resolve,1250));
+  assert(sent.filter(m=>m.type==='hello').length>beforeReconnect,'disconnected worker reconnects promptly without waiting for an alarm');
+  await vm.runInContext("handleCommand({type:'helloAck'})",context);
+  count++;
+ }
  console.log(`PASS ${family}: URL classification, tab scope, stop, signed URL, cookie partition metadata, private headers`);
 }
 console.log(`${count} extension checks passed`);

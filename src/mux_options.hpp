@@ -38,7 +38,12 @@ inline Json chaptersFromProbe(const Json &probe) {
             start=parse(entry,"start_time");end=parse(entry,"end_time");
         } catch (...) {throw std::runtime_error("Не удалось определить границы глав");}
         if(!std::isfinite(start)||!std::isfinite(end)||start<0||end<=start||end>100000000)throw std::runtime_error("Не удалось определить границы глав");
-        result.push_back({{"start_time",start},{"end_time",end},{"title",str(entry.value("tags",Json::object()),"title","Глава")}});
+        auto tags=entry.value("tags",Json::object());std::string title="Глава";
+        if(tags.is_object())for(auto it=tags.begin();it!=tags.end();++it) {
+            auto key=it.key();std::transform(key.begin(),key.end(),key.begin(),[](unsigned char ch){return char(std::tolower(ch));});
+            if(key=="title" && it->is_string()){title=it->get<std::string>();break;}
+        }
+        result.push_back({{"start_time",start},{"end_time",end},{"title",title},{"tags",tags}});
     }
     return result;
 }
@@ -49,10 +54,17 @@ inline std::string chaptersToFfmetadata(const Json &chapters) {
         double start = number(c, "start_time", -1), end = number(c, "end_time", -1);
         if (!std::isfinite(start) || !std::isfinite(end) || start < 0 || end <= start || end > 100000000)
             throw std::runtime_error("Не удалось определить границы глав");
+        auto escape=[](const std::string &value) {std::string result;for(char ch:value){if(ch=='='||ch==';'||ch=='#'||ch=='\\'||ch=='\r'||ch=='\n')result+='\\';result+=ch;}return result;};
         std::string title = str(c, "title", "Глава");
-        std::string escaped;
-        for (char ch : title) { if (ch == '\r' || ch == '\n') { escaped += ' '; continue; } if (ch == '=' || ch == ';' || ch == '#' || ch == '\\') escaped += '\\'; escaped += ch; }
-        out += "[CHAPTER]\nTIMEBASE=1/1000\nSTART=" + std::to_string((long long)std::llround(start * 1000)) + "\nEND=" + std::to_string((long long)std::llround(end * 1000)) + "\ntitle=" + escaped + "\n";
+        out += "[CHAPTER]\nTIMEBASE=1/1000\nSTART=" + std::to_string((long long)std::llround(start * 1000)) + "\nEND=" + std::to_string((long long)std::llround(end * 1000)) + "\ntitle=" + escape(title) + "\n";
+        auto tags=c.value("tags",Json::object());
+        if(!tags.is_object())throw std::runtime_error("Некорректные метаданные главы");
+        for(auto it=tags.begin();it!=tags.end();++it) {
+            auto key=it.key();std::transform(key.begin(),key.end(),key.begin(),[](unsigned char ch){return char(std::tolower(ch));});
+            if(key=="title")continue;
+            if(!it->is_string())throw std::runtime_error("Неподдерживаемые метаданные главы");
+            out+=escape(it.key())+"="+escape(it->get<std::string>())+"\n";
+        }
     }
     return out;
 }
@@ -63,13 +75,16 @@ inline std::vector<std::pair<std::string,std::string>> flacChapterTags(const Jso
     std::vector<std::pair<std::string,std::string>> result;
     double previousEnd=-1;
     for(size_t n=0;n<chapters.size();++n) {
-        const auto &chapter=chapters[n];auto start=number(chapter,"start_time",-1),end=number(chapter,"end_time",-1);
+        const auto &chapter=chapters[n];
+        auto chapterTags=chapter.value("tags",Json::object());
+        if(chapterTags.is_object())for(auto it=chapterTags.begin();it!=chapterTags.end();++it){auto key=it.key();std::transform(key.begin(),key.end(),key.begin(),[](unsigned char ch){return char(std::tolower(ch));});if(key!="title")throw std::runtime_error("FLAC не сохраняет дополнительные теги глав. Выберите другой контейнер.");}
+        auto start=number(chapter,"start_time",-1),end=number(chapter,"end_time",-1);
         if(!std::isfinite(start) || !std::isfinite(end) || start<0 || end<=start || end>=360000 || std::llround(start*1000)>=360000000 || (n>0 && std::abs(start-previousEnd)>0.0015))
             throw std::runtime_error("FLAC сохраняет главы без промежутков и длительностью до 100 часов. Выберите M4A или сохраните главы отдельно.");
         previousEnd=end;auto milliseconds=static_cast<long long>(std::llround(start*1000));
         std::ostringstream key,time;key<<"CHAPTER"<<std::setfill('0')<<std::setw(3)<<n;
         time<<std::setfill('0')<<std::setw(2)<<(milliseconds/3600000)<<":"<<std::setw(2)<<((milliseconds/60000)%60)<<":"<<std::setw(2)<<((milliseconds/1000)%60)<<"."<<std::setw(3)<<(milliseconds%1000);
-        auto title=str(chapter,"title","Глава");for(auto &ch:title)if(ch=='\r'||ch=='\n')ch=' ';
+        auto title=str(chapter,"title","Глава");
         result.emplace_back(key.str(),time.str());result.emplace_back(key.str()+"NAME",std::move(title));
     }
     if(std::abs(previousEnd-duration)>0.005)throw std::runtime_error("Для FLAC конец последней главы должен совпадать с концом аудио. Выберите M4A или сохраните главы отдельно.");

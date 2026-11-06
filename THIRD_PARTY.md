@@ -2,6 +2,7 @@
 
 - ChromeExtensionInstaller — MIT, https://github.com/Ultimate-Destroyer/ChromeExtensionInstaller (ветка `py`). Сценарий пошаговой установки переработан в нативный C++/WinAPI-модуль `src/extension_installer.cpp`; исходные Python, Tkinter и PyAutoGUI не входят в программу. Текст лицензии сохранён без изменений в `licenses/ChromeExtensionInstaller-LICENSE.txt`.
 
+- MediaInfoLib 26.10 — MediaArea.net SARL; подключается динамически для анализа локальных файлов. Выпускной архив включает подписанную `MediaInfo.dll` и предоставленный разработчиком текст лицензии и уведомления о сторонних компонентах в `licenses/MediaInfo-License.html`. This product uses MediaInfo library, Copyright (c) 2002-2025 MediaArea.net SARL, https://mediaarea.net/MediaInfo. Исходный код: https://github.com/MediaArea/MediaInfoLib.
 - nlohmann/json 3.12.0 — MIT, https://github.com/nlohmann/json, `licenses/json-LICENSE.txt` и уведомления в vendor/json.hpp.
 - stb_image / stb_image_write — MIT или public domain, https://github.com/nothings/stb. `stb_image_write` используется только GPU-проверкой. Текст в `licenses/stb-LICENSE.txt` и заголовках.
 - Khronos OpenGL/EGL headers — MIT, уведомления в заголовках `vendor` и `licenses/Khronos-LICENSE.txt`.

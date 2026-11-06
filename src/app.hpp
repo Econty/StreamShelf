@@ -22,6 +22,7 @@ struct Job {
     std::vector<AssemblySource> sources;
     std::string assemblyMetadataTitle, assemblyArtist, assemblyDescription;
     MuxOptions muxOptions;
+    std::map<std::string,std::string> globalTags, originalGlobalTags;
     std::vector<std::string> muxInputs;
     std::string muxChapters;
     std::string outputDirectory;
@@ -120,10 +121,16 @@ class App {
     std::set<std::string> selectedJobs;
     MuxOptions muxOptions;
     bool constructorOpen = false, downloadChoice = false;
+    uint64_t constructorGeneration = 0;
+    int constructorPending = 0;
+    void queueConstructorProbe(const Media &, const std::string &, uint64_t);
     std::vector<AssemblySource> sourcePool, draft;
     int draftSelection = -1;
     bool singleExportMode = false, constructorModeManual = false, constructorFormatManual = false;
     std::string assemblyName = "Мой контейнер", assemblyMetadataTitle, assemblyArtist, assemblyDescription;
+    std::map<std::string,std::string> globalTags, originalGlobalTags;
+    std::string globalTagName;
+    bool globalTagsLoaded = false;
     void openConstructor(bool completed = false);
     void enqueueAssembly();
     void importAssemblyFile();

@@ -1,13 +1,28 @@
 #include "app.hpp"
 #include "language_options.hpp"
 namespace ss {
-static const std::vector<std::string> roles={"Видео","Аудио","Субтитры","Обложка","Главы","Метаданные"};
+static const std::vector<std::string> roles={"Видео","Аудио","Субтитры","Обложка","Главы","Метаданные","Вложения"};
 static Ink roleColor(int role) {
-    static constexpr unsigned colors[] = {0x5599f4, 0x39bc8b, 0xc07ff2, 0xee9953, 0xd7b84e, 0x45b6c8};
+    static constexpr unsigned colors[] = {0x5599f4, 0x39bc8b, 0xc07ff2, 0xee9953, 0xd7b84e, 0x45b6c8, 0xa5a9c7};
     return hex(colors[role]);
 }
 static bool accepts(const AssemblySource &s,int role) {
     return s.role==role||(s.role==0&&s.includeAudio&&role==1&&s.stream<0);
+}
+static std::vector<MediaInfoField> infoFor(const AssemblySource &source, bool general) {
+    std::vector<MediaInfoField> result;
+    if(!general && source.role==6 && source.originalStreamInfo.is_object() && !source.originalStreamInfo.empty()) {
+        for(const auto &[key,label]:std::vector<std::pair<std::string,std::string>>{{"codec_type","Тип потока"},{"codec_name","Формат"},{"codec_long_name","Описание формата"}}) {
+            auto value=str(source.originalStreamInfo,key.c_str());if(!value.empty())result.push_back({"Attachment",label,value,0});
+        }
+        if(source.originalStreamTags.is_object())for(auto it=source.originalStreamTags.begin();it!=source.originalStreamTags.end();++it)
+            if(it->is_string())result.push_back({"Attachment",it.key(),it->get<std::string>(),0});
+        return result;
+    }
+    const std::string section=general?"General":source.role==0?"Video":source.role==1?"Audio":source.role==2?"Text":"Image";
+    for(const auto &field:source.mediaInfoFields)
+        if(field.section==section && (general || field.ordinal==source.mediaInfoOrdinal))result.push_back(field);
+    return result;
 }
 void UI::assemblyProgressPanel() {
     auto processing=[](const std::shared_ptr<Job> &j){return j->state=="Сборка контейнера"||j->state=="Распознавание субтитров"||j->state=="Проверка результата"||j->state=="Объединение";};
@@ -87,7 +102,7 @@ bool UI::finishDraftDrag(const Hit &old) {
     }
     if(pool){
         source.uiId=++nextTileId;
-        source.metadataPending=!source.path.empty() && source.role<3;
+        source.metadataPending=!source.path.empty() && source.role<6;
         if(source.role==0)source.includeAudio=false;
     }
     if(existing){app.draft.erase(app.draft.begin()+index);if(before>index)--before;}
@@ -121,7 +136,7 @@ void UI::constructorPage(Rect r) {
                 origin.y=std::clamp(origin.y,poolView.y,poolView.y+std::max(0.f,poolView.h-origin.h));
                 autoTileFlights[source.uiId]={origin,now+std::min(added++,12u)*35};
             }
-            source.metadataPending=!source.path.empty() && source.role<3;
+            source.metadataPending=!source.path.empty() && source.role<6;
             if (source.metadataPending) app.readDroppedMetadata(source);
         }
     });
@@ -130,12 +145,12 @@ void UI::constructorPage(Rect r) {
     float centerX=r.x+leftW+12,centerW=r.w-leftW-propW-24,propX=r.x+r.w-propW;
     poolView={r.x,r.y+85,leftW,bottom-r.y-97};
     card({r.x,r.y+54,leftW,bottom-r.y-66});
-    c.text("Доступные медиа",r.x+12,r.y+76,13,text,leftW-24);
+    c.text(app.constructorPending?"Читаем потоки файлов…":"Доступные медиа",r.x+12,r.y+76,13,text,leftW-24);
     c.push({poolView.x,poolView.y,poolView.w-16,poolView.h});
     poolTileRects.resize(app.sourcePool.size());
     int previous=-1;float py=poolView.y-poolScroll.p.value;
     // Category headings and cards are ordered together; each source keeps its own identity.
-    std::vector<int> order;for(int role=0;role<6;role++)for(int i=0;i<int(app.sourcePool.size());i++)if(app.sourcePool[i].role==role)order.push_back(i);
+    std::vector<int> order;for(int role=0;role<7;role++)for(int i=0;i<int(app.sourcePool.size());i++)if(app.sourcePool[i].role==role)order.push_back(i);
     float total=0;
     for(int i:order){const auto &s=app.sourcePool[i];
         auto color=roleColor(s.role);
@@ -163,7 +178,7 @@ void UI::constructorPage(Rect r) {
     const auto now=GetTickCount64();
     std::erase_if(autoTileFlights,[now](const auto &entry){return now>=entry.second.start+420;});
     float cursor=draftView.y+8-draftScroll.p.value;
-    for(int role=0;role<6;role++){
+    for(int role=0;role<7;role++){
         std::vector<int> items;for(int n=0;n<int(app.draft.size());++n)if(app.draft[n].role==role&&n!=movingIndex)items.push_back(n);
         float headingY=cursor;cursor+=30;
         float sectionBottom=cursor+items.size()*76+48;
@@ -213,14 +228,14 @@ void UI::constructorPage(Rect r) {
         cancelInput();app.draftSelection=-1;propertyScroll.p.target=propertyScroll.p.value=0;
     },app.draftSelection<0);
     propertyView={propX+8,r.y+90,propW-16,bottom-r.y-106};
-    float propertyContent=app.draftSelection<0?260.f:(app.singleExportMode?1100.f:855.f);
+    float propertyContent=app.draftSelection<0?260.f:(app.singleExportMode?1100.f:890.f);
     if(app.singleExportMode && app.draftSelection>=0 && app.draftSelection<int(app.draft.size())) {
         const auto &item=app.draft[app.draftSelection];
         if(item.role==5 && item.metadataEdit)propertyContent=std::max(propertyContent,820.f+float(item.metadataTree.size())*34.f);
     }
-    propertyScroll.bounds(propertyContent,propertyView.h);
     c.push({propertyView.x,propertyView.y,propertyView.w-16,propertyView.h});float sy=propertyView.y-propertyScroll.p.value,x=propX+14,w=propW-44;
     int i=app.draftSelection;
+    float metadataTailY=0;
     if(i>=0&&i<int(app.draft.size())){
         auto &s=app.draft[i];c.text(s.metadataPending?"Читаем метаданные…":(app.singleExportMode && s.role==3?"Изображение":roles[s.role]),x,sy+17,12,roleColor(s.role),w);
         if(app.singleExportMode) {
@@ -323,38 +338,52 @@ void UI::constructorPage(Rect r) {
         button("property:basic",{x,sy+30,(w-8)/2,34},"Метаданные",[this]{cancelInput();advancedTrack=false;propertyScroll.p.target=0;},!advancedTrack);
         button("property:advanced",{x+(w+8)/2,sy+30,(w-8)/2,34},"Кодирование",[this]{cancelInput();advancedTrack=true;propertyScroll.p.target=0;},advancedTrack,s.role<2);
         if(!advancedTrack || s.role>=2){
-            c.text(s.role>=4?"Имя источника":"Название дорожки",x,sy+90,10,muted,w);input("track:name",{x,sy+98,w,34},s.name,"Название");
+            float y=75;
+            auto field=[&](const std::string &id,const std::string &label,std::string &value,const std::string &placeholder) {
+                c.text(label,x,sy+y+10,10,muted,w);
+                input(id,{x,sy+y+16,w,34},value,placeholder);y+=57;
+            };
+            field("track:name",s.role>=4?"Имя источника":"Название дорожки",s.name,"Название");
             if(s.role<3){
-            c.text("Язык дорожки · ISO 639",x,sy+155,10,muted,w);
-            input("track:language",{x,sy+163,w,34},s.language,"ru, rus, Русский…");
-            if (supportsExtendedTrackTags(app.muxOptions.container) || !s.description.empty() || !s.artist.empty() || !s.date.empty()) {
-                c.text("Описание",x,sy+220,10,muted,w);input("track:description",{x,sy+228,w,34},s.description,"Описание");
-                c.text("Автор / исполнитель",x,sy+285,10,muted,w);input("track:artist",{x,sy+293,w,34},s.artist,"Автор");
-                c.text("Дата выпуска (ГГГГ-ММ-ДД)",x,sy+350,10,muted,w);input("track:date",{x,sy+358,w,34},s.date,"Дата");
-            }
-            if (!supportsExtendedTrackTags(app.muxOptions.container))
-                c.text("Описание, автор и дата: MKV и WebM",x,sy+390,10,muted,w);
-            } else {
-                if(s.role==3) {
-                    c.text("Формат обложки",x,sy+155,10,muted,w);
-                    choice("track:coverFormat",{x,sy+163,w,36},{"PNG","JPG"},s.coverFormat,[this,i](int n){app.draft[i].coverFormat=n;});
-                    c.text("Исходник: выбранное изображение",x,sy+220,10,muted,w);
-                } else c.text("Главы и теги берутся из файла",x,sy+170,11,muted,w);
-                if(!s.language.empty()||!s.description.empty()||!s.artist.empty()||!s.date.empty())
-                    button("track:clearUnsupported",{x,sy+(s.role==3?250:200),w,36},"Очистить неподдерживаемые теги",[this,i]{app.draft[i].language.clear();app.draft[i].description.clear();app.draft[i].artist.clear();app.draft[i].date.clear();});
-            }
-            if(s.role<3){
-                check("track:default",{x,sy+404,30,30},s.primary,[this,i]{auto role=app.draft[i].role;bool value=!app.draft[i].primary;for(auto &t:app.draft)if(t.role==role)t.primary=false;app.draft[i].primary=value;});
-                c.text("По умолчанию",x+34,sy+424,11,text,w-34);
-                if(s.role==2 && (s.forced || supportsForcedSubtitles(app.muxOptions.container))){check("track:forced",{x,sy+440,30,30},s.forced,[this,i]{app.draft[i].forced=!app.draft[i].forced;});c.text("Принудительные",x+34,sy+460,11,text,w-34);}
+                field("track:language","Язык дорожки · ISO 639",s.language,"ru, rus, Русский…");
+                if(supportsExtendedTrackTags(app.muxOptions.container) || !s.description.empty() || !s.artist.empty() || !s.date.empty()) {
+                    field("track:description","Описание",s.description,"Описание");
+                    field("track:artist","Автор / исполнитель",s.artist,"Автор");
+                    field("track:date","Дата выпуска (ГГГГ-ММ-ДД)",s.date,"Дата");
+                }
+                if(!supportsExtendedTrackTags(app.muxOptions.container)) {
+                    c.text("Описание, автор и дата: MKV и WebM",x,sy+y+12,10,muted,w);y+=24;
+                }
+                check("track:default",{x,sy+y,30,30},s.primary,[this,i]{auto role=app.draft[i].role;bool value=!app.draft[i].primary;for(auto &t:app.draft)if(t.role==role)t.primary=false;app.draft[i].primary=value;});
+                c.text("По умолчанию",x+34,sy+y+20,11,text,w-34);y+=37;
+                if(s.role==2 && (s.forced || supportsForcedSubtitles(app.muxOptions.container))){
+                    check("track:forced",{x,sy+y,30,30},s.forced,[this,i]{app.draft[i].forced=!app.draft[i].forced;});
+                    c.text("Принудительные",x+34,sy+y+20,11,text,w-34);y+=37;
+                }
                 if(s.role==2){
-                    c.text("Кодек субтитров",x,sy+501,10,muted,w);
+                    c.text("Кодек субтитров",x,sy+y+10,10,muted,w);
                     const std::vector<std::string> names={"Исходный","SRT","mov_text","WebVTT","ASS"};
                     std::vector<std::string> options;std::vector<int> ids;int selected=-1;
                     for(int n=0;n<int(names.size());++n)if(app.subtitleEncoders[n]){if(s.codec==n)selected=int(options.size());options.push_back(names[n]);ids.push_back(n);}
-                    choice("track:subcodec",{x,sy+511,w,36},options,selected,[this,i,ids](int n){if(n>=0&&n<int(ids.size()))app.draft[i].codec=ids[n];});
+                    choice("track:subcodec",{x,sy+y+16,w,36},options,selected,[this,i,ids](int n){if(n>=0&&n<int(ids.size()))app.draft[i].codec=ids[n];});y+=59;
+                }
+                if(supportsExtendedTrackTags(app.muxOptions.container) || !s.summary.empty() || !s.synopsis.empty()){
+                    field("track:summary","Краткое содержание · SUMMARY",s.summary,"Краткое содержание");
+                    field("track:synopsis","Синопсис · SYNOPSIS",s.synopsis,"Синопсис");
+                }
+                if(app.muxOptions.container==1 || app.muxOptions.container==2 || !s.handlerName.empty())
+                    field("track:handler","Имя обработчика · handler_name",s.handlerName,"Имя обработчика");
+            } else {
+                if(s.role==3) {
+                    c.text("Формат обложки",x,sy+y+10,10,muted,w);
+                    choice("track:coverFormat",{x,sy+y+16,w,36},{"PNG","JPG"},s.coverFormat,[this,i](int n){app.draft[i].coverFormat=n;});y+=59;
+                    c.text("Исходник: выбранное изображение",x,sy+y+12,10,muted,w);y+=25;
+                } else {c.text(s.role==6?"Вложение берётся из исходного файла":"Главы и теги берутся из файла",x,sy+y+12,11,muted,w);y+=25;}
+                if(!s.language.empty()||!s.description.empty()||!s.artist.empty()||!s.date.empty()) {
+                    button("track:clearUnsupported",{x,sy+y,w,36},"Очистить неподдерживаемые теги",[this,i]{app.draft[i].language.clear();app.draft[i].description.clear();app.draft[i].artist.clear();app.draft[i].date.clear();});y+=43;
                 }
             }
+            metadataTailY=y;
         } else {
             c.text("Кодек",x,sy+90,10,muted,w);
             std::vector<std::string> codecs;std::vector<int> codecIds;int selected=-1;
@@ -374,34 +403,91 @@ void UI::constructorPage(Rect r) {
             } else {c.text("Частота дискретизации, Гц",x,sy+285,10,muted,w);input("track:samplerate",{x,sy+293,w,34},s.sampleRate,"Исходная");}
             c.text(app.videoEncodersReady?"Показаны доступные кодировщики":"Проверяем кодировщики…",x,sy+558,10,muted,w);
         }
-        if((!advancedTrack || s.role>=2) && s.role<3){
-            if(supportsExtendedTrackTags(app.muxOptions.container) || !s.summary.empty() || !s.synopsis.empty()){
-                c.text("Краткое содержание · SUMMARY",x,sy+566,10,muted,w);
-                input("track:summary",{x,sy+574,w,34},s.summary,"Краткое содержание");
-                c.text("Синопсис · SYNOPSIS",x,sy+626,10,muted,w);
-                input("track:synopsis",{x,sy+634,w,34},s.synopsis,"Синопсис");
-            }
-            if(app.muxOptions.container==1 || app.muxOptions.container==2 || !s.handlerName.empty()){
-                c.text("Имя обработчика · handler_name",x,sy+686,10,muted,w);
-                input("track:handler",{x,sy+694,w,34},s.handlerName,"Имя обработчика");
-            }
         }
-        button("track:up",{x,sy+745,(w-8)/2,34},"Выше ↑",[this,i]{cancelInput();for(int n=i-1;n>=0;n--)if(app.draft[n].role==app.draft[i].role){std::swap(app.draft[n],app.draft[i]);app.draftSelection=n;break;}});
-        button("track:down",{x+(w+8)/2,sy+745,(w-8)/2,34},"Ниже ↓",[this,i]{cancelInput();for(int n=i+1;n<int(app.draft.size());n++)if(app.draft[n].role==app.draft[i].role){std::swap(app.draft[n],app.draft[i]);app.draftSelection=n;break;}});
-        }
-        float removeY=app.singleExportMode?1010.f:790.f;
+        auto orderControls=[this,i,x,w,sy](float y) {
+            button("track:up",{x,sy+y,(w-8)/2,34},"Выше ↑",[this,i]{cancelInput();for(int n=i-1;n>=0;n--)if(app.draft[n].role==app.draft[i].role){std::swap(app.draft[n],app.draft[i]);app.draftSelection=n;break;}});
+            button("track:down",{x+(w+8)/2,sy+y,(w-8)/2,34},"Ниже ↓",[this,i]{cancelInput();for(int n=i+1;n<int(app.draft.size());n++)if(app.draft[n].role==app.draft[i].role){std::swap(app.draft[n],app.draft[i]);app.draftSelection=n;break;}});
+            button("track:remove",{x,sy+y+45,w,36},"Убрать",[this,i]{cancelInput();app.draft.erase(app.draft.begin()+i);app.draftSelection=-1;app.updateConstructorRecommendation();});
+        };
+        float removeY=app.singleExportMode?355.f:790.f;
         if(app.singleExportMode && s.role==5 && s.metadataEdit)removeY=std::max(removeY,780.f+float(s.metadataTree.size())*34.f);
-        button("track:remove",{x,sy+removeY,w,36},"Убрать",[this,i]{cancelInput();app.draft.erase(app.draft.begin()+i);app.draftSelection=-1;app.updateConstructorRecommendation();});
+        if(!app.singleExportMode && (!advancedTrack || s.role>=2)) {
+            float y=metadataTailY+10;
+            if(s.role==5 && s.metadataEdit) {
+                c.text("Название",x,sy+y+15,10,muted,w);input("source:title",{x,sy+y+22,w,34},s.metadataEditTitle,"Название");y+=65;
+                c.text("Автор / исполнитель",x,sy+y+15,10,muted,w);input("source:artist",{x,sy+y+22,w,34},s.metadataEditArtist,"Автор");y+=65;
+                c.text("Описание",x,sy+y+15,10,muted,w);input("source:description",{x,sy+y+22,w,34},s.metadataEditDescription,"Описание");y+=65;
+            }
+            if(s.role<3 || (s.role==5 && s.metadataEdit)) {
+                c.text(s.role==5?"Дополнительные теги источника":"Дополнительные теги дорожки",x,sy+y,11,accent,w); y+=12;
+                for(auto &[key,value]:s.extraTags) {
+                    c.text(key,x,sy+y+15,10,muted,w);
+                    input("extra:track:"+std::to_string(s.uiId)+":"+key,{x,sy+y+22,w,34},value,"Значение");y+=65;
+                }
+                input("extra:track-name",{x,sy+y+10,w-80,34},s.extraTagName,"Имя тега");
+                button("extra:track-add",{x+w-74,sy+y+10,74,34},"Добавить",[this,i]{
+                    auto &source=app.draft[i];
+                    if(!metadataKeyAllowed(source.extraTagName)){app.notify("Введите допустимое имя нового тега");return;}
+                    for(const auto &[key,value]:source.extraTags)if(_stricmp(key.c_str(),source.extraTagName.c_str())==0){app.notify("Такой тег уже существует");return;}
+                    source.extraTags[source.extraTagName]="";source.extraTagName.clear();cancelInput();
+                });y+=65;
+            }
+            if(s.role==4 && s.chaptersReady) {
+                c.text("Главы · время в секундах",x,sy+y+15,10,accent,w);y+=25;
+                for(size_t n=0;n<s.chapterEdits.size();++n) {
+                    auto &chapter=s.chapterEdits[n];auto id=std::to_string(s.uiId)+":"+std::to_string(n);
+                    c.text("Глава "+std::to_string(n+1),x,sy+y+13,10,muted,w);
+                    input("chapter:title:"+id,{x,sy+y+20,w,34},chapter.title,"Название");
+                    c.text("Начало, с",x,sy+y+76,10,muted,w);
+                    input("chapter:start:"+id,{x,sy+y+83,w,34},chapter.start,"0");
+                    c.text("Конец, с",x,sy+y+139,10,muted,w);
+                    input("chapter:end:"+id,{x,sy+y+146,w,34},chapter.end,"0");y+=190;
+                }
+            }
+            c.text("Свойства исходного файла · только чтение",x,sy+y+15,10,accent,w);y+=27;
+            auto fields=infoFor(s,false);
+            if(fields.empty()) { c.text(s.metadataPending?"Читаем сведения…":"MediaInfo или сведения файла недоступны",x,sy+y+15,10,muted,w); y+=35; }
+            for(const auto &field:fields) {
+                c.text(field.name,x,sy+y+13,10,muted,w);
+                c.text(field.value,x,sy+y+32,11,text,w);y+=51;
+            }
+            orderControls(y+10);
+            propertyContent=y+105;
+        } else if(app.singleExportMode) {
+            button("track:remove",{x,sy+removeY,w,36},"Убрать",[this,i]{cancelInput();app.draft.erase(app.draft.begin()+i);app.draftSelection=-1;app.updateConstructorRecommendation();});
+            propertyContent=removeY+55;
+        } else orderControls(745.f);
     } else {
         c.text("Метаданные итогового контейнера",x,sy+23,12,accent,w);
         c.text("Название",x,sy+55,10,muted,w);
         input("build:metadata-title",{x,sy+65,w,34},app.assemblyMetadataTitle,app.assemblyName);
-        c.text("Автор / исполнитель",x,sy+123,10,muted,w);
-        input("build:artist",{x,sy+133,w,34},app.assemblyArtist,"Автор");
-        c.text("Описание",x,sy+191,10,muted,w);
-        input("build:description",{x,sy+201,w,34},app.assemblyDescription,"Описание");
+        c.text("Автор / исполнитель",x,sy+112,10,muted,w);
+        input("build:artist",{x,sy+122,w,34},app.assemblyArtist,"Автор");
+        c.text("Описание",x,sy+169,10,muted,w);
+        input("build:description",{x,sy+179,w,34},app.assemblyDescription,"Описание");
+        float y=230;
+        c.text("Дополнительные общие теги",x,sy+y,11,accent,w);y+=12;
+        for(auto &[key,value]:app.globalTags) {
+            c.text(key,x,sy+y+15,10,muted,w);
+            input("extra:global:"+key,{x,sy+y+22,w,34},value,"Значение");y+=65;
+        }
+        input("extra:global-name",{x,sy+y+10,w-80,34},app.globalTagName,"Имя тега");
+        button("extra:global-add",{x+w-74,sy+y+10,74,34},"Добавить",[this]{
+            if(!metadataKeyAllowed(app.globalTagName)){app.notify("Введите допустимое имя нового тега");return;}
+            for(const auto &[key,value]:app.globalTags)if(_stricmp(key.c_str(),app.globalTagName.c_str())==0){app.notify("Такой тег уже существует");return;}
+            app.globalTags[app.globalTagName]="";app.globalTagName.clear();cancelInput();
+        });y+=70;
+        c.text("Свойства исходного файла · только чтение",x,sy+y+15,10,accent,w);y+=27;
+        for(const auto &source:app.draft)if(!source.mediaInfoFields.empty()) {
+            for(const auto &field:infoFor(source,true)) {
+                c.text(field.name,x,sy+y+13,10,muted,w);
+                c.text(field.value,x,sy+y+32,11,text,w);y+=51;
+            }
+            break;
+        }
+        propertyContent=y+20;
     }
-    c.pop();scrollbar("scroll:property",propertyView,propertyScroll);
+    c.pop();propertyScroll.bounds(propertyContent,propertyView.h);scrollbar("scroll:property",propertyView,propertyScroll);
     std::string compatibility;
     if(app.singleExportMode) {
         for(const auto &source:app.draft) {

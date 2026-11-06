@@ -340,7 +340,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
         c.circle(cx + 11, cy - 105 + drift, 2.5f + pulse, hex(0x8be2d1));
         centered("KRECHETOV LABS", cy - 48, 13, hex(0x8be2d1));
         centered("StreamShelf", cy + 5, 36, hex(0xeef3fc));
-        centered("Версия 2.3.1 Beta", cy + 41, 12, hex(0x8999b4));
+        centered("Версия 2.4 Beta", cy + 41, 12, hex(0x8999b4));
         c.rect({cx - 50, cy + 69, 100, 2}, 1, hex(0x2a374b));
         c.rect({cx - 50, cy + 69, 100 * std::clamp(elapsedSeconds / float(app.splashSeconds), 0.f, 1.f), 2}, 1, hex(0x8be2d1));
         c.opacity = 1; c.render(); return;
@@ -452,7 +452,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     c.circle(40, height - 28, 3, app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady ? accent : muted);
     if(!compactMenu)c.text(app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady?"Браузер подключён":"Нет соединения",52,height-24,10,muted,150);
     if (!compactMenu) {
-        c.text("KRECHETOV LABS · StreamShelf 2.3.1 Beta", 25, height - 80, 9, muted, 195);
+        c.text("KRECHETOV LABS · StreamShelf 2.4 Beta", 25, height - 80, 9, muted, 195);
         c.text("Разработчик: Арсений Кречетов", 25, height - 59, 9, muted, 195);
     }
     float contentLeft=compactMenu?76.f:226.f;
@@ -1318,7 +1318,7 @@ void UI::aboutPage(Rect r) {
     card({r.x, y, r.w, 152});
     c.text("KRECHETOV LABS", r.x + 24, y + 30, 11, accent, r.w - 48);
     c.text("StreamShelf", r.x + 24, y + 69, 25, text, r.w - 48);
-    c.text("Версия 2.3.1 Beta · Windows x64", r.x + 24, y + 100, 12, muted, r.w - 48);
+    c.text("Версия 2.4 Beta · Windows x64", r.x + 24, y + 100, 12, muted, r.w - 48);
     c.text("Разработчик: Арсений Кречетов", r.x + 24, y + 126, 12, muted, r.w - 48);
     y += 168;
     card({r.x, y, r.w, 220});

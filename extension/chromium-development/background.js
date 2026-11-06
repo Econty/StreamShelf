@@ -2,8 +2,14 @@
 const api = globalThis.browser || chrome;
 const VERSION = api.runtime.getManifest().version;
 let port = null, tabId = null, scanning = false, pageUrl = '', instanceId = '', lastError = '';
-let connecting = null, reconnectDelay = 0.5;
-function scheduleReconnect(){ api.alarms.create('streamshelf-reconnect',{delayInMinutes:reconnectDelay}); reconnectDelay=Math.min(reconnectDelay*2,15); }
+let connecting = null, reconnectDelay = 1000, reconnectTimer = null;
+function scheduleReconnect(){
+  if(reconnectTimer!==null)return;
+  const delay=reconnectDelay;reconnectDelay=Math.min(reconnectDelay*2,30000);
+  // Alarms survive service-worker suspension; the timer makes an active worker retry promptly.
+  api.alarms.create('streamshelf-reconnect',{delayInMinutes:Math.max(0.5,delay/60000)});
+  reconnectTimer=setTimeout(()=>{reconnectTimer=null;if(!port)connect(false).catch(()=>scheduleReconnect());},delay);
+}
 let selectionSequence = 0, scanId = 0;
 const resources = new Map(), requests = new Map(), segments = new Map();let pageHeaders={};
 function send(message) { if(port) { try { port.postMessage(message); } catch { lastError='Связь с приложением потеряна'; } } }
@@ -105,7 +111,7 @@ async function inject() {
 }
 async function handleCommand(m) {
   if(!m||typeof m.type!=='string')throw new Error('Некорректная команда');
-  if(m.type==='helloAck'){reconnectDelay=0.5;return;}
+  if(m.type==='helloAck'){reconnectDelay=1000;if(reconnectTimer!==null){clearTimeout(reconnectTimer);reconnectTimer=null;}return;}
   if(m.type==='ping'){const hasSiteAccess=await api.permissions.contains({origins:['http://*/*','https://*/*']});const {setupConfirmed}=await api.storage.local.get('setupConfirmed');send({type:'pong',requestId:m.requestId,hasSiteAccess,setupConfirmed:setupConfirmed===true,setupApi:true,setupRevision:'2026-10-31-1'});return;}
   if(m.type==='openSetup') {
     try {
@@ -198,3 +204,6 @@ api.permissions.onRemoved?.addListener(()=>send({type:'setupChanged'}));
 api.runtime.onInstalled.addListener(()=>{connect(false).catch(()=>scheduleReconnect());});
 api.runtime.onStartup.addListener(()=>{connect(false).catch(()=>scheduleReconnect());});
 api.alarms.onAlarm.addListener(alarm=>{if(alarm.name==='streamshelf-reconnect'&&!port)connect(false).catch(()=>scheduleReconnect());});
+
+// Reconnect when Chrome starts this worker after the extension was re-enabled.
+connect(false).catch(()=>scheduleReconnect());

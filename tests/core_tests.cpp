@@ -53,6 +53,11 @@ int main() {
         check(str(second.items[0].data, "description") == "second description", "second analysis has independent snapshot");
     });
     test("Firefox guide follows current evidence and requires a verified connection", [] {
+        check(firefoxPickerAction(false, false, false, false) == FirefoxPickerAction::Navigate, "Firefox picker opens the XPI parent folder");
+        check(firefoxPickerAction(false, true, false, false) == FirefoxPickerAction::SelectFile, "Firefox picker highlights the XPI without navigating again");
+        check(firefoxPickerAction(true, true, true, false) == FirefoxPickerAction::OpenFile, "Firefox picker highlights Open after file selection");
+        check(firefoxPickerAction(false, false, false, true) == FirefoxPickerAction::OpenFile, "Firefox picker accepts a manually entered XPI path");
+        check(firefoxPickerAction(true, false, false, false) == FirefoxPickerAction::Wait, "Firefox picker waits when the target file is not visible");
         FirefoxGuideObservation o;
         check(firefoxGuideStage(o) == FirefoxGuideStage::OpenManager, "unknown page");
         o.manager = true; check(firefoxGuideStage(o) == FirefoxGuideStage::OpenMenu, "open menu");
@@ -71,6 +76,14 @@ int main() {
         check(!firefoxCardSwitch(458, 413, 700, 435, 1109, 520, 1149, 540, 96), "neighbouring row is not the switch");
         o.enabled = true; check(firefoxGuideStage(o) == FirefoxGuideStage::Connect, "enabled alone is not success");
         o.connectionConfirmed = true; check(firefoxGuideStage(o) == FirefoxGuideStage::Done, "verified connection");
+        o.connectionConfirmed = false; o.removedNotice = true;
+        check(firefoxGuideStage(o) == FirefoxGuideStage::OpenMenu, "visible Firefox removal overrides stale installed and connected state");
+        o.menu = true; check(firefoxGuideStage(o) == FirefoxGuideStage::InstallFile, "removal notice allows the install menu step");
+        o.picker = true; check(firefoxGuideStage(o) == FirefoxGuideStage::SelectFile, "removal notice does not block a new file picker");
+        check(firefoxRemovedNotice(L"streamshelf connector было удалено."), "Firefox Russian removal notice recognized");
+        check(firefoxRemovedNotice(L"streamshelf connector was removed."), "Firefox English removal notice recognized");
+        check(!firefoxRemovedNotice(L"another extension was removed"), "another extension's removal is ignored");
+        o.picker = o.menu = o.removedNotice = false;
         o.connectionConfirmed = o.installed = o.enabled = false;
         check(firefoxGuideStage(o) == FirefoxGuideStage::OpenMenu, "removed add-on returns to installation");
     });
@@ -83,7 +96,7 @@ int main() {
         auto chapters = Json::array({{{"start_time", 0.25}, {"end_time", 1.5}, {"title", "a=b;#\\c\nnext"}}});
         auto text = chaptersToFfmetadata(chapters);
         check(text.find("START=250\nEND=1500") != std::string::npos, "chapter milliseconds");
-        check(text.find("a\\=b\\;\\#\\\\c next") != std::string::npos, "escape chapter title");
+        check(text.find("a\\=b\\;\\#\\\\c\\\nnext") != std::string::npos, "escape chapter title");
         rejects([&] { chaptersToFfmetadata(Json::array({{{"start_time", 2}, {"end_time", 1}}})); });
         auto flacChapters=Json::array({{{"start_time",0.0},{"end_time",1.0},{"title","First"}},{{"start_time",1.0},{"end_time",2.0},{"title","Second"}}});
         auto tags=flacChapterTags(flacChapters,2.0);

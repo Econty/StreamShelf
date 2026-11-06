@@ -3,11 +3,13 @@
 #include <fstream>
 namespace ss {
 void App::openConstructor(bool completed) {
+    ++constructorGeneration;constructorPending=0;
     sourcePool.clear(); draft.clear(); draftSelection=-1; singleExportMode=false;constructorModeManual=false;constructorFormatManual=false;
-    assemblyName = title.empty() ? "Мой контейнер" : title; assemblyMetadataTitle.clear(); assemblyArtist.clear(); assemblyDescription.clear();
+    assemblyName = title.empty() ? "Мой контейнер" : title; assemblyMetadataTitle.clear(); assemblyArtist.clear(); assemblyDescription.clear(); globalTags.clear(); originalGlobalTags.clear(); globalTagName.clear(); globalTagsLoaded=false;
+    for(const char *key:{"album","album_artist","composer","genre","date","copyright","publisher"})globalTags[key]="";
     if(completed) for(const auto &job:jobs) if(job->id==selectedJob&&job->assembly){
         singleExportMode=job->singleExport;
-        sourcePool=job->sources;assemblyName=job->title;assemblyMetadataTitle=job->assemblyMetadataTitle;assemblyArtist=job->assemblyArtist;assemblyDescription=job->assemblyDescription;muxOptions=job->muxOptions;
+        sourcePool=job->sources;assemblyName=job->title;assemblyMetadataTitle=job->assemblyMetadataTitle;assemblyArtist=job->assemblyArtist;assemblyDescription=job->assemblyDescription;globalTags=job->globalTags;originalGlobalTags=job->originalGlobalTags;globalTagsLoaded=true;muxOptions=job->muxOptions;
         for(auto &source:sourcePool){
             if(job->singleExport){source.exportFormat=job->exportFormat;source.exportQuality=job->exportQuality;}
             if(!source.dependency.empty())for(const auto &child:jobs)if(child->id==source.dependency&&child->done&&child->state=="Готово")source.path=child->output;
@@ -22,11 +24,11 @@ void App::openConstructor(bool completed) {
     }
     if (completed) {
         for (const auto &j : jobs) if (selectedJobs.count(j->id) && j->done && j->state=="Готово" && fs::is_regular_file(wide(j->output))) {
-            auto source=assemblySource(j->item,j->output);sourcePool.push_back(source);
-            if(source.role==0 && !j->item.videoOnly && j->item.acodec!="none") {
-                auto audio=source;audio.role=1;audio.derivedAudio=true;audio.optionalAudio=j->item.acodec.empty();
-                audio.name=source.name+(audio.optionalAudio?" · звук (если есть)":" · звук");sourcePool.push_back(audio);
+            auto extension=fs::path(wide(j->output)).extension().wstring();std::transform(extension.begin(),extension.end(),extension.begin(),::towlower);
+            if(j->item.category=="Изображения" || j->item.category=="Превью" || extension==L".json" || extension==L".ffmetadata" || extension==L".txt") {
+                sourcePool.push_back(assemblySource(j->item,j->output));continue;
             }
+            queueConstructorProbe(j->item,j->output,constructorGeneration);
         }
     } else {
         for (const auto &m : media) if (m.selected && !m.drm) {
@@ -52,9 +54,9 @@ void App::updateConstructorRecommendation() {
     }
 }
 void App::autoConstruct() {
+    if(constructorPending>0){notify("Дождитесь чтения дорожек файлов");return;}
     for (const auto &source : sourcePool) {
         bool alreadyAdded = std::any_of(draft.begin(), draft.end(), [&](const auto &item) {
-            if (source.role >= 3 && !singleExportMode) return item.role == source.role;
             return item.role == source.role && item.path == source.path &&
                    item.stream == source.stream && item.media.key == source.media.key &&
                    item.media.id == source.media.id;
@@ -65,49 +67,62 @@ void App::autoConstruct() {
     for (int role=0; role<3; ++role) {
         if (std::any_of(draft.begin(), draft.end(), [role](const auto &s){return s.role==role && s.primary;}))
             continue;
+        if(std::any_of(draft.begin(),draft.end(),[role](const auto &s){return s.role==role && s.embeddedKind=="stream";}))continue;
         auto first=std::find_if(draft.begin(), draft.end(), [role](const auto &s){return s.role==role;});
         if (first!=draft.end()) first->primary=true;
     }
     draftSelection=draft.empty()?-1:0;
     updateConstructorRecommendation();
 }
+void App::queueConstructorProbe(const Media &media,const std::string &path,uint64_t generation) {
+    ++constructorPending;
+    work([this,media,path,generation] {
+        Json probe;std::atomic_bool cancel{false},finished{false};
+        std::thread watchdog([&]{for(int n=0;n<150&&!finished&&!stopping;++n)Sleep(100);if(!finished)cancel=true;});
+        try {std::shared_lock lock(toolsMutex);auto result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-show_programs",L"-show_stream_groups",L"-show_chapters",L"-show_format",L"-of",L"json",wide(path)},nullptr,cancel,true);
+            if(result.code && !cancel)result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-show_programs",L"-show_chapters",L"-show_format",L"-of",L"json",wide(path)},nullptr,cancel,true);
+            if(!result.code)probe=Json::parse(result.output,nullptr,false);}catch(...){}
+        finished=true;watchdog.join();
+        std::vector<AssemblySource> sources;
+        try {if(probe.is_object())sources=assemblySourcesFromProbe(media,path,probe);}catch(...) {}
+        post([this,generation,sources=std::move(sources)] {
+            if(!constructorOpen || generation!=constructorGeneration)return;
+            constructorPending=std::max(0,constructorPending-1);
+            if(sources.empty()){notify("Не удалось разобрать потоки файла; исходник сохранён");return;}
+            sourcePool.insert(sourcePool.end(),sources.begin(),sources.end());
+        });
+    });
+}
 void App::importAssemblyFile() {
-    work([this] {
+    auto generation=constructorGeneration;++constructorPending;
+    work([this,generation] {
+        struct Finish { App *app;uint64_t generation;~Finish(){app->post([app=app,generation=generation]{if(app->constructorOpen && app->constructorGeneration==generation)app->constructorPending=std::max(0,app->constructorPending-1);});} } finish{this,generation};
         auto path=pickFile(hwnd); if(path.empty())return;
         Media m; m.title=utf8(fs::path(wide(path)).filename().wstring());
         auto ext=fs::path(wide(path)).extension().wstring(); std::transform(ext.begin(),ext.end(),ext.begin(),::towlower);
         m.ext=utf8(ext.empty()?L"":ext.substr(1)); m.key="local:"+path;
-        if(m.ext=="ffmetadata") {m.category="Данные";m.id="chapters";post([this,m,path]{sourcePool.push_back(assemblySource(m,path));});return;}
+        if(m.ext=="txt") {m.category="Данные";m.id="metadata";post([this,m,path,generation]{if(constructorOpen && generation==constructorGeneration)sourcePool.push_back(assemblySource(m,path));});return;}
+        if(m.ext=="ffmetadata") {m.category="Данные";m.id="chapters";post([this,m,path,generation]{if(constructorOpen && generation==constructorGeneration)sourcePool.push_back(assemblySource(m,path));});return;}
         if(m.ext=="json") { m.category="Данные"; m.id="chapters";
             auto data=Json::parse(readFile(wide(path),4*1024*1024),nullptr,false);
             if(!data.is_array() && !(data.is_object() && data.contains("chapters") && data["chapters"].is_array()))m.id="metadata";
-            post([this,m,path]{sourcePool.push_back(assemblySource(m,path));}); return;
+            post([this,m,path,generation]{if(constructorOpen && generation==constructorGeneration)sourcePool.push_back(assemblySource(m,path));}); return;
         }
         if(m.ext=="png"||m.ext=="jpg"||m.ext=="jpeg"||m.ext=="webp"||m.ext=="avif"||m.ext=="bmp"||m.ext=="gif") {
-            m.category="Изображения"; post([this,m,path]{sourcePool.push_back(assemblySource(m,path));});return;
+            m.category="Изображения"; post([this,m,path,generation]{if(constructorOpen && generation==constructorGeneration)sourcePool.push_back(assemblySource(m,path));});return;
         }
         std::atomic_bool cancel{false},finished{false};
         std::thread watchdog([&]{for(int i=0;i<150&&!finished&&!stopping;i++)Sleep(100);if(!finished)cancel=true;});
         ProcessResult r;
-        try { std::shared_lock lock(toolsMutex); r=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-of",L"json",wide(path)},nullptr,cancel,true); }
+        try { std::shared_lock lock(toolsMutex); r=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-show_programs",L"-show_stream_groups",L"-show_chapters",L"-show_format",L"-of",L"json",wide(path)},nullptr,cancel,true);
+            if(r.code && !cancel)r=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-show_programs",L"-show_chapters",L"-show_format",L"-of",L"json",wide(path)},nullptr,cancel,true); }
         catch(...){finished=true;watchdog.join();throw;}
         finished=true;watchdog.join();
         auto probe=Json::parse(r.output,nullptr,false);
         if(r.code||!probe.is_object())throw std::runtime_error("Не удалось прочитать дорожки локального файла");
-        std::vector<AssemblySource> imported;
-        bool hasVideo=false;
-        for(const auto &stream:probe.value("streams",Json::array()))if(str(stream,"codec_type")=="video" && number(stream.value("disposition",Json::object()),"attached_pic")!=1)hasVideo=true;
-        for(const auto &stream:probe.value("streams",Json::array())) {
-            auto type=str(stream,"codec_type"); if(type!="video"&&type!="audio"&&type!="subtitle")continue;
-            if(type=="video" && number(stream.value("disposition",Json::object()),"attached_pic")!=0)continue;
-            auto item=m; item.category=type=="video"?"Видео":type=="audio"?"Аудио":"Субтитры";
-            auto s=assemblySource(item,path);s.role=type=="video"?0:type=="audio"?1:2;s.stream=int(number(stream,"index"));s.includeAudio=false;s.derivedAudio=hasVideo&&s.role==1;
-            auto tags=stream.value("tags",Json::object());s.language=str(tags,"language");s.name=str(tags,"title",m.title)+" · #"+std::to_string(s.stream);
-            s.description=str(tags,"description",str(tags,"comment"));s.artist=str(tags,"artist");s.date=str(tags,"date");
-            imported.push_back(s);
-        }
+        auto imported=assemblySourcesFromProbe(m,path,probe);
         if(imported.empty())throw std::runtime_error("В файле не найдены поддерживаемые дорожки");
-        post([this,imported]{sourcePool.insert(sourcePool.end(),imported.begin(),imported.end());});
+        post([this,imported,generation]{if(constructorOpen && generation==constructorGeneration)sourcePool.insert(sourcePool.end(),imported.begin(),imported.end());});
     });
 }
 static std::string metadataTag(const Json &tags, std::initializer_list<const char *> keys) {
@@ -117,6 +132,57 @@ static std::string metadataTag(const Json &tags, std::initializer_list<const cha
             if (it->is_string() && _stricmp(it.key().c_str(), key)==0 && !it->get_ref<const std::string &>().empty())
                 return it->get<std::string>();
     return {};
+}
+// Load MediaInfo from the application directory or its standard installation,
+// never from the current working directory. The report describes the source.
+static std::vector<MediaInfoField> readMediaInfoReport(const std::string &path) {
+    auto dll=executable().parent_path()/L"MediaInfo.dll";
+    HMODULE lib=LoadLibraryExW(dll.c_str(),nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
+    if(!lib) {
+        wchar_t programFiles[MAX_PATH]{};
+        if (!GetEnvironmentVariableW(L"ProgramFiles",programFiles,MAX_PATH)) return {};
+        dll=fs::path(programFiles)/L"MediaInfo"/L"MediaInfo.dll";
+        lib=LoadLibraryExW(dll.c_str(),nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
+    }
+    if(!lib)return {};
+    using New = void* (__stdcall*)();
+    using Open = size_t (__stdcall*)(void*, const wchar_t*);
+    using Inform = const wchar_t* (__stdcall*)(void*, size_t);
+    using Delete = void (__stdcall*)(void*);
+    auto create = reinterpret_cast<New>(GetProcAddress(lib, "MediaInfo_New"));
+    auto open = reinterpret_cast<Open>(GetProcAddress(lib, "MediaInfo_Open"));
+    auto inform = reinterpret_cast<Inform>(GetProcAddress(lib, "MediaInfo_Inform"));
+    auto destroy = reinterpret_cast<Delete>(GetProcAddress(lib, "MediaInfo_Delete"));
+    std::wstring report;
+    if (create && open && inform && destroy) {
+        void *handle = create();
+        if (handle) {
+            if (open(handle, wide(path).c_str())) {
+                if (const auto *value = inform(handle, 0)) report = value;
+            }
+            destroy(handle);
+        }
+    }
+    FreeLibrary(lib);
+    std::vector<MediaInfoField> fields;
+    std::map<std::string,int> counts;
+    std::string section; int ordinal=0;
+    std::wstring line;
+    auto flush = [&] {
+        auto colon=line.find(L" : ");
+        if(colon==std::wstring::npos) {
+            if(!line.empty()) { section=utf8(line); auto suffix=section.find(" #"); if(suffix!=std::string::npos)section.erase(suffix); ordinal=counts[section]++; }
+        } else if(!section.empty()) {
+            auto label=line.substr(0,colon);
+            while(!label.empty() && label.back()==L' ')label.pop_back();
+            auto value=line.substr(colon+3);
+            if(!label.empty() && !value.empty())fields.push_back({section,utf8(label),utf8(value),ordinal});
+        }
+        line.clear();
+    };
+    for(wchar_t ch:report) { if(ch==L'\r')continue; if(ch==L'\n')flush(); else line+=ch; }
+    if(!line.empty())flush();
+    return fields;
 }
 void App::readDroppedMetadata(const AssemblySource &original) {
     work([this,original] {
@@ -128,27 +194,75 @@ void App::readDroppedMetadata(const AssemblySource &original) {
         });
         try {
             std::shared_lock lock(toolsMutex);
-            auto result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-show_format",L"-of",L"json",wide(original.path)},nullptr,cancel,true);
+            auto result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-show_chapters",L"-show_format",L"-of",L"json",wide(original.path)},nullptr,cancel,true);
             if(!result.code) probe=Json::parse(result.output,nullptr,false);
         } catch (...) {}
         finished=true;
         watchdog.join();
-        post([this,original,probe=std::move(probe)] {
+        auto report = readMediaInfoReport(original.path);
+        Json metadataSource;
+        if(original.role==5 && original.embeddedKind!="metadata")try {metadataSource=Json::parse(readFile(wide(original.path),4*1024*1024));}catch(...) {}
+        Json chapters;
+        if(original.role==4)try {
+            auto ext=fs::path(wide(original.path)).extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),::towlower);
+            if(original.embeddedKind=="chapters" || ext==L".ffmetadata")chapters=chaptersFromProbe(probe);
+            else {chapters=Json::parse(readFile(wide(original.path),4*1024*1024));if(chapters.is_object())chapters=chapters.value("chapters",Json::array());}
+            (void)chaptersToFfmetadata(chapters);
+        } catch(...) {chapters=Json();}
+        post([this,original,probe=std::move(probe),report=std::move(report),chapters=std::move(chapters),metadataSource=std::move(metadataSource)] {
             auto it=std::find_if(draft.begin(),draft.end(),[&](const auto &s){return s.uiId==original.uiId && s.metadataPending;});
             if(!constructorOpen || it==draft.end()) return;
             it->metadataPending=false;
+            it->mediaInfoFields=std::move(report);
+            if(original.role==6)return;
+            if(original.role==5 && original.embeddedKind!="metadata") {
+                if(metadataSource.is_object()) {
+                    it->metadataEdit=true;it->metadataEditTitle=str(metadataSource,"title");it->metadataEditArtist=str(metadataSource,"artist");it->metadataEditDescription=str(metadataSource,"description");
+                    for(auto tag=metadataSource.begin();tag!=metadataSource.end();++tag)
+                        if(metadataKeyAllowed(tag.key()) && tag->is_string())it->extraTags[tag.key()]=tag->get<std::string>();
+                    it->originalExtraTags=it->extraTags;
+                }
+                return;
+            }
+            if(original.role==4) {
+                if(!chapters.is_array()) {notify("Не удалось прочитать главы для редактирования");return;}
+                it->chapterEdits.clear();
+                for(const auto &chapter:chapters)it->chapterEdits.push_back({std::to_string(number(chapter,"start_time",0)),std::to_string(number(chapter,"end_time",0)),str(chapter,"title","Глава"),chapter.value("tags",Json::object())});
+                it->chaptersReady=true;return;
+            }
             if(!probe.is_object()) { notify("Не удалось прочитать метаданные источника"); return; }
-            auto type=original.role==0?"video":original.role==1?"audio":"subtitle";
+            auto type=original.role==0 || original.role==3?"video":original.role==1?"audio":original.role==2?"subtitle":"";
+            int ordinal=0;
             auto streams=probe.value("streams",Json::array());
             for(const auto &stream:streams) {
                 if(str(stream,"codec_type")!=type) continue;
-                if(original.stream>=0 && number(stream,"index")!=original.stream) continue;
-                if(original.role==0 && number(stream.value("disposition",Json::object()),"attached_pic")==1) continue;
+                auto codec=str(stream,"codec_name");auto streamTags=stream.value("tags",Json::object());auto filename=str(streamTags,"filename");
+                std::transform(filename.begin(),filename.end(),filename.begin(),[](unsigned char ch){return char(std::tolower(ch));});
+                bool isCover=number(stream.value("disposition",Json::object()),"attached_pic")!=0 || ((codec=="png" || codec=="mjpeg") && (filename=="cover.png" || filename=="cover.jpg" || filename=="cover.jpeg"));
+                if(original.role==0 && isCover)continue;
+                if(original.role==3 && original.embeddedKind=="cover" && !isCover)continue;
+                if(original.stream>=0 && number(stream,"index")!=original.stream) { ++ordinal; continue; }
+                it->mediaInfoOrdinal=ordinal;
                 it->metadataStream=int(number(stream,"index",-1));
                 it->probedCodec=str(stream,"codec_name");
                 if(original.role==0)it->media.vcodec=it->probedCodec;
                 else if(original.role==1)it->media.acodec=it->probedCodec;
+                if(original.role==3)break;
                 auto tags=stream.value("tags",Json::object());
+                it->originalStreamTags=tags;it->originalStreamInfo=stream;
+                if(original.role<3 && it->extraTags.empty() && tags.is_object()) {
+                    for(auto tag=tags.begin();tag!=tags.end();++tag) {
+                        auto key=tag.key(); std::string lower=key;
+                        std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char c){return char(std::tolower(c));});
+                        if(!metadataKeyAllowed(key) || !tag->is_string() || lower=="title" || lower=="language" || lower=="description" || lower=="comment" || lower=="artist" || lower=="summary" || lower=="synopsis" || lower=="handler_name" || lower=="date" || lower=="date_released" || lower=="encoder" || lower=="duration" || lower=="number_of_frames" || lower=="number_of_bytes" || lower.rfind("_statistics_",0)==0)continue;
+                        it->extraTags[key]=tag->get<std::string>();
+                    }
+                    if(original.role==1)for(const char *key:{"composer","performer","genre"}) {
+                        auto found=std::find_if(it->extraTags.begin(),it->extraTags.end(),[&](const auto &item){return _stricmp(item.first.c_str(),key)==0;});
+                        if(found==it->extraTags.end())it->extraTags[key]="";
+                    }
+                    it->originalExtraTags=it->extraTags;
+                }
                 auto fill=[&](std::string AssemblySource::*member,std::initializer_list<const char *> keys) {
                     auto value=metadataTag(tags,keys);
                     if(!value.empty() && ((*it).*member)==(original.*member)) (*it).*member=std::move(value);
@@ -162,9 +276,30 @@ void App::readDroppedMetadata(const AssemblySource &original) {
                     fill(&AssemblySource::handlerName,{"handler_name"});
                 fill(&AssemblySource::artist,{"artist"});
                 fill(&AssemblySource::date,{"date_released","date"});
+                auto baseline=[&](std::string AssemblySource::*member,std::initializer_list<const char *> keys) {
+                    auto value=metadataTag(tags,keys);return value.empty()?original.*member:value;
+                };
+                it->originalKnownTags={{"title",baseline(&AssemblySource::name,{"title","name"})},
+                    {"language",baseline(&AssemblySource::language,{"language"})},
+                    {"description",baseline(&AssemblySource::description,{"description","comment"})},
+                    {"artist",baseline(&AssemblySource::artist,{"artist"})},
+                    {"summary",baseline(&AssemblySource::summary,{"summary"})},
+                    {"synopsis",baseline(&AssemblySource::synopsis,{"synopsis"})},
+                    {"handler_name",original.handlerName.empty() && muxOptions.container!=1 && muxOptions.container!=2?std::string():baseline(&AssemblySource::handlerName,{"handler_name"})},
+                    {"date",baseline(&AssemblySource::date,{"date_released","date"})}};
                 break;
             }
             auto tags=probe.value("format",Json::object()).value("tags",Json::object());
+            if(!globalTagsLoaded && tags.is_object()) {
+                for(auto tag=tags.begin();tag!=tags.end();++tag) {
+                    std::string lower=tag.key();std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char c){return char(std::tolower(c));});
+                    if(!metadataKeyAllowed(tag.key()) || !tag->is_string() || lower=="title" || lower=="name" || lower=="artist" || lower=="description" || lower=="synopsis" || lower=="comment" || lower=="encoder" || lower=="major_brand" || lower=="minor_version" || lower=="compatible_brands")continue;
+                    auto found=std::find_if(globalTags.begin(),globalTags.end(),[&](const auto &item){return _stricmp(item.first.c_str(),tag.key().c_str())==0;});
+                    if(found==globalTags.end())globalTags[tag.key()]=tag->get<std::string>();
+                    else if(found->second.empty())found->second=tag->get<std::string>();
+                }
+                originalGlobalTags=globalTags;globalTagsLoaded=true;
+            }
             if(assemblyMetadataTitle.empty()) assemblyMetadataTitle=metadataTag(tags,{"title","name"});
             if(assemblyArtist.empty()) assemblyArtist=metadataTag(tags,{"artist"});
             if(assemblyDescription.empty()) assemblyDescription=metadataTag(tags,{"description","synopsis","comment"});
@@ -172,6 +307,7 @@ void App::readDroppedMetadata(const AssemblySource &original) {
     });
 }
 void App::enqueueAssembly() {
+    if(constructorPending>0)throw std::runtime_error("Дождитесь чтения всех импортированных файлов");
     if(std::any_of(draft.begin(),draft.end(),[](const auto &s){return s.metadataPending;}))
         throw std::runtime_error("Дождитесь чтения метаданных дорожек");
     if(singleExportMode) {
@@ -237,7 +373,7 @@ void App::enqueueAssembly() {
     if(!fs::path(wide(destination)).is_absolute())throw std::runtime_error("Выберите полную папку сохранения");
     if(assemblyName.empty())throw std::runtime_error("Укажите имя контейнера");
     (void)muxContainer(muxOptions);
-    int primary[3]{}; bool playable=false; int cover=0,chapters=0,metadata=0;
+    int primary[3]{},manualPrimary[3]{}; bool playable=false; int cover=0,chapters=0,metadata=0;
     for(const auto &s:draft) {
         if(muxOptions.container>=4) {
             if(s.role==0 || s.role==2)throw std::runtime_error("MP3, M4A и FLAC поддерживают одну аудиодорожку без видео и субтитров. Выберите другой формат или удалите лишние источники.");
@@ -254,8 +390,12 @@ void App::enqueueAssembly() {
             auto conflict=assemblyCopiedCodecConflict(muxOptions.container,s.role,s.role==0?s.media.vcodec:s.media.acodec);
             if(!conflict.empty())throw std::runtime_error(conflict);
         }
+        if(s.role==6 && (s.embeddedKind=="programs" || s.embeddedKind=="stream_groups"))throw std::runtime_error("Программы или группы потоков этого файла пока нельзя безопасно перенести. Исходник сохранён.");
+        if(s.role==6 && s.embeddedKind!="attachment" && s.embeddedKind!="data")throw std::runtime_error("Неизвестный тип потока нельзя безопасно перенести; исходник сохранён.");
+        if(s.role==6 && muxOptions.container!=0)throw std::runtime_error("Для сохранения вложений и дополнительных потоков выберите MKV; исходник останется без изменений.");
+        if(s.role==3 && s.embeddedKind=="cover" && s.probedCodec!="png" && s.probedCodec!="mjpeg")throw std::runtime_error("Формат встроенной обложки нельзя сохранить без преобразования. Исходник сохранён.");
         if(s.role==3 && (s.coverFormat<0||s.coverFormat>1))throw std::runtime_error("Выберите формат обложки PNG или JPG");
-        if(s.role<0||s.role>5||s.codec<0||s.codec>(s.role==0?10:4)||s.quality<0||s.quality>2)throw std::runtime_error("Некорректные параметры дорожки");
+        if(s.role<0||s.role>6||s.codec<0||s.codec>(s.role==0?10:4)||s.quality<0||s.quality>2)throw std::runtime_error("Некорректные параметры дорожки");
         auto numeric=[](const std::string &v,int limit){if(v.empty())return true;if(v.size()>7||!std::all_of(v.begin(),v.end(),[](unsigned char c){return std::isdigit(c);}))return false;try{int n=std::stoi(v);return n>0&&n<=limit;}catch(...){return false;}};
         if(!numeric(s.bitrate,1000000)||!numeric(s.maxrate,1000000)||!numeric(s.bufsize,2000000)||!numeric(s.sampleRate,384000)||!numeric(s.frameRate,240)||!numeric(s.width,16384))throw std::runtime_error("Проверьте числовые параметры перекодирования: укажите положительные значения без единиц измерения");
         if(s.role==0&&(s.maxrate.empty()!=s.bufsize.empty()))throw std::runtime_error("Укажите максимальный битрейт и размер буфера вместе");
@@ -278,11 +418,13 @@ void App::enqueueAssembly() {
         }
         bool unavailable=s.codec>0&&((s.role==0&&!videoEncoders[s.codec])||(s.role==1&&!audioEncoders[s.codec])||(s.role==2&&!subtitleEncoders[s.codec]));
         if(unavailable)throw std::runtime_error(videoEncodersReady?"Выбранный кодировщик недоступен. Выберите другой кодек.":"Проверка кодировщиков ещё выполняется. Дождитесь её завершения.");
+        if(s.role==4 && s.chaptersReady)(void)editedChapters(s);
         if(s.media.drm)throw std::runtime_error("Защищённые потоки нельзя скачать");
-        if(s.primary&&s.role<3&&++primary[s.role]>1)throw std::runtime_error("В каждой категории выберите одну дорожку по умолчанию");
+        if(s.primary&&s.role<3){++primary[s.role];if(s.embeddedKind!="stream")++manualPrimary[s.role];}
         playable|=s.role<2; cover+=s.role==3;chapters+=s.role==4;metadata+=s.role==5;
         if(!s.path.empty()&&!fs::is_regular_file(wide(s.path)))throw std::runtime_error("Локальный файл недоступен");
     }
+    for(int role=0;role<3;++role)if(manualPrimary[role]>0 && primary[role]>1)throw std::runtime_error("В каждой категории выберите одну дорожку по умолчанию");
     if(!playable)throw std::runtime_error("Добавьте видео или аудио");
     if(muxOptions.container>=4 && std::count_if(draft.begin(),draft.end(),[](const auto &s){return s.role==1;})!=1)throw std::runtime_error("Для MP3, M4A и FLAC выберите ровно одну аудиодорожку.");
     if(cover>1||chapters>1||metadata>1)throw std::runtime_error("Выберите одну обложку, один источник глав и один источник метаданных");
@@ -290,7 +432,7 @@ void App::enqueueAssembly() {
     auto parent=std::make_shared<Job>();parent->assembly=true;parent->mux=true;parent->muxOptions=muxOptions;
     parent->id=std::to_string(GetTickCount64())+"-"+std::to_string(++jobSerial);
     parent->title=assemblyName;parent->item.title=assemblyName;parent->item.category="Требуют проверки";
-    parent->assemblyMetadataTitle=assemblyMetadataTitle;parent->assemblyArtist=assemblyArtist;parent->assemblyDescription=assemblyDescription;
+    parent->assemblyMetadataTitle=assemblyMetadataTitle;parent->assemblyArtist=assemblyArtist;parent->assemblyDescription=assemblyDescription;parent->globalTags=globalTags;parent->originalGlobalTags=originalGlobalTags;
     parent->folder=utf8((fs::path(wide(destination))/wide(parent->id+"-container")).wstring());
     parent->outputDirectory=destination;parent->waitingSources=true;parent->state="Ожидание источников";
     std::vector<std::shared_ptr<Job>> children;

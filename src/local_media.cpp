@@ -57,25 +57,35 @@ void App::addLocalFiles(const std::vector<std::string> &paths) {
                 Media item;item.key="local:"+value;item.id=item.key;item.title=utf8(path.filename().wstring());item.ext=utf8(ext.empty()?L"":ext.substr(1));
                 if(ext==L".jpg"||ext==L".jpeg"||ext==L".png"||ext==L".webp"||ext==L".avif"||ext==L".bmp"||ext==L".gif")item.category="Изображения";
                 else if(ext==L".ffmetadata"){item.category="Данные";item.id="chapters";}
-                else if(ext==L".json"){item.category="Данные";auto json=Json::parse(readFile(path,4*1024*1024),nullptr,false);item.id=json.is_array()?"chapters":"metadata";}
+                else if(ext==L".txt"){item.category="Данные";item.id="metadata";}
+                else if(ext==L".json"){item.category="Данные";auto json=Json::parse(readFile(path,4*1024*1024),nullptr,false);item.id=(json.is_array() || (json.is_object() && json.contains("chapters") && json["chapters"].is_array()))?"chapters":"metadata";}
                 else {
                     std::atomic_bool cancelled{false},finished{false};
                     std::thread watchdog([&]{for(int n=0;n<150&&!finished&&!stopping;++n)Sleep(100);if(!finished)cancelled=true;});
                     ProcessResult result{};
-                    try {std::shared_lock lock(toolsMutex);result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_entries",L"stream=codec_name,codec_type,width,height,avg_frame_rate:stream_tags=language:stream_disposition=attached_pic:format=duration,bit_rate",L"-of",L"json",path.wstring()},nullptr,cancelled,true);}
+                    try {std::shared_lock lock(toolsMutex);result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-show_chapters",L"-show_format",L"-of",L"json",path.wstring()},nullptr,cancelled,true);}
                     catch(...){finished=true;watchdog.join();throw;}
                     finished=true;watchdog.join();if(stopping)break;
                     auto data=Json::parse(result.output,nullptr,false);
                     if(result.code||!data.is_object()||!data.contains("streams")||!data["streams"].is_array()){++rejected;continue;}
-                    bool video=false,audio=false,sub=false;
+                    bool video=false,audio=false,sub=false,extra=false;
                     for(const auto &stream:data["streams"]){auto type=str(stream,"codec_type");
                         if(type=="video"&&number(stream.value("disposition",Json::object()),"attached_pic")!=1){video=true;item.vcodec=str(stream,"codec_name");}
+                        else if(type=="video")extra=true;
                         if(type=="audio"){audio=true;item.acodec=str(stream,"codec_name");}
                         if(type=="subtitle")sub=true;
+                        if(type!="video" && type!="audio" && type!="subtitle")extra=true;
                     }
-                    if(!video&&!audio&&!sub){++rejected;continue;}
+                    if(!video&&!audio&&!sub&&!extra){++rejected;continue;}
                     auto format=data.value("format",Json::object());
                     item.data=Json{{"duration",muxDuration(format)}};
+                    for(const auto &stream:data["streams"]) {
+                        auto codec=str(stream,"codec_name");auto tags=stream.value("tags",Json::object());auto filename=str(tags,"filename");
+                        std::transform(filename.begin(),filename.end(),filename.begin(),[](unsigned char c){return char(std::tolower(c));});
+                        if(number(stream.value("disposition",Json::object()),"attached_pic") || ((codec=="png" || codec=="mjpeg") && (filename=="cover.png" || filename=="cover.jpg" || filename=="cover.jpeg"))) {
+                            item.thumbnail="assembly-cover:"+item.key+"|"+value;break;
+                        }
+                    }
                     try { item.rate=std::stod(str(format,"bit_rate"))/1000; } catch(...) {}
                     for(const auto &stream:data["streams"]){
                         auto tags=stream.value("tags",Json::object());
@@ -91,7 +101,9 @@ void App::addLocalFiles(const std::vector<std::string> &paths) {
                             if(denominator>0)item.fps=std::stod(rate.substr(0,slash))/denominator;
                         }catch(...) {}
                     }
-                    item.category=video?"Видео":audio?"Аудио":"Субтитры";item.videoOnly=video&&!audio;if(video&&!audio)item.acodec="none";
+                    auto formatName=str(format,"format_name");
+                    bool stillImage=video && !audio && !sub && data["streams"].size()==1 && (formatName.find("image2")!=std::string::npos || formatName.find("_pipe")!=std::string::npos || formatName=="gif" || formatName=="apng");
+                    item.category=stillImage?"Изображения":video?"Видео":audio?"Аудио":sub?"Субтитры":"Контейнер";item.videoOnly=video&&!audio;if(video&&!audio)item.acodec="none";
                 }
                 std::error_code ec;auto size=fs::file_size(path,ec);if(!ec)item.size=double(size);
                 post([this,item,value]{

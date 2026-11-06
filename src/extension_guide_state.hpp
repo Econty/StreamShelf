@@ -1,8 +1,22 @@
 #pragma once
 #include <cstdint>
+#include <string>
 namespace ss {
 inline bool verifiedExtensionPage(int navigationPhase, bool internalUrl, bool pageControls) {
     return navigationPhase == 5 && internalUrl && pageControls;
+}
+// A selected tab is only a candidate until its URL and page controls are checked.
+inline bool extensionsTabTitle(const std::wstring &name, bool firefox = false) {
+    if (firefox && (name == L"управление дополнениями" || name.rfind(L"управление дополнениями — ", 0) == 0 || name.rfind(L"управление дополнениями - ", 0) == 0 || name == L"add-ons manager" || name.rfind(L"add-ons manager - ", 0) == 0 || name == L"addons manager")) return true;
+    for (const auto *title : {L"расширения", L"extensions"}) {
+        std::wstring prefix(title);
+        if (name == prefix || name.rfind(prefix + L" - ", 0) == 0 ||
+            name.rfind(prefix + L" — ", 0) == 0 || name.rfind(prefix + L" – ", 0) == 0) return true;
+    }
+    return false;
+}
+inline bool connectorSetupReady(bool currentRevision, bool hasSiteAccess) {
+    return currentRevision && hasSiteAccess;
 }
 // A browser's internal page may itself contain a toolbar and a button named
 // "Extensions". Accept only small controls in the upper-right browser chrome;
@@ -62,6 +76,9 @@ struct GuideObservation {
     bool confirmationDialog = false;
     bool installedAbsent = false;
 };
+inline bool guideConnectionRetryDue(GuideStage stage, uint64_t now, uint64_t lastRetry) {
+    return stage == GuideStage::Connect && now - lastRetry >= 2000;
+}
 // Only observed browser state advances the flow; closing a picker is not installation success.
 struct GuideFlow {
     GuideStage stage = GuideStage::Developer;

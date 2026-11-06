@@ -4,8 +4,8 @@
 #include <fstream>
 #include <limits>
 namespace ss {
-// FFmpeg's MOV muxer does not write its attached picture into MOV metadata.
-// Append a separate iTunes metadata atom to the final moov without moving media data.
+// FFmpeg can omit cover art from MOV and MP4 with use_metadata_tags.
+// Append an iTunes cover atom to the final moov without moving media data.
 static void writeMovCover(const fs::path &path, const fs::path &cover, bool png) {
     auto image=readFile(cover,16*1024*1024);
     if(image.empty())throw std::runtime_error("Файл обложки пуст.");
@@ -102,7 +102,7 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
                 auto tags=stream.value("tags",Json::object());
                 auto filename=str(tags,"filename");
                 std::transform(filename.begin(),filename.end(),filename.begin(),[](unsigned char c){return char(std::tolower(c));});
-                if(filename=="cover.jpg" || filename=="cover.png")return true;
+                if(number(stream.value("disposition",Json::object()),"attached_pic")!=0 || filename=="cover.jpg" || filename=="cover.jpeg" || filename=="cover.png")return true;
             } else if(number(stream.value("disposition",Json::object()),"attached_pic")!=0) return true;
         }
         return false;
@@ -124,12 +124,19 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         std::wstring extension=input.extension().wstring();
         if(format && source.role==0)extension=format==1?L".mkv":format==2?L".mp4":L".webm";
         if(format && source.role==1)extension=format==1?L".mp3":format==2?L".m4a":L".flac";
-        if(format && source.role==5)extension=L".txt";
+        if(source.role==5 && source.embeddedKind=="metadata")extension=format?L".txt":L".json";
+        else if(format && source.role==5)extension=L".txt";
         else if(source.role==5 && source.metadataEdit)extension=L".json";
         if(format && source.role==3)extension=format==1?L".png":format==2?L".jpg":L".webp";
+        else if(source.role==3 && source.embeddedKind=="cover") {
+            if(source.probedCodec=="png")extension=L".png";
+            else if(source.probedCodec=="mjpeg")extension=L".jpg";
+            else throw std::runtime_error("Неизвестный формат встроенной обложки. Исходник сохранён.");
+        }
         if(format && source.role==2)extension=(format==1||format==4)?L".srt":format==2?L".vtt":L".ass";
         else if(source.role==2)extension=subtitleExtension;
         if(format && source.role==4)extension=format==1?L".json":L".ffmetadata";
+        else if(source.role==4 && source.embeddedKind=="chapters")extension=L".ffmetadata";
         if(extension.empty() || extension.size()>16 || !std::all_of(extension.begin()+1,extension.end(),[](wchar_t c){return (c>=L'a'&&c<=L'z')||(c>=L'A'&&c<=L'Z')||(c>=L'0'&&c<=L'9');}))
             throw std::runtime_error("Не удалось определить формат исходного файла. Исходник сохранён.");
         auto output=folder/(L"result"+extension);
@@ -225,6 +232,16 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
                 if(streams.size()!=1 || str(streams[0],"codec_type")!="subtitle" || str(streams[0],"codec_name")!=subtitleCodec)
                     throw std::runtime_error("Не удалось проверить исходный кодек выбранной дорожки субтитров. Исходник сохранён.");
             } else if(std::none_of(streams.begin(),streams.end(),[&](const Json &v){return str(v,"codec_type")==type;}))throw std::runtime_error("Не удалось проверить сохранённую дорожку. Исходник сохранён.");
+        } else if(source.role==3 && source.embeddedKind=="cover" && format==0) {
+            auto result=runFfmpegWithProgress(j,{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-n",L"-i",input.wstring(),L"-map",L"0:"+std::to_wstring(source.stream),L"-frames:v",L"1",L"-c:v",L"copy",L"-update",L"1",output.wstring()},0);
+            if(result.code || !fs::is_regular_file(output))throw std::runtime_error("Не удалось извлечь обложку. Исходник сохранён.");
+        } else if(source.role==5 && source.embeddedKind=="metadata") {
+            writeFile(output,probeFile(input).value("format",Json::object()).value("tags",Json::object()).dump(2));
+        } else if(source.role==4 && source.embeddedKind=="chapters") {
+            auto data=source.chaptersReady?editedChapters(source):chaptersFromProbe(probeFile(input));
+            writeFile(output,format==1?data.dump(2):chaptersToFfmetadata(data));
+        } else if(source.role==6) {
+            throw std::runtime_error("Отдельное извлечение этого вложения пока недоступно; используйте сборку MKV. Исходник сохранён.");
         } else if(source.role==5 && (format!=0 || source.metadataEdit)) {
             auto content=readFile(input,4*1024*1024);
             if(source.metadataEdit)content=editedMetadataJson(content,source);
@@ -255,9 +272,9 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
                 auto imageProbe=probeFile(input);auto info=imageProbe.value("format",Json::object());
                 auto name=str(info,"format_name"),brand=str(info.value("tags",Json::object()),"major_brand");
                 auto streams=imageProbe.value("streams",Json::array());
-                if((name.find("image2")==std::string::npos && name.find("_pipe")==std::string::npos && name!="gif" && brand!="avif" && brand!="avis") || streams.size()!=1 || str(streams[0],"codec_type")!="video")
+                if(source.embeddedKind!="cover" && ((name.find("image2")==std::string::npos && name.find("_pipe")==std::string::npos && name!="gif" && brand!="avif" && brand!="avis") || streams.size()!=1 || str(streams[0],"codec_type")!="video"))
                     throw std::runtime_error("Выберите изображение для преобразования. Исходник сохранён.");
-                command.insert(command.end(),{L"-map",L"0:v:0",L"-frames:v",L"1"});
+                command.insert(command.end(),{L"-map",source.embeddedKind=="cover"?L"0:"+std::to_wstring(source.stream):L"0:v:0",L"-frames:v",L"1"});
                 if(format==1)command.insert(command.end(),{L"-c:v",L"png",L"-compression_level",quality==0?L"9":quality==1?L"6":L"2"});
                 if(format==2)command.insert(command.end(),{L"-c:v",L"mjpeg",L"-q:v",quality==0?L"2":quality==1?L"4":L"8"});
                 if(format==3)command.insert(command.end(),{L"-c:v",L"libwebp",L"-quality",quality==0?L"95":quality==1?L"80":L"60"});
@@ -299,25 +316,56 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         return;
     }
     struct Mapped {size_t source;int input,stream,type;};
+    struct ExtraMapped {int input,stream;std::string type,name,codec,mime;};
+    std::vector<ExtraMapped> extraMapped;
     std::vector<Mapped> mapped;std::vector<std::wstring> args{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-n"};
     double totalDuration=0;
-    int input=0,chapterInput=-1,expectedChapters=0;Json expectedChapterList=Json::array(), chapterProbe;std::string metadataTitle=j->assemblyMetadataTitle.empty()?j->title:j->assemblyMetadataTitle,artist=j->assemblyArtist,description=j->assemblyDescription;
-    fs::path cover,chapters;const AssemblySource *coverSource=nullptr;
+    int input=0,chapterInput=-1,globalMetadataInput=-1,expectedChapters=0;Json expectedChapterList=Json::array(), chapterProbe,originalGlobalMetadata=Json::object();std::string metadataTitle=j->assemblyMetadataTitle.empty()?j->title:j->assemblyMetadataTitle,artist=j->assemblyArtist,description=j->assemblyDescription;
+    fs::path cover,chapters;const AssemblySource *coverSource=nullptr,*chapterSource=nullptr;
+    auto effectiveGlobalTags=j->globalTags;
     for(size_t n=0;n<j->sources.size();++n) {
         const auto &s=j->sources[n];if(!s.enabled)continue;
         if(j->cancel||stopping)throw std::runtime_error("Отменено");
         fs::path path=wide(s.path);if(!fs::is_regular_file(path))throw std::runtime_error("Исходный файл отсутствует. Сборка остановлена; остальные файлы сохранены.");
         if(s.role==3){cover=path;coverSource=&s;continue;}
-        if(s.role==4){chapters=path;continue;}
+        if(s.role==4){chapters=path;chapterSource=&s;continue;}
         if(s.role==5){
+            if(s.embeddedKind=="metadata") {
+                if(globalMetadataInput>=0)throw std::runtime_error("Выберите один источник общих метаданных.");
+                auto probe=probeFile(path);originalGlobalMetadata=probe.value("format",Json::object()).value("tags",Json::object());
+                globalMetadataInput=input++;args.insert(args.end(),{L"-i",path.wstring()});continue;
+            }
             auto content=readFile(path,4*1024*1024);
             auto extension=path.extension().wstring();std::transform(extension.begin(),extension.end(),extension.begin(),::towlower);
             if(extension==L".txt"){if(description.empty())description=content;continue;}
             auto data=Json::parse(content,nullptr,false);
             if(!data.is_object())throw std::runtime_error("Источник метаданных должен содержать JSON-объект");
+            if(s.metadataEdit) {
+                data["title"]=s.metadataEditTitle;data["artist"]=s.metadataEditArtist;data["description"]=s.metadataEditDescription;
+                for(const auto &[key,value]:s.extraTags)data[key]=value;
+            }
+            if(j->assemblyMetadataTitle.empty())metadataTitle=str(data,"title",metadataTitle);
             if(artist.empty())artist=str(data,"artist",str(data,"uploader"));
             if(description.empty())description=str(data,"description");
+            for(auto tag=data.begin();tag!=data.end();++tag)if(metadataKeyAllowed(tag.key()) && tag->is_string()) {
+                auto existing=std::find_if(effectiveGlobalTags.begin(),effectiveGlobalTags.end(),[&](const auto &item){return _stricmp(item.first.c_str(),tag.key().c_str())==0;});
+                if(existing==effectiveGlobalTags.end())effectiveGlobalTags[tag.key()]=tag->get<std::string>();
+                else if(existing->second.empty() && !metadataTagChanged(j->originalGlobalTags,existing->first,existing->second))existing->second=tag->get<std::string>();
+            }
             continue;
+        }
+        if(s.role==6) {
+            if(j->muxOptions.container!=0)throw std::runtime_error("Для вложений и дополнительных потоков выберите MKV. Исходники сохранены.");
+            auto probe=probeFile(path);bool found=false;
+            for(const auto &stream:probe.value("streams",Json::array())) {
+                auto type=str(stream,"codec_type");int index=int(number(stream,"index",-1));
+                if(index==s.stream && (type=="attachment" || type=="data")) {
+                    auto tags=stream.value("tags",Json::object());
+                    extraMapped.push_back({input,index,type,str(tags,"filename"),str(stream,"codec_name"),str(tags,"mimetype")});found=true;break;
+                }
+            }
+            if(!found)throw std::runtime_error("Вложение не найдено в исходном файле.");
+            args.insert(args.end(),{L"-i",path.wstring()});++input;continue;
         }
         auto probe=probeFile(path);int count=0;
         for(const auto &stream:probe.value("streams",Json::array())) {
@@ -359,7 +407,8 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
     if(!chapters.empty()) {
         auto chapterExt=chapters.extension().wstring();std::transform(chapterExt.begin(),chapterExt.end(),chapterExt.begin(),::towlower);
         Json data;
-        if(chapterExt==L".ffmetadata")data=chaptersFromProbe(probeFile(chapters));
+        if(chapterSource && chapterSource->chaptersReady)data=editedChapters(*chapterSource);
+        else if((chapterSource && chapterSource->embeddedKind=="chapters") || chapterExt==L".ffmetadata")data=chaptersFromProbe(probeFile(chapters));
         else {data=Json::parse(readFile(chapters,4*1024*1024));if(data.is_object())data=data.value("chapters",Json::array());}
         writeFile(chapterFile,chaptersToFfmetadata(data));expectedChapterList=data;expectedChapters=int(data.size());chapterInput=input;
         args.insert(args.end(),{L"-f",L"ffmetadata",L"-i",chapterFile.wstring()});++input;
@@ -380,13 +429,16 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         auto format=str(imageProbe.value("format",Json::object()),"format_name");
         auto streams=imageProbe.value("streams",Json::array());
         auto brand=str(imageProbe.value("format",Json::object()).value("tags",Json::object()),"major_brand");
-        if(format.find("image2")==std::string::npos && format.find("_pipe")==std::string::npos && format!="gif" && brand!="avif" && brand!="avis")
+        if(coverSource->embeddedKind!="cover" && format.find("image2")==std::string::npos && format.find("_pipe")==std::string::npos && format!="gif" && brand!="avif" && brand!="avis")
             throw std::runtime_error("Для обложки выберите файл изображения. Исходники сохранены.");
-        if(streams.size()!=1 || str(streams[0],"codec_type")!="video")
+        if(coverSource->embeddedKind!="cover" && (streams.size()!=1 || str(streams[0],"codec_type")!="video"))
             throw std::runtime_error("Для обложки выберите файл изображения. Исходники сохранены.");
         bool png=coverSource->coverFormat==0;
+        std::string originalCodec;
+        for(const auto &stream:streams)if(coverSource->embeddedKind!="cover" || int(number(stream,"index",-1))==coverSource->stream){originalCodec=str(stream,"codec_name");break;}
+        bool canCopy=(png && originalCodec=="png") || (!png && originalCodec=="mjpeg");
         convertedCover=folder/(L"cover-"+suffix+(png?L".png":L".jpg"));
-        auto converted=runProcess(tool(L"ffmpeg.exe"),{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-n",L"-i",cover.wstring(),L"-map",L"0:v:0",L"-frames:v",L"1",L"-c:v",png?L"png":L"mjpeg",L"-update",L"1",convertedCover.wstring()},nullptr,j->cancel,true);
+        auto converted=runProcess(tool(L"ffmpeg.exe"),{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-n",L"-i",cover.wstring(),L"-map",coverSource->embeddedKind=="cover"?L"0:"+std::to_wstring(coverSource->stream):L"0:v:0",L"-frames:v",L"1",L"-c:v",canCopy?L"copy":png?L"png":L"mjpeg",L"-update",L"1",convertedCover.wstring()},nullptr,j->cancel,true);
         if(j->cancel||stopping)throw std::runtime_error("Отменено");
         if(converted.code || !fs::is_regular_file(convertedCover))
             throw std::runtime_error("Не удалось преобразовать обложку. Исходники сохранены. "+redact(converted.error));
@@ -398,27 +450,61 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
     }
     for(const auto &m:mapped)args.insert(args.end(),{L"-map",std::to_wstring(m.input)+L":"+std::to_wstring(m.stream)});
     if(coverInput>=0)args.insert(args.end(),{L"-map",std::to_wstring(coverInput)+L":v:0"});
-    args.insert(args.end(),{L"-map_metadata",L"-1",L"-map_chapters",j->muxOptions.container==6?L"-1":std::to_wstring(chapterInput)});
-    int typeIndex[3]{},expected[3]{};bool hasPrimary[3]{},chosenPrimary[3]{};
+    for(const auto &extra:extraMapped)args.insert(args.end(),{L"-map",std::to_wstring(extra.input)+L":"+std::to_wstring(extra.stream)});
+    if(!extraMapped.empty())args.insert(args.end(),{L"-copy_unknown",L"-c:t",L"copy",L"-c:d",L"copy"});
+    args.insert(args.end(),{L"-map_metadata",std::to_wstring(globalMetadataInput),L"-map_chapters",j->muxOptions.container==6?L"-1":std::to_wstring(chapterInput)});
+    int attachmentIndex=0,dataIndex=0;
+    for(const auto &extra:extraMapped) {
+        auto spec=extra.type=="attachment"?L"t:"+std::to_wstring(attachmentIndex++):L"d:"+std::to_wstring(dataIndex++);
+        args.insert(args.end(),{L"-map_metadata:s:"+spec,std::to_wstring(extra.input)+L":s:"+std::to_wstring(extra.stream)});
+    }
+    static const std::set<std::string> preservedFlags={"dub","original","comment","lyrics","karaoke","hearing_impaired","visual_impaired","clean_effects","timed_thumbnails","non_diegetic","captions","descriptions","metadata","dependent","still_image","multilayer"};
+    int typeIndex[3]{},expected[3]{};bool hasPrimary[3]{},chosenPrimary[3]{},hasImported[3]{};
+    for(const auto &m:mapped)if(j->sources[m.source].embeddedKind=="stream" && m.type==j->sources[m.source].role)hasImported[m.type]=true;
     for(const auto &m:mapped)if(j->sources[m.source].primary&&m.type==j->sources[m.source].role)hasPrimary[m.type]=true;
     for(const auto &m:mapped) {
         const auto &s=j->sources[m.source];int index=typeIndex[m.type]++;++expected[m.type];
         std::wstring spec=std::wstring(m.type==0?L"v":m.type==1?L"a":L"s")+L":"+std::to_wstring(index);
-        bool primary=!chosenPrimary[m.type]&&(hasPrimary[m.type]?(s.primary&&s.role==m.type):true);
+        bool primary=hasPrimary[m.type]?(s.primary&&s.role==m.type):(!hasImported[m.type]&&!chosenPrimary[m.type]);
         if(primary)chosenPrimary[m.type]=true;
-        std::wstring disposition=primary?L"default":L"0";
-        if(m.type==2&&s.forced)disposition=primary?L"default+forced":L"forced";
+        std::wstring disposition=primary?L"default":L"";
+        if(s.forced && m.type==s.role)disposition+=(disposition.empty()?L"":L"+")+std::wstring(L"forced");
+        if(m.type==s.role && s.originalDisposition.is_object())for(auto it=s.originalDisposition.begin();it!=s.originalDisposition.end();++it)
+            if(preservedFlags.contains(it.key()) && number(s.originalDisposition,it.key().c_str())!=0)disposition+=(disposition.empty()?L"":L"+")+wide(it.key());
+        if(disposition.empty())disposition=L"0";
         args.insert(args.end(),{L"-disposition:"+spec,disposition});
         args.insert(args.end(), {L"-map_metadata:s:"+spec, std::to_wstring(m.input)+L":s:"+std::to_wstring(m.stream)});
         if(s.metadataStream<0 || m.stream==s.metadataStream) {
-            if(!s.language.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"language="+wide(normalizedLanguage(s.language))});
-            if(!s.name.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"title="+wide(s.name)});
-            if(!s.description.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"comment="+wide(s.description)});
-            if(!s.artist.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"artist="+wide(s.artist)});
-            if(!s.summary.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"SUMMARY="+wide(s.summary)});
-            if(!s.synopsis.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"SYNOPSIS="+wide(s.synopsis)});
-            if(!s.handlerName.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"handler_name="+wide(s.handlerName)});
-            if(!s.date.empty())args.insert(args.end(),{L"-metadata:s:"+spec,L"DATE_RELEASED="+wide(s.date)});
+            if(s.embeddedKind=="stream") {
+                auto edit=[&](const char *field,const std::string &value,std::initializer_list<const char *> keys,const char *fallback) {
+                    if(!metadataTagChanged(s.originalKnownTags,field,value))return;
+                    auto key=metadataFirstKey(s.originalStreamTags,keys,fallback);
+                    args.insert(args.end(),{L"-metadata:s:"+spec,wide(key+"="+value)});
+                };
+                edit("title",s.name,{"title","name"},"title");
+                if(metadataTagChanged(s.originalKnownTags,"language",s.language))
+                    args.insert(args.end(),{L"-metadata:s:"+spec,L"language="+(s.language.empty()?std::wstring():wide(normalizedLanguage(s.language)))});
+                if(supportsExtendedTrackTags(j->muxOptions.container)) {
+                    edit("description",s.description,{"description","comment"},"comment");
+                    edit("artist",s.artist,{"artist"},"artist");edit("summary",s.summary,{"summary"},"SUMMARY");
+                    edit("synopsis",s.synopsis,{"synopsis"},"SYNOPSIS");edit("date",s.date,{"date_released","date"},"DATE_RELEASED");
+                }
+                if(j->muxOptions.container==1 || j->muxOptions.container==2)edit("handler_name",s.handlerName,{"handler_name"},"handler_name");
+            } else {
+                args.insert(args.end(),{L"-metadata:s:"+spec,L"language="+(s.language.empty()?std::wstring():wide(normalizedLanguage(s.language)))});
+                args.insert(args.end(),{L"-metadata:s:"+spec,L"name=",L"-metadata:s:"+spec,L"title="+wide(s.name)});
+                if(supportsExtendedTrackTags(j->muxOptions.container)) {
+                    args.insert(args.end(),{L"-metadata:s:"+spec,L"description="+wide(s.description),L"-metadata:s:"+spec,L"comment="+wide(s.description)});
+                    args.insert(args.end(),{L"-metadata:s:"+spec,L"artist="+wide(s.artist),L"-metadata:s:"+spec,L"SUMMARY="+wide(s.summary)});
+                    args.insert(args.end(),{L"-metadata:s:"+spec,L"SYNOPSIS="+wide(s.synopsis),L"-metadata:s:"+spec,L"DATE_RELEASED="+wide(s.date),L"-metadata:s:"+spec,L"date="+wide(s.date)});
+                }
+                if(j->muxOptions.container==1 || j->muxOptions.container==2)
+                    args.insert(args.end(),{L"-metadata:s:"+spec,L"handler_name="+wide(s.handlerName)});
+            }
+            for(const auto &[key,value]:s.extraTags) {
+                if(!metadataKeyAllowed(key))throw std::runtime_error("Некорректное имя тега дорожки.");
+                if(metadataTagChanged(s.originalExtraTags,key,value))args.insert(args.end(),{L"-metadata:s:"+spec,wide(key+"="+value)});
+            }
         }
         int codec=m.type==s.role?s.codec:0;
         static const wchar_t *video[]={L"copy",L"libx264",L"libx265",L"libvpx-vp9",L"libaom-av1",L"h264_nvenc",L"hevc_nvenc",L"h264_qsv",L"hevc_qsv",L"h264_amf",L"hevc_amf"};
@@ -443,8 +529,21 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
     if(!cover.empty()) {
         if(j->muxOptions.container==0) {
             auto png=coverCodec=="png";
-            args.insert(args.end(),{L"-attach",cover.wstring(),L"-metadata:s:t:0",png?L"mimetype=image/png":L"mimetype=image/jpeg",L"-metadata:s:t:0",png?L"filename=cover.png":L"filename=cover.jpg"});
-            if(coverSource && !coverSource->name.empty())args.insert(args.end(),{L"-metadata:s:t:0",L"title="+wide(coverSource->name)});
+            auto spec=L"-metadata:s:t:"+std::to_wstring(attachmentIndex);
+            auto original=coverSource?coverSource->originalCoverTags:Json::object();
+            bool sameCodec=coverSource && coverSource->embeddedKind=="cover" && coverSource->probedCodec==coverCodec;
+            auto filename=sameCodec?str(original,"filename"):std::string();
+            auto mimetype=sameCodec?str(original,"mimetype"):std::string();
+            if(filename.empty())filename=png?"cover.png":"cover.jpg";
+            if(mimetype.empty())mimetype=png?"image/png":"image/jpeg";
+            args.insert(args.end(),{L"-attach",cover.wstring(),spec,wide("mimetype="+mimetype),spec,wide("filename="+filename)});
+            if(coverSource && !coverSource->name.empty())args.insert(args.end(),{spec,L"title="+wide(coverSource->name)});
+            if(sameCodec && original.is_object())for(auto tag=original.begin();tag!=original.end();++tag) {
+                std::string lower=tag.key();std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char ch){return char(std::tolower(ch));});
+                if(lower=="title" || lower=="filename" || lower=="mimetype")continue;
+                if(!tag->is_string() || tag.key().find('=')!=std::string::npos)throw std::runtime_error("Неподдерживаемый тег обложки. Исходники сохранены.");
+                args.insert(args.end(),{spec,wide(tag.key()+"="+tag->get<std::string>())});
+            }
         } else if(j->muxOptions.container==1 || j->muxOptions.container>=4) {
             auto spec=L"v:"+std::to_wstring(typeIndex[0]);
             args.insert(args.end(),{L"-c:"+spec,L"copy",L"-disposition:"+spec,L"attached_pic"});
@@ -452,17 +551,34 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
                 args.insert(args.end(),{L"-metadata:s:"+spec,L"title=Album cover",L"-metadata:s:"+spec,L"comment=Cover (front)"});
         }
     }
-    args.insert(args.end(),{L"-metadata",L"title="+wide(metadataTitle),L"-metadata",L"artist="+wide(artist),L"-metadata",(j->muxOptions.container==0?L"SYNOPSIS=":L"description=")+wide(description)});
+    std::string descriptionKey=j->muxOptions.container==0?"SYNOPSIS":"description";
+    if(originalGlobalMetadata.is_object())for(const char *key:{"description","synopsis","comment"}) {
+        bool found=false;for(auto it=originalGlobalMetadata.begin();it!=originalGlobalMetadata.end();++it)if(_stricmp(it.key().c_str(),key)==0){descriptionKey=it.key();found=true;break;}
+        if(found)break;
+    }
+    args.insert(args.end(),{L"-metadata",L"title="+wide(metadataTitle),L"-metadata",L"artist="+wide(artist),L"-metadata",wide(descriptionKey+"="+description)});
+    for(const auto &[key,value]:effectiveGlobalTags) {
+        if(!metadataKeyAllowed(key))throw std::runtime_error("Некорректное имя общего тега.");
+        if(!value.empty() || metadataTagChanged(j->originalGlobalTags,key,value))args.insert(args.end(),{L"-metadata",wide(key+"="+value)});
+    }
     if(j->muxOptions.container!=6 && expectedChapters>0) {
         for(size_t n=0;n<expectedChapterList.size();++n) {
-            auto title=str(expectedChapterList[n],"title","Глава");for(auto &ch:title)if(ch=='\r'||ch=='\n')ch=' ';
-            args.insert(args.end(),{L"-metadata:c:"+std::to_wstring(n),L"title="+wide(title)});
+            auto ordinal=std::to_wstring(n);
+            auto title=str(expectedChapterList[n],"title","Глава");
+            args.insert(args.end(),{L"-metadata:c:"+ordinal,L"title="+wide(title)});
+            auto tags=expectedChapterList[n].value("tags",Json::object());
+            if(tags.is_object())for(auto tag=tags.begin();tag!=tags.end();++tag) {
+                if(_stricmp(tag.key().c_str(),"title")==0)continue;
+                if(!tag->is_string() || tag.key().find('=')!=std::string::npos)throw std::runtime_error("Не удалось сохранить тег главы. Исходники сохранены.");
+                args.insert(args.end(),{L"-metadata:c:"+ordinal,wide(tag.key()+"="+tag->get<std::string>())});
+            }
         }
     }
     for(const auto &[key,value]:flacTags)args.insert(args.end(),{L"-metadata",wide(key+"="+value)});
 
     auto extension=wide(muxContainer(j->muxOptions));auto partial=folder/(L"result.part-"+suffix+L"."+extension),final=folder/(L"result."+extension);
-    if (j->muxOptions.container == 2 && !description.empty())
+    bool hasGlobalExtra=std::any_of(effectiveGlobalTags.begin(),effectiveGlobalTags.end(),[&](const auto &tag){return !tag.second.empty() || metadataTagChanged(j->originalGlobalTags,tag.first,tag.second);});
+    if ((j->muxOptions.container == 1 || j->muxOptions.container == 2) && (hasGlobalExtra || globalMetadataInput>=0 || (j->muxOptions.container == 2 && !description.empty())))
         args.insert(args.end(), {L"-movflags", L"use_metadata_tags"});
     args.push_back(partial.wstring());
     auto r=runFfmpegWithProgress(j,args,totalDuration);
@@ -470,22 +586,137 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
     if(r.code){auto detail=redact(r.error);if(detail.size()>600)detail=detail.substr(detail.size()-600);throw std::runtime_error("Не удалось собрать контейнер. Исходники сохранены отдельно. Проверьте совместимость кодеков и контейнера. "+detail);}
     j->workerOutput=utf8(partial.wstring());
     if(!cover.empty() && j->muxOptions.container==2)writeMovCover(partial,cover,coverCodec=="png");
+    else if(!cover.empty() && j->muxOptions.container==1 && !hasCover(probeFile(partial),1))writeMovCover(partial,cover,coverCodec=="png");
     auto output=probeFile(partial);int actual[3]{};
     for(const auto &s:output.value("streams",Json::array())){auto type=str(s,"codec_type");if(type=="video" && number(s.value("disposition",Json::object()),"attached_pic")==0)++actual[0];if(type=="audio")++actual[1];if(type=="subtitle")++actual[2];}
     for(int i=0;i<3;i++)if(actual[i]<expected[i])throw std::runtime_error("В итоговом файле отсутствуют выбранные дорожки. Исходники сохранены.");
+    auto globalOutputTags=output.value("format",Json::object()).value("tags",Json::object());
+    if((!metadataTitle.empty() && !metadataTagMatchesAny(globalOutputTags,{"title","name"},metadataTitle)) ||
+       (!artist.empty() && !metadataTagMatchesAny(globalOutputTags,{"artist","performer"},artist)) ||
+       (!description.empty() && !metadataTagMatchesAny(globalOutputTags,{"description","synopsis","comment"},description)))
+        throw std::runtime_error("Контейнер не сохранил название, автора или описание. Выберите другой формат. Исходники сохранены.");
+    if(originalGlobalMetadata.is_object())for(auto tag=originalGlobalMetadata.begin();tag!=originalGlobalMetadata.end();++tag) {
+        std::string lower=tag.key();std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char ch){return char(std::tolower(ch));});
+        if(!tag->is_string() || lower=="encoder" || lower=="major_brand" || lower=="minor_version" || lower=="compatible_brands" || lower=="title" || lower=="artist" || _stricmp(tag.key().c_str(),descriptionKey.c_str())==0)continue;
+        bool overridden=false;for(const auto &[key,value]:effectiveGlobalTags)if(_stricmp(key.c_str(),tag.key().c_str())==0){overridden=true;break;}
+        if(!overridden && !metadataTagMatches(globalOutputTags,tag.key(),tag->get<std::string>()))
+            throw std::runtime_error("Контейнер не сохранил исходный тег «"+tag.key()+"». Выберите другой формат. Исходники сохранены.");
+    }
+    for(const auto &[key,value]:effectiveGlobalTags) {
+        if((!value.empty() || metadataTagChanged(j->originalGlobalTags,key,value)) && !metadataTagMatches(output.value("format",Json::object()).value("tags",Json::object()),key,value))
+            throw std::runtime_error("Контейнер не сохранил общий тег «"+key+"». Выберите другой формат или удалите тег. Исходники сохранены.");
+    }
+    int checkedType[3]{};
+    for(const auto &m:mapped) {
+        int ordinal=checkedType[m.type]++;const auto &source=j->sources[m.source];
+        if(source.metadataStream>=0 && m.stream!=source.metadataStream)continue;
+        Json tags=Json::object(),outputStream=Json::object();int found=0;
+        for(const auto &stream:output.value("streams",Json::array())) {
+            auto type=str(stream,"codec_type");int role=type=="video"?0:type=="audio"?1:type=="subtitle"?2:-1;
+            if(role==0 && number(stream.value("disposition",Json::object()),"attached_pic")!=0)continue;
+            if(role==m.type && found++==ordinal){outputStream=stream;tags=stream.value("tags",Json::object());break;}
+        }
+        if(source.embeddedKind=="stream" && m.type==source.role) {
+            if(source.codec==0) {
+                auto mismatch=copiedStreamDifference(source.originalStreamInfo,outputStream);
+                if(!mismatch.empty())throw std::runtime_error("Контейнер изменил характеристику дорожки «"+mismatch+"». Исходники сохранены.");
+            }
+            auto actualDisposition=outputStream.value("disposition",Json::object());
+            if((number(actualDisposition,"default")!=0)!=source.primary || (number(actualDisposition,"forced")!=0)!=source.forced)
+                throw std::runtime_error("Контейнер изменил признаки дорожки по умолчанию или принудительной дорожки. Исходники сохранены.");
+            if(source.originalDisposition.is_object())for(auto flag=source.originalDisposition.begin();flag!=source.originalDisposition.end();++flag)
+                if(preservedFlags.contains(flag.key()) && number(source.originalDisposition,flag.key().c_str())!=0 && number(actualDisposition,flag.key().c_str())==0)
+                    throw std::runtime_error("Контейнер не сохранил признак дорожки «"+flag.key()+"». Исходники сохранены.");
+        }
+        auto checkKnown=[&](const char *key,const std::string &value,std::initializer_list<const char*> aliases) {
+            if(metadataTagChanged(source.originalKnownTags,key,value) && !metadataTagMatchesAny(tags,aliases,value))
+                throw std::runtime_error("Контейнер не сохранил изменённое поле дорожки «"+std::string(key)+"». Выберите другой формат. Исходники сохранены.");
+        };
+        checkKnown("title",source.name,{"title","name"});
+        if(metadataTagChanged(source.originalKnownTags,"language",source.language) &&
+           !metadataTagMatchesAny(tags,{"language"},source.language.empty()?std::string():normalizedLanguage(source.language)))
+            throw std::runtime_error("Контейнер не сохранил язык дорожки. Выберите другой формат. Исходники сохранены.");
+        if(supportsExtendedTrackTags(j->muxOptions.container)) {
+            if(metadataTagChanged(source.originalKnownTags,"description",source.description)) {
+                auto key=metadataFirstKey(source.originalStreamTags,{"description","comment"},"comment");
+                if(!metadataTagMatches(tags,key,source.description))throw std::runtime_error("Контейнер не сохранил описание дорожки. Исходники сохранены.");
+            }
+            checkKnown("artist",source.artist,{"artist"});checkKnown("summary",source.summary,{"summary"});
+            checkKnown("synopsis",source.synopsis,{"synopsis"});
+            if(metadataTagChanged(source.originalKnownTags,"date",source.date)) {
+                auto key=metadataFirstKey(source.originalStreamTags,{"date_released","date"},"DATE_RELEASED");
+                if(!metadataTagMatches(tags,key,source.date))throw std::runtime_error("Контейнер не сохранил дату дорожки. Исходники сохранены.");
+            }
+        }
+        if(j->muxOptions.container==1 || j->muxOptions.container==2)checkKnown("handler_name",source.handlerName,{"handler_name"});
+        if(source.embeddedKind=="stream" && source.originalStreamTags.is_object())for(auto tag=source.originalStreamTags.begin();tag!=source.originalStreamTags.end();++tag) {
+            if(!tag->is_string())continue;
+            std::string lower=tag.key();std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char ch){return char(std::tolower(ch));});
+            if(lower=="encoder" || lower=="duration" || lower=="number_of_frames" || lower=="number_of_bytes" || lower.rfind("_statistics_",0)==0)continue;
+            auto changedKey=[&](const char *field,const std::string &value,std::initializer_list<const char*> aliases,const char *fallback) {
+                return metadataTagChanged(source.originalKnownTags,field,value) && _stricmp(tag.key().c_str(),metadataFirstKey(source.originalStreamTags,aliases,fallback).c_str())==0;
+            };
+            if(changedKey("title",source.name,{"title","name"},"title") || changedKey("language",source.language,{"language"},"language") ||
+               changedKey("description",source.description,{"description","comment"},"comment") || changedKey("artist",source.artist,{"artist"},"artist") ||
+               changedKey("summary",source.summary,{"summary"},"SUMMARY") || changedKey("synopsis",source.synopsis,{"synopsis"},"SYNOPSIS") ||
+               changedKey("date",source.date,{"date_released","date"},"DATE_RELEASED") || changedKey("handler_name",source.handlerName,{"handler_name"},"handler_name"))continue;
+            bool extraChanged=false;for(const auto &[key,value]:source.extraTags)if(_stricmp(key.c_str(),tag.key().c_str())==0 && metadataTagChanged(source.originalExtraTags,key,value)){extraChanged=true;break;}
+            if(!extraChanged && !metadataTagMatches(tags,tag.key(),tag->get<std::string>()))
+                throw std::runtime_error("Контейнер не сохранил исходный тег дорожки «"+tag.key()+"». Исходники сохранены.");
+        }
+        for(const auto &[key,value]:source.extraTags)
+            if(metadataTagChanged(source.originalExtraTags,key,value) && !metadataTagMatches(tags,key,value))
+                throw std::runtime_error("Контейнер не сохранил тег дорожки «"+key+"». Выберите другой формат или отмените изменение. Исходники сохранены.");
+    }
     if(int(output.value("chapters",Json::array()).size())<expectedChapters)throw std::runtime_error("Контейнер не сохранил все главы. Выберите другой формат.");
     if(expectedChapters>0) {
         auto actualChapters=chaptersFromProbe(output);
         for(size_t n=0;n<expectedChapterList.size();++n) {
             const auto &wanted=expectedChapterList[n];const auto &actualChapter=actualChapters[n];
-            auto title=str(wanted,"title","Глава");for(auto &ch:title)if(ch=='\r'||ch=='\n')ch=' ';
+            auto title=str(wanted,"title","Глава");
+            auto wantedTags=wanted.value("tags",Json::object());auto actualTags=actualChapter.value("tags",Json::object());
+            if(wantedTags.is_object())for(auto tag=wantedTags.begin();tag!=wantedTags.end();++tag) {
+                std::string lower=tag.key();std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char ch){return char(std::tolower(ch));});
+                if(lower=="title")continue;
+                if(!tag->is_string())throw std::runtime_error("Неподдерживаемые метаданные главы. Исходники сохранены.");
+                auto value=tag->get<std::string>();
+                if(!metadataTagMatches(actualTags,tag.key(),value))throw std::runtime_error("Контейнер не сохранил тег главы «"+tag.key()+"». Исходники сохранены.");
+            }
             if(std::abs(number(wanted,"start_time",-1)-number(actualChapter,"start_time",-1))>0.05 ||
                std::abs(number(wanted,"end_time",-1)-number(actualChapter,"end_time",-1))>0.05 ||
                title!=str(actualChapter,"title","Глава"))
                 throw std::runtime_error("Контейнер изменил границы или названия глав. Выберите другой формат. Исходники сохранены.");
         }
     }
+    std::vector<bool> matchedExtra(output.value("streams",Json::array()).size(),false);
+    for(const auto &extra:extraMapped) {
+        bool found=false;auto streams=output.value("streams",Json::array());
+        for(size_t n=0;n<streams.size();++n) {
+            const auto &stream=streams[n];if(matchedExtra[n] || str(stream,"codec_type")!=extra.type)continue;
+            auto tags=stream.value("tags",Json::object());
+            if((!extra.name.empty() && str(tags,"filename")!=extra.name) || (!extra.codec.empty() && str(stream,"codec_name")!=extra.codec) || (!extra.mime.empty() && str(tags,"mimetype")!=extra.mime))continue;
+            matchedExtra[n]=true;found=true;break;
+        }
+        if(!found)throw std::runtime_error("Контейнер не сохранил одно из вложений. Исходники сохранены.");
+    }
     if(!cover.empty()&&!hasCover(output,j->muxOptions.container))throw std::runtime_error("Обложка не сохранилась в контейнере. Исходники сохранены.");
+    if(coverSource && coverSource->embeddedKind=="cover" && coverSource->probedCodec==coverCodec && coverSource->originalCoverTags.is_object()) {
+        Json coverTags=Json::object();
+        for(const auto &stream:output.value("streams",Json::array())) {
+            auto codec=str(stream,"codec_name");if(codec!="png" && codec!="mjpeg")continue;
+            auto tags=stream.value("tags",Json::object());auto filename=str(tags,"filename");std::transform(filename.begin(),filename.end(),filename.begin(),[](unsigned char ch){return char(std::tolower(ch));});
+            if(number(stream.value("disposition",Json::object()),"attached_pic") || filename=="cover.png" || filename=="cover.jpg" || filename=="cover.jpeg"){coverTags=tags;break;}
+        }
+        auto titleKey=metadataFirstKey(coverSource->originalCoverTags,{"title"},"");
+        auto originalTitle=titleKey.empty()?std::string():str(coverSource->originalCoverTags,titleKey.c_str());
+        if(!originalTitle.empty() && !metadataTagMatches(coverTags,"title",coverSource->name))
+            throw std::runtime_error("Контейнер не сохранил название обложки. Исходники сохранены.");
+        for(auto tag=coverSource->originalCoverTags.begin();tag!=coverSource->originalCoverTags.end();++tag) {
+            std::string lower=tag.key();std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char ch){return char(std::tolower(ch));});
+            if(lower=="filename" || lower=="mimetype" || lower=="title")continue;
+            if(!tag->is_string() || !metadataTagMatches(coverTags,tag.key(),tag->get<std::string>()))throw std::runtime_error("Контейнер не сохранил тег обложки «"+tag.key()+"». Исходники сохранены.");
+        }
+    }
     if(fs::exists(final))throw std::runtime_error("Итоговый файл уже существует; сохранённый файл не заменён");
     fs::rename(partial,final);j->workerOutput=utf8(final.wstring());j->workerCategory=actual[0]?"Видео":"Аудио";
 }

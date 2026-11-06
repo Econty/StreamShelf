@@ -48,6 +48,16 @@ std::wstring processPath(HWND window) {
     wchar_t path[32768]; DWORD size = 32768;
     return process.h && QueryFullProcessImageNameW(process, 0, path, &size) ? std::wstring(path, size) : L"";
 }
+// Native file dialogs may be hosted in a helper process. Accept one only when
+// Windows identifies the selected browser window as its owner.
+bool belongsToBrowser(HWND window, const std::wstring &exe) {
+    if (!window || exe.empty()) return false;
+    if (lower(processPath(window)) == lower(exe)) return true;
+    wchar_t cls[100]{}; GetClassNameW(window, cls, 100);
+    if (std::wstring(cls) != L"#32770" || !GetWindow(window, GW_OWNER)) return false;
+    HWND rootOwner = GetAncestor(window, GA_ROOTOWNER);
+    return rootOwner && rootOwner != window && lower(processPath(rootOwner)) == lower(exe);
+}
 template<class T> struct Com {
     T *p = nullptr;
     ~Com() { if (p) p->Release(); }
@@ -108,7 +118,7 @@ struct Scene {
     GuideObservation facts;
     Control developer, load, confirm, enable, connect, popupConnect, permissionAllow;
     Control toolbarAction, firefoxGear, firefoxMenu, firefoxAdd, firefoxOpen, firefoxFile, firefoxOk;
-    bool firefoxAddedNotice = false;
+    bool firefoxAddedNotice = false, firefoxRemovedNotice = false;
     bool firefoxFileReady = false, firefoxFileSelected = false;
     bool connectorPopup = false;
     Json toolbarControls = Json::array();
@@ -274,7 +284,7 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
     scene.valid = true;
     wchar_t cls[100]{}; GetClassNameW(window, cls, 100);
     bool dialog = std::wstring(cls) == L"#32770";
-    bool addressEditing = false;
+    bool addressEditing = false, browserAddressKnown = false, browserAddressIsExtensions = false;
     Control popupEnable, popupAllow; bool permissionRequest = false, firefoxAddedText = false;
     struct FlatCandidate { RECT rect{}; std::optional<bool> enabled; bool explicitId = false; bool toggle = false; };
     std::vector<RECT> flatTitles, flatRemoveButtons;
@@ -292,6 +302,7 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
         bool offscreen = cachedInt(element.p, UIA_IsOffscreenPropertyId).value_or(1) != 0;
         if (name.find(L"streamshelf connector") != std::wstring::npos) { ++scene.ownNamesSeen; if (offscreen) ++scene.ownNamesOffscreen; }
         if (offscreen) continue;
+        if (firefox && ss::firefoxRemovedNotice(name)) scene.firefoxRemovedNotice = true;
         if (firefox && contains(name, {L"было добавлено", L"was added", L"has been added"})) firefoxAddedText = true;
         if (contains(name, {L"просмотр и изменение ваших данных на всех сайтах", L"read and change all your data on all websites", L"дополнительные разрешения", L"additional permissions", L"доступ к вашим данным для всех веб-сайтов", L"access your data for all websites"})) permissionRequest = true;
         auto value = cachedString(element.p, UIA_ValueValuePropertyId);
@@ -300,12 +311,23 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
 #ifdef STREAMSHELF_INSTALLER_TESTING
         if (dialog && !name.empty()) scene.diagnostics += std::to_wstring(type) + L" " + name + L" VALUE=" + value + L"\n";
 #endif
-        if ((type == UIA_EditControlTypeId || type == UIA_DocumentControlTypeId || type == UIA_ComboBoxControlTypeId) && extensionUrl(value)) {
-            scene.facts.page = true; scene.internalUrl = value;
+        // Inactive tabs can remain in the accessibility tree. Only the browser's
+        // visible address bar identifies the active page; a document's URL does not.
+        RECT addressRect{};
+        bool addressControl = !dialog && (type == UIA_EditControlTypeId || type == UIA_ComboBoxControlTypeId) &&
+            contains(name, {L"адрес", L"address", L"поиск", L"search"}) &&
+            SUCCEEDED(element->get_CachedBoundingRectangle(&addressRect)) && validRect(addressRect) &&
+            addressRect.top >= scene.windowRect.top && addressRect.bottom <= scene.windowRect.top + int(180 * GetDpiForWindow(window) / 96);
+#ifdef STREAMSHELF_INSTALLER_TESTING
+        if (!dialog && std::wstring(cls) == L"StreamShelfGuideFixture" && type == UIA_EditControlTypeId) addressControl = true;
+#endif
+        if (addressControl && !value.empty()) {
+            browserAddressKnown = true; browserAddressIsExtensions = extensionUrl(value);
+            if (browserAddressIsExtensions) { scene.facts.page = true; scene.internalUrl = value; }
         }
         // The EDIT can contain a path which has merely been typed. Only the address
         // breadcrumb toolbar reports the folder Shell has actually navigated to.
-        if (dialog && type == UIA_ToolBarControlTypeId && mentionsPath(name, folder)) scene.facts.folderReady = true;
+        if (dialog && type == UIA_ToolBarControlTypeId && mentionsPath(name, firefox ? fs::path(folder).parent_path().wstring() : folder)) scene.facts.folderReady = true;
         if (dialog && type == UIA_EditControlTypeId && mentionsPath(value, folder)) addressEditing = true;
         RECT rect{};
         if (FAILED(element->get_CachedBoundingRectangle(&rect)) || !validRect(rect)) continue;
@@ -314,14 +336,16 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
             auto id = cachedString(element.p, UIA_AutomationIdPropertyId);
             if (!dialog && button && (id == L"addon-page-options-button" || contains(name, {L"инструменты для всех дополнений", L"tools for all add-ons"}))) scene.firefoxGear = {rect, true};
             if (!dialog && (button || type == UIA_MenuItemControlTypeId || type == UIA_HyperlinkControlTypeId) && contains(name, {L"установить дополнение из файла", L"install add-on from file"})) scene.firefoxMenu = {rect, true};
-            if (dialog && button && (name == L"открыть" || name == L"open") &&
+            if (dialog && (button || type == UIA_SplitButtonControlTypeId) && (name == L"открыть" || name == L"open") &&
                 rect.right - rect.left >= int(50 * GetDpiForWindow(window) / 96)) scene.firefoxOpen = {rect, true};
             if (dialog && (type == UIA_ListItemControlTypeId || type == UIA_DataItemControlTypeId) &&
                 name == lower(fs::path(folder).filename().wstring())) {
                 scene.firefoxFile = {rect, true};
                 scene.firefoxFileSelected = cachedInt(element.p, UIA_SelectionItemIsSelectedPropertyId).value_or(0) != 0;
             }
-            if (dialog && type == UIA_EditControlTypeId && mentionsPath(value, folder)) scene.firefoxFileReady = true;
+            if (dialog && (type == UIA_EditControlTypeId || type == UIA_ComboBoxControlTypeId) &&
+                contains(name, {L"имя файла", L"file name", L"filename"}) &&
+                (mentionsPath(value, folder) || value == lower(fs::path(folder).filename().wstring()))) scene.firefoxFileReady = true;
             if (!dialog && button && (name == L"добавить" || name == L"add")) scene.firefoxAdd = {rect, true};
             if (!dialog && button && (name == L"ok" || name == L"ок")) scene.firefoxOk = {rect, true};
         }
@@ -337,7 +361,8 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
         bool forbiddenName = contains(name, {L"разработчик", L"developer", L"удалить", L"remove", L"ошибк", L"error", L"сведения", L"details", L"инкогнито", L"incognito"});
         if (!forbiddenName && (switchId || (actionable && (enableControl(element.p, type, name) || cachedInt(element.p, UIA_IsKeyboardFocusablePropertyId).value_or(0)))))
             flatSwitches.push_back({rect, enabledValue(element.p, type, name), switchId, enableControl(element.p, type, name)});
-        if ((button || type == UIA_MenuItemControlTypeId) && ownExtensionName(name) && !removeName(name)) {
+        if ((button || type == UIA_MenuItemControlTypeId) &&
+            (ownExtensionName(name) || (firefox && (name == L"streamshelf" || name == L"streamshelf connector"))) && !removeName(name)) {
             if (!contains(name, {L"закрепить", L"открепить", L"pin to", L"unpin", L"управление", L"manage"}) &&
                 (type == UIA_MenuItemControlTypeId || toolbarAncestor(automation, element.p))) scene.toolbarAction = {rect, true};
         }
@@ -361,6 +386,14 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
                                  scene.windowRect.right, scene.windowRect.bottom, GetDpiForWindow(window), toolbarAncestor(automation, element.p)) &&
             (!scene.connect.found || rect.left > scene.connect.rect.left)) scene.connect = {rect, true};
     }
+    if (firefox && dialog && !scene.firefoxOpen.found) {
+        // The Windows file picker exposes its split Open button as the standard
+        // IDOK control on systems where UI Automation omits the split button.
+        HWND open = GetDlgItem(window, IDOK); RECT rect{}; wchar_t label[128]{};
+        if (open && IsWindowVisible(open) && GetWindowTextW(open, label, 128) &&
+            (lower(label) == L"открыть" || lower(label) == L"open") && GetWindowRect(open, &rect) && validRect(rect))
+            scene.firefoxOpen = {rect, true};
+    }
     scene.facts.folderDialog = dialog && scene.confirm.found;
     if (firefox && dialog && scene.firefoxOpen.found) scene.facts.folderDialog = true;
     if (firefox && !dialog && scene.firefoxGear.found) { scene.facts.page = true; scene.internalUrl = L"about:addons"; }
@@ -373,7 +406,7 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
     }
     if (permissionRequest && scene.ownNamesSeen && popupAllow.found) scene.permissionAllow = popupAllow;
     if (addressEditing) scene.facts.folderReady = false;
-    if (!dialog && !scene.facts.page && (scene.developer.found || scene.load.found)) {
+    if (!dialog && !scene.facts.page && (!browserAddressKnown || browserAddressIsExtensions) && (scene.developer.found || scene.load.found)) {
         // Some Chromium builds omit the address-bar value from UI Automation.
         // Use the browser window title only together with an actual page control.
         wchar_t title[512]{}; GetWindowTextW(window, title, 512);
@@ -528,37 +561,8 @@ HRESULT setFocusedAddress(IUIAutomation *automation, HWND window, const std::wst
     }
     SysFreeString(text); return result;
 }
-bool prepareFirefoxFile(IUIAutomation *automation, HWND window, const std::wstring &path) {
-    if (!automation || GetForegroundWindow() != window) return false;
-    Com<IUIAutomationElement> root;
-    auto result = automation->ElementFromHandle(window, root.out());
-    if (!hasInterface(result, root.p)) return false;
-    Variant type; type.value.vt = VT_I4; type.value.lVal = UIA_EditControlTypeId;
-    Com<IUIAutomationCondition> condition;
-    result = automation->CreatePropertyCondition(UIA_ControlTypePropertyId, type.value, condition.out());
-    if (!hasInterface(result, condition.p)) return false;
-    Com<IUIAutomationElementArray> edits;
-    result = root->FindAll(TreeScope_Descendants, condition.p, edits.out());
-    if (!hasInterface(result, edits.p)) return false;
-    int count = 0; edits->get_Length(&count);
-    for (int i = 0; i < count && i < 64; ++i) {
-        Com<IUIAutomationElement> edit;
-        result = edits->GetElement(i, edit.out());
-        if (!hasInterface(result, edit.p)) continue;
-        BSTR raw = nullptr; edit->get_CurrentName(&raw); std::wstring name = raw ? lower(raw) : L""; SysFreeString(raw);
-        if (!contains(name, {L"имя файла", L"file name", L"filename"})) continue;
-        Com<IUIAutomationValuePattern> value;
-        result = edit->GetCurrentPatternAs(UIA_ValuePatternId, __uuidof(IUIAutomationValuePattern), (void **)value.out());
-        if (!hasInterface(result, value.p)) continue;
-        BSTR old = nullptr; value->get_CurrentValue(&old); bool empty = !old || !*old; SysFreeString(old);
-        if (!empty || GetForegroundWindow() != window) return false;
-        BSTR target = SysAllocString(path.c_str()); if (!target) return false;
-        result = value->SetValue(target); SysFreeString(target); return SUCCEEDED(result);
-    }
-    return false;
-}
 // Tab titles are only candidates: the actual internal page is verified after selection.
-bool selectExtensionsTab(IUIAutomation *automation, HWND window, ULONGLONG deadline) {
+int selectExtensionsTab(IUIAutomation *automation, HWND window, ULONGLONG deadline, bool firefox) {
     if (!automation || GetForegroundWindow() != window) return false;
     Com<IUIAutomationElement> root;
     if (FAILED(automation->ElementFromHandle(window, root.out())) || !root.p) return false;
@@ -567,18 +571,30 @@ bool selectExtensionsTab(IUIAutomation *automation, HWND window, ULONGLONG deadl
     if (FAILED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, type.value, condition.out())) || !condition.p) return false;
     Com<IUIAutomationElementArray> tabs;
     if (FAILED(root->FindAll(TreeScope_Descendants, condition.p, tabs.out())) || !tabs.p) return false;
-    int count = 0; tabs->get_Length(&count);
+    int count = 0; tabs->get_Length(&count); bool candidate = false;
     for (int i = 0; i < count && i < 200; ++i) {
         Com<IUIAutomationElement> tab;
         if (FAILED(tabs->GetElement(i, tab.out())) || !tab.p) continue;
         BSTR raw = nullptr; tab->get_CurrentName(&raw);
         std::wstring name = raw ? lower(raw) : L""; SysFreeString(raw);
-        if (name != L"расширения" && name != L"extensions") continue;
+        if (!extensionsTabTitle(name, firefox)) continue;
+        candidate = true;
         Com<IUIAutomationSelectionItemPattern> selection;
         auto hr = tab->GetCurrentPatternAs(UIA_SelectionItemPatternId, __uuidof(IUIAutomationSelectionItemPattern), (void **)selection.out());
-        if (hasInterface(hr, selection.p) && GetTickCount64() < deadline && GetForegroundWindow() == window && SUCCEEDED(selection->Select())) return true;
+        if (GetTickCount64() >= deadline || GetForegroundWindow() != window) return 2;
+        if (hasInterface(hr, selection.p)) {
+            BOOL selected = FALSE;
+            if (SUCCEEDED(selection->get_CurrentIsSelected(&selected)) && selected) return true;
+            if (SUCCEEDED(selection->Select())) return true;
+        }
+        Com<IUIAutomationInvokePattern> invoke;
+        hr = tab->GetCurrentPatternAs(UIA_InvokePatternId, __uuidof(IUIAutomationInvokePattern), (void **)invoke.out());
+        if (hasInterface(hr, invoke.p) && GetTickCount64() < deadline && GetForegroundWindow() == window && SUCCEEDED(invoke->Invoke())) return 1;
+        Com<IUIAutomationLegacyIAccessiblePattern> legacy;
+        hr = tab->GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId, __uuidof(IUIAutomationLegacyIAccessiblePattern), (void **)legacy.out());
+        if (hasInterface(hr, legacy.p) && GetTickCount64() < deadline && GetForegroundWindow() == window && SUCCEEDED(legacy->DoDefaultAction())) return 1;
     }
-    return false;
+    return candidate ? 2 : 0;
 }
 } // namespace
 
@@ -640,10 +656,13 @@ struct ExtensionInstaller::Impl {
     std::wstring lastInternalUrl;
     std::wstring browserWindowClass;
     std::set<HWND> existingWindows;
-    ULONGLONG opened = GetTickCount64(), pickerAttemptAt = 0;
+    ULONGLONG opened = GetTickCount64(), pickerAttemptAt = 0, connectionRetryAt = 0;
     bool navigationPending = true, markerPositioned = false;
     bool reuseBrowserWindow = false, newTabPending = false;
     std::vector<std::wstring> launchArguments;
+    std::vector<HWND> searchWindows;
+    size_t searchWindowIndex = 0;
+    HWND initialBrowserWindow{};
     DWORD launchPid = 0, launchError = 0;
     int navigationPhase = 0, navigationAttempts = 0;
     ULONGLONG navigationAt = 0, navigationStarted = 0;
@@ -651,8 +670,6 @@ struct ExtensionInstaller::Impl {
     ULONGLONG browserRectChangedAt = 0;
     bool pageVerified = false;
     std::atomic<HWND> addressRequest{nullptr};
-    std::atomic<HWND> firefoxFileRequest{nullptr};
-    HWND firefoxPickerAttempted{};
     std::atomic<LONG> addressResult{E_PENDING};
     std::atomic<HWND> tabRequest{nullptr};
     std::atomic<int> tabResult{-1};
@@ -718,7 +735,16 @@ struct ExtensionInstaller::Impl {
             browserWindow = findBrowserWindow(exe, existingWindows, false);
         reuseBrowserWindow = !relaunch && IsWindow(browserWindow);
         newTabPending = reuseBrowserWindow;
-        tabSearchPending = reuseBrowserWindow && !firefox;
+        tabSearchPending = reuseBrowserWindow;
+        searchWindows.clear(); searchWindowIndex = 0; initialBrowserWindow = browserWindow;
+        if (reuseBrowserWindow && firefox) {
+            searchWindows.push_back(browserWindow);
+            for (HWND window : existingWindows) {
+                wchar_t cls[100]{}; GetClassNameW(window, cls, 100);
+                if (window != browserWindow && IsWindowVisible(window) && !GetWindow(window, GW_OWNER) &&
+                    std::wstring(cls) == L"MozillaWindowClass" && lower(processPath(window)) == lower(exe)) searchWindows.push_back(window);
+            }
+        }
         if (!reuseBrowserWindow) launchBrowser();
         navigationPending = true; pageVerified = false; navigationPhase = 1;
         navigationAttempts = 0; navigationStarted = navigationAt = GetTickCount64();
@@ -727,7 +753,7 @@ struct ExtensionInstaller::Impl {
     void navigateBrowser() {
         if (!navigationPending) return;
         auto now = GetTickCount64();
-        if (now - navigationStarted > 20000) {
+        if (now - navigationStarted > 30000) {
             navigationPending = false;
             setNotice(L"Страница не подтверждена. Нажмите «Открыть страницу» для повтора."); return;
         }
@@ -751,7 +777,7 @@ struct ExtensionInstaller::Impl {
         if (now - navigationAt < 250) return;
         if (navigationPhase == 2) {
             if (tabSearchPending) {
-                tabSearchPending = false; tabResult = -1; tabDeadline = now + 3500; tabRequest = browserWindow;
+                tabSearchPending = false; tabResult = -1; tabDeadline = now + 10000; tabRequest = browserWindow;
                 navigationPhase = 6; navigationAt = now; return;
             }
             if (newTabPending) {
@@ -763,13 +789,27 @@ struct ExtensionInstaller::Impl {
         }
         if (navigationPhase == 6) {
             int result = tabResult;
-            if (result < 0 && now - navigationAt < 4000) return;
-            if (result > 0) { navigationPhase = 7; navigationAt = now; }
-            else { navigationPhase = 2; navigationAt = now; }
+            if (result < 0 && now - navigationAt < 10500) return;
+            if (result < 0) {
+                navigationPending = false;
+                setNotice(L"Не удалось проверить открытые вкладки. Переключитесь на страницу расширений вручную."); return;
+            }
+            if (result == 1) { navigationPhase = 7; navigationAt = now; }
+            else if (result == 2) {
+                navigationPending = false;
+                setNotice(L"Вкладка расширений найдена. Переключитесь на неё, чтобы продолжить.");
+            } else if (firefox && searchWindowIndex + 1 < searchWindows.size()) {
+                browserWindow = searchWindows[++searchWindowIndex]; tabSearchPending = true;
+                navigationPhase = 1; navigationAt = now;
+            } else if (firefox && !searchWindows.empty() && browserWindow != initialBrowserWindow && IsWindow(initialBrowserWindow)) {
+                browserWindow = initialBrowserWindow; tabSearchPending = false;
+                navigationPhase = 1; navigationAt = now;
+            } else { navigationPhase = 2; navigationAt = now; }
             return;
         }
-        if (navigationPhase == 7 && now - navigationAt > 2500) {
-            navigationPhase = 2; navigationAt = now; return;
+        if (navigationPhase == 7 && now - navigationAt > 8000) {
+            navigationPending = false;
+            setNotice(L"Переключитесь на открытую вкладку расширений, чтобы продолжить."); return;
         }
         if (navigationPhase == 3) {
             addressResult = E_PENDING; addressRequest = browserWindow;
@@ -797,7 +837,7 @@ struct ExtensionInstaller::Impl {
         }
     }
     void navigateFolder(HWND window) {
-        if (GetForegroundWindow() != window || !modifiersUp() || lower(processPath(window)) != lower(exe)) return;
+        if (GetForegroundWindow() != window || !modifiersUp() || !belongsToBrowser(window, exe)) return;
         auto now = GetTickCount64();
         if (folderPhase == 0) {
             if (pickerAttempts >= 2 || now - pickerAttemptAt < 1500) return;
@@ -831,7 +871,8 @@ struct ExtensionInstaller::Impl {
             // The native address edit is replaced as a single value, after Ctrl+L has
             // actually been processed. No Sleep or Unicode keystroke stream races autocomplete.
             DWORD_PTR result = 0;
-            if (SendMessageTimeoutW(info.hwndFocus, WM_SETTEXT, 0, (LPARAM)extension.c_str(), SMTO_ABORTIFHUNG | SMTO_BLOCK, 700, &result)) {
+            const auto destination = firefox ? extension.parent_path().wstring() : extension.wstring();
+            if (SendMessageTimeoutW(info.hwndFocus, WM_SETTEXT, 0, (LPARAM)destination.c_str(), SMTO_ABORTIFHUNG | SMTO_BLOCK, 700, &result)) {
                 folderEdit = info.hwndFocus; folderPhase = 2; folderPhaseAt = now;
             } else folderPhase = 0;
             return;
@@ -942,7 +983,7 @@ struct ExtensionInstaller::Impl {
             L"Откройте страницу about:addons и выберите раздел «Расширения».",
             L"Нажмите шестерёнку «Инструменты для всех дополнений» на странице расширений.",
             L"В открытом меню нажмите «Установить дополнение из файла».",
-            L"В окне выбора укажите подписанный файл XPI. Можно скопировать путь кнопкой ниже и вставить его в поле имени файла.",
+            L"Мастер откроет папку расширения. Выберите подсвеченный файл XPI, затем нажмите подсвеченную кнопку «Открыть».",
             L"Прочитайте разрешения Firefox и нажмите «Добавить», если согласны.",
             L"Включите StreamShelf Connector на странице дополнений Firefox.",
             L"Окно расширения откроется автоматически. Нажмите «Подключить расширение», затем прочитайте запрос Firefox и подтвердите доступ к сайтам, если согласны.",
@@ -1109,7 +1150,9 @@ struct ExtensionInstaller::Impl {
             observation.installed = scene.facts.installedCard;
             observation.enabledKnown = scene.facts.enabledKnown;
             observation.enabled = scene.facts.enabled;
-            if (scene.facts.page && scene.firefoxGear.found && navigationPending) {
+            observation.removedNotice = scene.firefoxRemovedNotice && !scene.liveCardFound;
+            if (scene.facts.page && scene.firefoxGear.found && navigationPending &&
+                (navigationPhase != 7 || scene.at >= navigationAt)) {
                 navigationPending = false; pageVerified = true;
             }
         }
@@ -1118,16 +1161,31 @@ struct ExtensionInstaller::Impl {
         else if (current && firefoxSawPicker && !firefoxPickerClosedAt) firefoxPickerClosedAt = GetTickCount64();
         if (firefoxPickerClosedAt && GetTickCount64() - firefoxPickerClosedAt < 15000) observation.awaitingInstall = true;
         if (observation.installed || observation.extensionRunning || (firefoxPickerClosedAt && GetTickCount64() - firefoxPickerClosedAt >= 15000)) { firefoxSawPicker = false; firefoxPickerClosedAt = 0; }
-        if (observation.picker && browser && firefoxPickerAttempted != scene.window) {
-            firefoxPickerAttempted = scene.window; firefoxFileRequest = scene.window;
-        } else if (current && !observation.picker) firefoxPickerAttempted = nullptr;
+        if (observation.picker && browser) {
+            navigationPending = false;
+            if (picker != scene.window) { picker = scene.window; pickerAttempts = 0; pickerAttemptAt = 0; folderPhase = 0; }
+            if (firefoxPickerAction(scene.facts.folderReady, scene.firefoxFile.found, scene.firefoxFileSelected,
+                                    scene.firefoxFileReady) == FirefoxPickerAction::Navigate) navigateFolder(scene.window);
+        } else if (current && !observation.picker) { picker = nullptr; pickerAttempts = 0; folderPhase = 0; }
         auto stage = firefoxGuideStage(observation);
         auto previous = flow.stage;
         if (firefoxAcknowledgement != observation.addedNotice) { firefoxAcknowledgement = observation.addedNotice; InvalidateRect(panel, nullptr, FALSE); }
         flow.stage = static_cast<GuideStage>(int(stage));
         if (flow.stage != previous) { setNotice(L""); InvalidateRect(panel, nullptr, FALSE); }
+        if (guideConnectionRetryDue(flow.stage, GetTickCount64(), connectionRetryAt) && retryConnection) {
+            connectionRetryAt = GetTickCount64();
+            retryConnection();
+            if (stop || !IsWindow(panel)) return;
+        }
         if (stage == FirefoxGuideStage::Connect && browser && extensionRunning && !setupRequested && openSetup && openSetup()) setupRequested = true;
-        if (stage == FirefoxGuideStage::Connect) setNotice(L"Открываю окно расширения автоматически. Если оно не появилось, нажмите «Проверить связь».");
+        if (stage == FirefoxGuideStage::Connect) {
+            if (scene.permissionAllow.found || scene.popupConnect.found)
+                setNotice(L"Подключите расширение и подтвердите доступ к сайтам, если согласны.");
+            else if (!extensionRunning)
+                setNotice(L"Ожидаю соединение. Если оно не появилось, нажмите значок StreamShelf в панели Firefox и подключите расширение.");
+            else
+                setNotice(L"Проверяю связь. Если окно расширения не открылось, нажмите его значок в панели Firefox.");
+        }
         showIfChanged(panel, true);
         if ((!own && !browser) || !current) { hideFocus(); return; }
         Control control;
@@ -1135,18 +1193,27 @@ struct ExtensionInstaller::Impl {
         else if (stage == FirefoxGuideStage::InstallFile) control = scene.firefoxMenu;
         else if (stage == FirefoxGuideStage::ConfirmInstall) control = scene.firefoxAddedNotice ? scene.firefoxOk : scene.firefoxAdd;
         else if (stage == FirefoxGuideStage::SelectFile) {
-            if (scene.firefoxFile.found && !scene.firefoxFileSelected) control = scene.firefoxFile;
-            else if (scene.firefoxFileReady || scene.firefoxFileSelected) control = scene.firefoxOpen;
+            auto action = firefoxPickerAction(scene.facts.folderReady, scene.firefoxFile.found,
+                                              scene.firefoxFileSelected, scene.firefoxFileReady);
+            if (action == FirefoxPickerAction::SelectFile) control = scene.firefoxFile;
+            else if (action == FirefoxPickerAction::OpenFile) control = scene.firefoxOpen;
         }
         else if (stage == FirefoxGuideStage::Enable) control = scene.enable;
-        else if (stage == FirefoxGuideStage::Connect) control = scene.permissionAllow.found ? scene.permissionAllow : scene.popupConnect;
-        if (stage == FirefoxGuideStage::SelectFile) setNotice(scene.firefoxFile.found && !scene.firefoxFileSelected ? L"Выберите файл StreamShelf Connector в списке." : (scene.firefoxFileReady || scene.firefoxFileSelected) ? L"Файл указан. Нажмите кнопку «Открыть»." : L"Вставьте путь в поле имени файла и нажмите «Открыть».");
+        else if (stage == FirefoxGuideStage::Connect) {
+            if (scene.permissionAllow.found) control = scene.permissionAllow;
+            else if (scene.popupConnect.found) control = scene.popupConnect;
+            else if (current && browser && scene.toolbarAction.found) control = scene.toolbarAction;
+        }
+        if (stage == FirefoxGuideStage::SelectFile) setNotice(scene.firefoxFile.found && !scene.firefoxFileSelected ? L"Выберите файл StreamShelf Connector в списке." : (scene.firefoxFileReady || scene.firefoxFileSelected) ? L"Файл указан. Нажмите кнопку «Открыть»." : pickerAttempts >= 2 ? L"Откройте папку с XPI вручную или вставьте путь в поле имени файла." : L"Открываю папку с подписанным файлом расширения…");
         if (stage == FirefoxGuideStage::ConfirmInstall && !scene.firefoxAdd.found && !scene.firefoxAddedNotice) setNotice(L"Ожидаю подтверждение Firefox. Если выбор отменён, откройте меню установки снова.");
         if (stage == FirefoxGuideStage::Enable && !control.found) setNotice(L"Включите StreamShelf Connector в списке дополнений Firefox.");
         highlightTarget(scene, control);
     }
     void tick() {
-        navigateBrowser();
+        HWND beforeNavigation = GetForegroundWindow();
+        wchar_t activeClass[100]{}; if (beforeNavigation) GetClassNameW(beforeNavigation, activeClass, 100);
+        bool firefoxPickerActive = firefox && std::wstring(activeClass) == L"#32770" && belongsToBrowser(beforeNavigation, exe);
+        if (!firefoxPickerActive) navigateBrowser();
         HWND foreground = GetForegroundWindow();
         bool own = foreground == panel || (foreground && IsChild(panel, foreground));
         wchar_t foregroundClass[100]{}; if (foreground) GetClassNameW(foreground, foregroundClass, 100);
@@ -1155,7 +1222,7 @@ struct ExtensionInstaller::Impl {
 #ifdef STREAMSHELF_INSTALLER_TESTING
         browserClass = browserClass || std::wstring(foregroundClass) == L"StreamShelfGuideFixture";
 #endif
-        bool browser = !own && browserClass && foreground && !IsIconic(foreground) && lower(processPath(foreground)) == lower(exe);
+        bool browser = !own && browserClass && foreground && !IsIconic(foreground) && belongsToBrowser(foreground, exe);
         if (browser && foreground == browserWindow) {
             RECT current{}; auto now = GetTickCount64();
             if (GetWindowRect(foreground, &current)) {
@@ -1188,8 +1255,11 @@ struct ExtensionInstaller::Impl {
                 if (!absenceSince) { absenceSince = GetTickCount64(); absenceFirstScene = scene.at; }
                 if (scene.at > absenceFirstScene && GetTickCount64() - absenceSince >= 2000) facts.installedAbsent = true;
             } else { absenceSince = 0; absenceFirstScene = 0; }
-            if (facts.page) lastInternalUrl = scene.internalUrl;
-            if (navigationPending && (navigationPhase != 7 || scene.at >= navigationAt) && verifiedExtensionPage(navigationPhase == 7 ? 5 : navigationPhase, facts.page,
+            if (facts.page) {
+                lastInternalUrl = scene.internalUrl;
+                if (!navigationPending && (scene.developer.found || scene.load.found || scene.liveCardFound)) pageVerified = true;
+            }
+            if (navigationPending && scene.at >= navigationStarted && (navigationPhase != 7 || scene.at >= navigationAt) && verifiedExtensionPage((navigationPhase == 1 || (navigationPhase == 2 && newTabPending) || navigationPhase == 7) ? 5 : navigationPhase, facts.page,
                 scene.developer.found || scene.load.found || scene.liveCardFound)) {
                 navigationPending = false; pageVerified = true; setNotice(L"Страница расширений открыта и проверена.");
             }
@@ -1210,6 +1280,11 @@ struct ExtensionInstaller::Impl {
                     setNotice(L"Вставьте путь вручную в адресную строку окна папки (Alt+D), затем Enter.");
             } else if (!scene.facts.folderDialog) { picker = nullptr; pickerAttempts = 0; folderPhase = 0; }
             displayed = scene;
+        }
+        if (guideConnectionRetryDue(flow.stage, GetTickCount64(), connectionRetryAt) && retryConnection) {
+            connectionRetryAt = GetTickCount64();
+            retryConnection();
+            if (stop || !IsWindow(panel)) return;
         }
         // A verified Native Messaging response from this browser already proves
         // that our extension is installed and running. Once the developer-mode
@@ -1232,6 +1307,8 @@ struct ExtensionInstaller::Impl {
         if ((!own && !browser) || !current) { hideFocus(); return; }
         if (!scene.facts.page && !scene.facts.folderDialog && !scene.facts.confirmationDialog && flow.stage != GuideStage::Connect && flow.stage != GuideStage::Done && !navigationPending)
             setNotice(L"Открыта другая страница. Нажмите «Открыть страницу», чтобы продолжить.");
+        // Never darken or point at page controls while navigation is unverified.
+        if (navigationPending && !scene.facts.folderDialog && !scene.facts.confirmationDialog) { hideFocus(); return; }
         Control control;
         if (flow.stage == GuideStage::Developer && scene.facts.page) control = scene.developer;
         if (flow.stage == GuideStage::Load && scene.facts.page) control = scene.load;
@@ -1417,11 +1494,10 @@ struct ExtensionInstaller::Impl {
                     result = automation->QueryInterface(__uuidof(IUIAutomation2), (void **)options.out());
                     if (hasInterface(result, options.p)) { options->put_ConnectionTimeout(700); options->put_TransactionTimeout(500); }
                     while (!stop) {
-                        if (HWND requested = firefoxFileRequest.exchange(nullptr)) prepareFirefoxFile(automation.p, requested, extension.wstring());
-                        if (HWND requested = tabRequest.exchange(nullptr)) tabResult = selectExtensionsTab(automation.p, requested, tabDeadline) ? 1 : 0;
+                        if (HWND requested = tabRequest.exchange(nullptr)) tabResult = selectExtensionsTab(automation.p, requested, tabDeadline, firefox);
                         if (HWND requested = addressRequest.exchange(nullptr)) addressResult = setFocusedAddress(automation.p, requested, pageUrl);
                         HWND window = scanWindow;
-                        if (window && IsWindow(window) && lower(processPath(window)) == lower(exe)) {
+                        if (window && IsWindow(window) && belongsToBrowser(window, exe)) {
                             try {
                                 auto scene = inspect(automation.p, window, extension.wstring(), firefox);
                                 if (firefox && !profileDirectory.empty()) {

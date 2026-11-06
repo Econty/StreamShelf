@@ -10,6 +10,16 @@ ctest --preset dev
 
 Повторите эти команды после изменений: Ninja пересоберёт затронутые файлы. Готовое приложение и папки Assets и extensions находятся в `build/dev`. Конфигурация `release` работает аналогично: замените `dev` на `release`. Если Node.js отсутствует при настройке CMake, JavaScript-тесты не регистрируются; установите Node.js и запустите настройку заново. CTest выводит только фактически зарегистрированные тесты.
 
+Для включения MediaInfo в выпускной комплект задайте CMake параметр `STREAMSHELF_MEDIAINFO_DLL` с полным путём к совместимой подписанной `MediaInfo.dll`. При установке библиотека будет скопирована рядом с `StreamShelf.exe`, а уведомление поставщика — из `licenses/MediaInfo-License.html`. Например, для установленной MediaInfo:
+
+```powershell
+cmake --preset release "-DSTREAMSHELF_MEDIAINFO_DLL=C:/Program Files/MediaInfo/MediaInfo.dll"
+cmake --build --preset release --parallel
+ctest --preset release
+```
+
+Без указанного параметра DLL в комплект не включается; приложение будет искать её в своей папке или стандартной папке установки MediaInfo. При подготовке архива проверяйте архитектуру, подпись и лицензии фактической библиотеки.
+
 Для установки в `release/StreamShelf-Native`:
 
 ```powershell

@@ -1,3 +1,4 @@
+#include "extension_guide_state.hpp"
 #include "app.hpp"
 #include "probe_result.hpp"
 #include "media_merge.hpp"
@@ -99,6 +100,8 @@ App::App() {
                 job->assembly = v.value("assembly",false);
                 job->singleExport=v.value("singleExport",false);job->exportFormat=v.value("exportFormat",0);job->exportQuality=v.value("exportQuality",1);
                 job->assemblyMetadataTitle = str(v,"assemblyMetadataTitle"); job->assemblyArtist = str(v,"assemblyArtist"); job->assemblyDescription = str(v,"assemblyDescription");
+                if(v.contains("globalTags") && v["globalTags"].is_object())job->globalTags=v["globalTags"].get<std::map<std::string,std::string>>();
+                if(v.contains("originalGlobalTags") && v["originalGlobalTags"].is_object())job->originalGlobalTags=v["originalGlobalTags"].get<std::map<std::string,std::string>>();
                 for (const auto &source : v.value("sources",Json::array())) { auto entry=assemblyFrom(source); if(source.contains("media"))entry.media=mediaFrom(source["media"]); job->sources.push_back(entry); }
                 job->mux = v.value("mux", false);
                 if (job->mux) {
@@ -241,7 +244,7 @@ void App::start() {
                 bool matching = sameBrowserExecutable(actual, installerBrowserExecutable);
                 bool wasInstalling = extensionInstaller.active() && matching;
                 bool currentSetup = j.value("setupRevision", std::string()) == "2026-10-31-1";
-                s->setupReady = currentSetup && j.value("hasSiteAccess", false) && j.value("setupConfirmed", false);
+                s->setupReady = connectorSetupReady(currentSetup, j.value("hasSiteAccess", false));
                 s->setupApiSupported = currentSetup && j.value("setupApi", false);
                 if (extensionInstaller.active() && matching) {
                     extensionInstaller.setExtensionRunning(s->alive && s->verified);
@@ -860,6 +863,10 @@ std::shared_ptr<Preview> App::requestPreview(const Media &item) {
         std::string message="Превью недоступно";
         try {
             std::string thumbnail=item.thumbnail;
+            if(thumbnail.empty() && item.key.rfind("local:",0)==0) {
+                auto path=item.key.substr(6);
+                thumbnail=(item.category=="Изображения" || item.category=="Превью")?path:"assembly-cover:"+item.key+"|"+path;
+            }
             if(thumbnail.empty()&&(item.category=="Изображения"||item.category=="Превью"))thumbnail=item.url;
             if(thumbnail.rfind("assembly-cover:",0)==0) {
                 message="Вложенная обложка не найдена";
@@ -874,10 +881,9 @@ std::shared_ptr<Preview> App::requestPreview(const Media &item) {
                     int coverIndex=-1;
                     if(!probe.code && data.is_object())for(const auto &stream:data.value("streams",Json::array())) {
                         auto codec=str(stream,"codec_name");
-                        if(codec!="mjpeg" && codec!="png")continue;
                         auto filename=str(stream.value("tags",Json::object()),"filename");
                         std::transform(filename.begin(),filename.end(),filename.begin(),[](unsigned char c){return char(std::tolower(c));});
-                        if(number(stream.value("disposition",Json::object()),"attached_pic")!=0 || filename=="cover.jpg" || filename=="cover.png") {
+                        if(number(stream.value("disposition",Json::object()),"attached_pic")!=0 || ((codec=="mjpeg" || codec=="png") && (filename=="cover.jpg" || filename=="cover.jpeg" || filename=="cover.png"))) {
                             coverIndex=int(number(stream,"index",-1));break;
                         }
                     }
@@ -892,6 +898,8 @@ std::shared_ptr<Preview> App::requestPreview(const Media &item) {
                     }
                 } catch(...) {finished=true;watchdog.join();throw;}
                 finished=true;watchdog.join();
+            } else if(!thumbnail.empty() && !httpUrl(thumbnail) && fs::is_regular_file(wide(thumbnail))) {
+                image=decodePreview(readFile(wide(thumbnail),8*1024*1024));
             } else if(httpUrl(thumbnail)) {
                 Json headers=Json::object();std::string cookieText;
                 if(selectedSession){try{auto cred=credentials(selectedSession,thumbnail,stopping);cookieText=cred.first;headers=cred.second;}catch(...){}}
@@ -945,7 +953,7 @@ void App::saveHistory() {
                      {"local", j->local},
                      {"output", j->output},
                      {"outputDirectory", j->outputDirectory},
-                     {"assembly", j->assembly}, {"singleExport",j->singleExport}, {"exportFormat",j->exportFormat}, {"exportQuality",j->exportQuality}, {"assemblyInput",j->assemblyInput}, {"localFile",j->localFile}, {"conversionSource",j->conversionSource}, {"sources", sources}, {"assemblyMetadataTitle",j->assemblyMetadataTitle}, {"assemblyArtist",j->assemblyArtist}, {"assemblyDescription",j->assemblyDescription},
+                     {"assembly", j->assembly}, {"singleExport",j->singleExport}, {"exportFormat",j->exportFormat}, {"exportQuality",j->exportQuality}, {"assemblyInput",j->assemblyInput}, {"localFile",j->localFile}, {"conversionSource",j->conversionSource}, {"sources", sources}, {"assemblyMetadataTitle",j->assemblyMetadataTitle}, {"assemblyArtist",j->assemblyArtist}, {"assemblyDescription",j->assemblyDescription}, {"globalTags",j->globalTags}, {"originalGlobalTags",j->originalGlobalTags},
                      {"item", mediaJson(j->item)}, {"mux", j->mux}, {"muxInputs", j->muxInputs}, {"muxChapters", j->muxChapters},
                      {"muxOptions", {{"container", j->muxOptions.container}, {"video", j->muxOptions.video}, {"audio", j->muxOptions.audio}, {"subtitles", j->muxOptions.subtitles}}}});
     }
@@ -1587,7 +1595,15 @@ void App::action(const std::string &cmd) {
                         auto checkConnection = [this, expected = selected.exe] {
                             for (auto &existing : sessions) {
                                 std::string actual; { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
-                                if (existing->alive && sameBrowserExecutable(actual, expected)) work([existing] { try { existing->verifyConnection(); } catch (...) {} });
+                                if (existing->alive && sameBrowserExecutable(actual, expected)) {
+                                    if (existing->verified && existing->setupReady && extensionInstaller.active()) {
+                                        extensionInstaller.connectionEstablished();
+                                        notify("Расширение установлено и подключено");
+                                        requestedPage = 0;
+                                        return;
+                                    }
+                                    work([existing] { try { existing->verifyConnection(); } catch (...) {} });
+                                }
                             }
                         };
                         extensionInstaller.setRetryConnection(checkConnection);

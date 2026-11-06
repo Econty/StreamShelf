@@ -15,6 +15,11 @@ int main() {
         check(!verifiedExtensionPage(4, true, true), "Typed address before Enter is never verified as a loaded page");
         check(!verifiedExtensionPage(5, true, false), "After Enter, URL without extensions-page controls is still unverified");
         check(verifiedExtensionPage(5, true, true), "Only submitted URL and actual extensions controls verify navigation");
+        check(extensionsTabTitle(L"расширения") && extensionsTabTitle(L"расширения - google chrome") && extensionsTabTitle(L"extensions — яндекс браузер"), "Existing browser extension tabs are candidates");
+        check(extensionsTabTitle(L"управление дополнениями", true) && extensionsTabTitle(L"add-ons manager", true), "Firefox add-on manager tabs are candidates");
+        check(!extensionsTabTitle(L"управление дополнениями", false), "Firefox title is scoped to Firefox");
+        check(!extensionsTabTitle(L"расширения для файлов") && !extensionsTabTitle(L"my extensions"), "Unrelated tab titles are not accepted");
+        check(connectorSetupReady(true, true) && !connectorSetupReady(false, true) && !connectorSetupReady(true, false), "Previously granted access and current protocol establish readiness");
         check(!browserToolbarButton(420, 73, 1300, 115, 0, 0, 1920, 1080, 96, true), "search/address bar labelled Extensions is never selected as toolbar button");
         check(!browserToolbarButton(180, 220, 220, 260, 0, 0, 1920, 1080, 96, true), "page toolbar is not a browser extensions button");
         check(browserToolbarButton(1720, 75, 1760, 115, 0, 0, 1920, 1080, 96, true), "compact upper-right browser toolbar control is eligible");
@@ -25,6 +30,9 @@ int main() {
         auto provide = [&]() -> HRESULT { missing = &object; return S_OK; };
         check(hasInterface(provide(), missing), "COM out variable is read after call regardless of argument evaluation order");
         check(!hasInterface(E_FAIL, missing), "Failed COM result cannot become available");
+        check(!guideConnectionRetryDue(GuideStage::Enable, 4000, 0), "Retry waits until the connection step");
+        check(guideConnectionRetryDue(GuideStage::Connect, 4000, 0), "Connection step retries in both browser guides");
+        check(!guideConnectionRetryDue(GuideStage::Connect, 5000, 4000) && guideConnectionRetryDue(GuideStage::Connect, 6000, 4000), "Connection retry respects the interval");
         GuideFlow flow;
         flow.observe({}, 100);
         check(flow.stage == GuideStage::Developer, "Unavailable provider does not advance guide");

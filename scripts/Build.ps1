@@ -1,6 +1,7 @@
 param(
     [ValidateSet('dev','release')][string]$Preset = 'release',
-    [switch]$IncludeTools
+    [switch]$IncludeTools,
+    [string]$MediaInfoDll
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -9,7 +10,12 @@ try {
     foreach ($tool in @('cmake','ninja')) {
         if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool not found on PATH" }
     }
-    cmake --preset $Preset
+    $configureArgs = @('--preset', $Preset)
+    if ($MediaInfoDll) {
+        if (-not (Test-Path -LiteralPath $MediaInfoDll -PathType Leaf)) { throw 'MediaInfo.dll not found' }
+        $configureArgs += "-DSTREAMSHELF_MEDIAINFO_DLL=$MediaInfoDll"
+    }
+    cmake @configureArgs
     if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed' }
     cmake --build --preset $Preset --parallel
     if ($LASTEXITCODE -ne 0) { throw 'C++ build failed' }
