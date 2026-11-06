@@ -146,6 +146,25 @@ int main() {
         check(assemblyCopiedCodecConflict(5,1,"mp4a.40.2").empty(),"unrecognized codec alias waits for probing");
         check(isBitmapSubtitleCodec("hdmv_pgs_subtitle") && !isBitmapSubtitleCodec("subrip"),"bitmap subtitles need recognition before text conversion");
     });
+    test("Original subtitle export selects a compatible format", [] {
+        check(originalSubtitleExtension("subrip")==L".srt", "SubRip remains SubRip");
+        check(originalSubtitleExtension("ass")==L".ass", "ASS remains ASS");
+        check(originalSubtitleExtension("webvtt")==L".vtt", "WebVTT remains WebVTT");
+        check(originalSubtitleExtension("hdmv_pgs_subtitle")==L".sup", "PGS remains bitmap subtitles");
+        check(originalSubtitleExtension("dvd_subtitle")==L".mkv", "DVD subtitles use a compatible container");
+        check(originalSubtitleExtension("mov_text")==L".mp4", "mov_text uses a compatible container");
+        rejects([] { originalSubtitleExtension("unknown_codec"); });
+        Json probe={{"streams",Json::array({
+            {{"index",0},{"codec_type","audio"},{"codec_name","flac"}},
+            {{"index",1},{"codec_type","subtitle"},{"codec_name","subrip"}},
+            {{"index",4},{"codec_type","subtitle"},{"codec_name","ass"}}
+        })}};
+        auto selected=originalSubtitlePlan(probe,4);
+        check(selected.stream==4 && selected.codec=="ass" && selected.extension==L".ass", "select the requested subtitle, not another stream");
+        check(originalSubtitlePlan(probe,-1).stream==1, "choose the first subtitle when no stream index is specified");
+        rejects([&] { originalSubtitlePlan(probe,0); });
+        rejects([&] { originalSubtitlePlan(probe,2); });
+    });
     test("Video filter includes silent and uncertain video without mixing audio", [] {
         Media m; m.category = "Видео без звука"; m.videoOnly = true;
         check(matchesMediaCategory(m, "Видео") && videoSoundLabel(m) == "Без звука", "silent video is visible and labelled");

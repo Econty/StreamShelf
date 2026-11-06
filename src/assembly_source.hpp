@@ -22,6 +22,29 @@ struct AssemblySource {
 inline bool isBitmapSubtitleCodec(const std::string &codec) {
     return codec=="hdmv_pgs_subtitle" || codec=="dvd_subtitle" || codec=="dvb_subtitle" || codec=="xsub";
 }
+// A copied subtitle needs a muxer that supports its codec; never copy the
+// entire input container when the user selected one subtitle stream.
+inline std::wstring originalSubtitleExtension(const std::string &codec) {
+    if(codec=="subrip" || codec=="srt") return L".srt";
+    if(codec=="ass") return L".ass";
+    if(codec=="ssa") return L".ssa";
+    if(codec=="webvtt") return L".vtt";
+    if(codec=="hdmv_pgs_subtitle") return L".sup";
+    if(codec=="dvd_subtitle" || codec=="dvb_subtitle") return L".mkv";
+    if(codec=="mov_text") return L".mp4";
+    throw std::runtime_error("Для этого кодека не найден поддерживаемый формат отдельной дорожки. Выберите преобразование или сохраните исходный файл целиком.");
+}
+struct OriginalSubtitlePlan { int stream; std::string codec; std::wstring extension; };
+inline OriginalSubtitlePlan originalSubtitlePlan(const Json &probe, int selectedStream) {
+    for(const auto &stream:probe.value("streams",Json::array())) {
+        int index=int(number(stream,"index",-1));
+        if(str(stream,"codec_type")=="subtitle" && index>=0 && (selectedStream<0 || selectedStream==index)) {
+            auto codec=str(stream,"codec_name");
+            return {index,codec,originalSubtitleExtension(codec)};
+        }
+    }
+    throw std::runtime_error("Выбранная дорожка субтитров не найдена. Исходник сохранён.");
+}
 inline std::string editedMetadataJson(const std::string &content, const AssemblySource &source) {
     auto data=Json::parse(content,nullptr,false);
     if(!data.is_object())throw std::runtime_error("Редактирование доступно для JSON-объекта. Исходник сохранён.");

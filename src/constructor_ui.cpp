@@ -238,6 +238,8 @@ void UI::constructorPage(Rect r) {
                 c.text("Качество / сжатие",x,sy+132,10,muted,w);
                 choice("export:quality",{x,sy+140,w,36},{"Высокое","Среднее","Компактное"},s.exportQuality,[this,i](int n){app.draft[i].exportQuality=n;});
             }
+            if(s.role==1 && s.exportFormat>0)
+                c.text(s.exportFormat==3?"Перекодирование в FLAC без потерь":"Перекодирование с потерей качества",x,sy+210,10,muted,w);
             if(s.role==2 && s.exportFormat==4) {
                 c.text("Путь к tesseract.exe",x,sy+132,10,muted,w);input("export:ocr-path",{x,sy+140,w-44,34},s.ocrExecutable,"Полный путь к Tesseract");
                 auto sourceId=s.uiId;
@@ -361,6 +363,7 @@ void UI::constructorPage(Rect r) {
             const auto &names=s.role==0?videoNames:audioNames;
             for(int n=0;n<int(names.size());++n)if((s.role==0&&app.videoEncoders[n])||(s.role==1&&app.audioEncoders[n])){if(s.codec==n)selected=int(codecs.size());codecs.push_back(names[n]);codecIds.push_back(n);}
             choice("track:codec",{x,sy+98,w,36},codecs,selected,[this,i,codecIds](int n){if(n>=0&&n<int(codecIds.size()))app.draft[i].codec=codecIds[n];});
+            if(s.role==1)c.text(s.codec==0?"Без перекодирования":s.codec==4?"FLAC: без потерь":"Перекодирование с потерей качества",x,sy+135,10,muted,w);
             c.text("Профиль качества",x,sy+155,10,muted,w);choice("track:quality",{x,sy+163,w,36},{"Высокое","Сбалансированное","Компактное"},s.quality,[this,i](int n){app.draft[i].quality=n;});
             c.text("Битрейт, кбит/с (необязательно)",x,sy+220,10,muted,w);input("track:bitrate",{x,sy+228,w,34},s.bitrate,"Автоматически");
             if(s.role==0){
@@ -433,7 +436,7 @@ void UI::constructorPage(Rect r) {
     if(!compatibility.empty())c.text(compatibility,centerX,bottom-5,10,hex(0xffae70),centerW);
     input("build:name",{r.x,bottom,r.w*.29f,36},app.assemblyName,"Имя итогового файла");
     choice("build:mode",{r.x+r.w*.29f+8,bottom,126,36},{"Сборка","Отдельно"},app.singleExportMode?1:0,[this](int n){app.singleExportMode=n==1;app.constructorModeManual=true;});
-    if(!app.singleExportMode)choice("build:container",{r.x+r.w*.29f+142,bottom,110,36},{"MKV","MP4","MOV","WebM","MP3","M4A","FLAC"},app.muxOptions.container,[this](int n){app.muxOptions.container=n;app.constructorFormatManual=true;if(n>=4)for(auto &source:app.draft)if(source.role==1 && source.codec==0)source.codec=n==4?3:n==5?1:4;});
+    if(!app.singleExportMode)choice("build:container",{r.x+r.w*.29f+142,bottom,110,36},{"MKV","MP4","MOV","WebM","MP3","M4A","FLAC"},app.muxOptions.container,[this](int n){app.muxOptions.container=n;app.constructorFormatManual=true;});
     button("build:start",{r.x+r.w-202,bottom,202,36},app.singleExportMode?"Сохранить файл":"Скачать и собрать",[this]{cancelInput();app.action("enqueueAssembly");},true,!app.draft.empty());
     input("build:destination",{r.x,bottom+46,r.w-108,34},app.destination,"Папка сохранения");
     button("build:folder",{r.x+r.w-98,bottom+46,98,34},"Папка",[this]{app.action("folder");});

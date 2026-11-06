@@ -115,6 +115,12 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         int format=j->exportFormat,quality=j->exportQuality;
         int maximum=source.role==3?3:source.role==2?4:source.role==4?2:source.role==5?1:source.role<2?3:0;
         if(format<0 || format>maximum || quality<0 || quality>2)throw std::runtime_error("Некорректные настройки сохранения.");
+        int subtitleStream=-1;std::string subtitleCodec;
+        std::wstring subtitleExtension;
+        if(source.role==2 && format==0) {
+            auto plan=originalSubtitlePlan(probeFile(input),source.stream);
+            subtitleStream=plan.stream;subtitleCodec=plan.codec;subtitleExtension=plan.extension;
+        }
         std::wstring extension=input.extension().wstring();
         if(format && source.role==0)extension=format==1?L".mkv":format==2?L".mp4":L".webm";
         if(format && source.role==1)extension=format==1?L".mp3":format==2?L".m4a":L".flac";
@@ -122,6 +128,7 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
         else if(source.role==5 && source.metadataEdit)extension=L".json";
         if(format && source.role==3)extension=format==1?L".png":format==2?L".jpg":L".webp";
         if(format && source.role==2)extension=(format==1||format==4)?L".srt":format==2?L".vtt":L".ass";
+        else if(source.role==2)extension=subtitleExtension;
         if(format && source.role==4)extension=format==1?L".json":L".ffmetadata";
         if(extension.empty() || extension.size()>16 || !std::all_of(extension.begin()+1,extension.end(),[](wchar_t c){return (c>=L'a'&&c<=L'z')||(c>=L'A'&&c<=L'Z')||(c>=L'0'&&c<=L'9');}))
             throw std::runtime_error("Не удалось определить формат исходного файла. Исходник сохранён.");
@@ -208,12 +215,16 @@ void App::downloadAssembly(const std::shared_ptr<Job> &j) {
             auto checked=probeFile(output);auto checkedStreams=checked.value("streams",Json::array());
             if(std::none_of(checkedStreams.begin(),checkedStreams.end(),[](const Json &stream){return str(stream,"codec_type")=="subtitle" && str(stream,"codec_name")=="subrip";}))
                 throw std::runtime_error("Не удалось проверить полученный SRT. Исходник сохранён.");
-        } else if(format==0 && source.role<2 && source.stream>=0) {
-            auto result=runFfmpegWithProgress(j,{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-n",L"-i",input.wstring(),L"-map",L"0:"+std::to_wstring(source.stream),L"-c",L"copy",output.wstring()},0);
+        } else if(format==0 && ((source.role<2 && source.stream>=0) || source.role==2)) {
+            int selected=source.role==2?subtitleStream:source.stream;
+            auto result=runFfmpegWithProgress(j,{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-n",L"-i",input.wstring(),L"-map",L"0:"+std::to_wstring(selected),L"-c",L"copy",output.wstring()},0);
             if(j->cancel||stopping)throw std::runtime_error("Отменено");
             if(result.code || !fs::is_regular_file(output))throw std::runtime_error("Не удалось сохранить дорожку в исходном формате. Выберите сборку с совместимым контейнером. Исходник сохранён. "+redact(result.error));
-            auto streams=probeFile(output).value("streams",Json::array());auto type=source.role==0?"video":"audio";
-            if(std::none_of(streams.begin(),streams.end(),[&](const Json &v){return str(v,"codec_type")==type;}))throw std::runtime_error("Не удалось проверить сохранённую дорожку. Исходник сохранён.");
+            auto streams=probeFile(output).value("streams",Json::array());auto type=source.role==0?"video":source.role==1?"audio":"subtitle";
+            if(source.role==2) {
+                if(streams.size()!=1 || str(streams[0],"codec_type")!="subtitle" || str(streams[0],"codec_name")!=subtitleCodec)
+                    throw std::runtime_error("Не удалось проверить исходный кодек выбранной дорожки субтитров. Исходник сохранён.");
+            } else if(std::none_of(streams.begin(),streams.end(),[&](const Json &v){return str(v,"codec_type")==type;}))throw std::runtime_error("Не удалось проверить сохранённую дорожку. Исходник сохранён.");
         } else if(source.role==5 && (format!=0 || source.metadataEdit)) {
             auto content=readFile(input,4*1024*1024);
             if(source.metadataEdit)content=editedMetadataJson(content,source);

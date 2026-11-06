@@ -40,11 +40,6 @@ void App::openConstructor(bool completed) {
     singleExportMode=!sourcePool.empty() && std::all_of(sourcePool.begin(),sourcePool.end(),[](const auto &s){return s.role>=2;});
     constructorOpen=true; downloadChoice=false; requestedPage=0;
     muxOptions={};
-    if(std::any_of(sourcePool.begin(),sourcePool.end(),[](const auto &s){return s.role==1;}) &&
-       std::none_of(sourcePool.begin(),sourcePool.end(),[](const auto &s){return s.role==0;})) {
-        muxOptions.container=5;
-        for(auto &source:sourcePool)if(source.role==1 && audioEncoders[1])source.codec=1;
-    }
 
 }
 void App::updateConstructorRecommendation() {
@@ -54,10 +49,6 @@ void App::updateConstructorRecommendation() {
     if(!constructorModeManual)singleExportMode=!video && !audio;
     if(!constructorFormatManual && !singleExportMode) {
         if(video && muxOptions.container>=4)muxOptions.container=0;
-        else if(audio && !video && muxOptions.container==0) {
-            muxOptions.container=5;
-            if(audioEncoders[1])for(auto &source:draft)if(source.role==1 && source.codec==0)source.codec=1;
-        }
     }
 }
 void App::autoConstruct() {
@@ -194,6 +185,8 @@ void App::enqueueAssembly() {
             if(!source.path.empty()&&!fs::is_regular_file(wide(source.path)))throw std::runtime_error("Локальный файл недоступен");
             int maxFormat=source.role==3?3:source.role==2?4:source.role==4?2:source.role==5?1:source.role<2?3:0;
             if(exportFormat<0||exportFormat>maxFormat)throw std::runtime_error("Проверьте формат сохранения.");
+            if(source.role==2 && exportFormat==0 && !source.probedCodec.empty())
+                (void)originalSubtitleExtension(source.probedCodec);
             if(exportFormat>0 && exportFormat!=4 && source.role==2 && isBitmapSubtitleCodec(source.probedCodec))
                 throw std::runtime_error("Субтитры состоят из изображений: выберите исходный формат или используйте распознавание текста.");
             if(source.role==2 && exportFormat==4) {
