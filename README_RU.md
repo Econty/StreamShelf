@@ -22,31 +22,31 @@ StreamShelf — нативное приложение для работы с м�
 
 Выбор доступных форматов и качества перед загрузкой.
 
-![Обзор медиа в StreamShelf](docs/screenshots/media-overview.png)
+![Обзор медиа в StreamShelf](docs/screenshots/2.5-beta-media-overview.png)
 
 ### Конструктор медиа
 
 Сборка дорожек и настройка метаданных в одном окне.
 
-![Конструктор медиа в StreamShelf](docs/screenshots/constructor.png)
+![Конструктор медиа в StreamShelf](docs/screenshots/2.5-beta-constructor.png)
 
 ### Загрузки
 
 Отслеживание загрузок и собранных файлов.
 
-![Загрузки в StreamShelf](docs/screenshots/downloads.png)
+![Загрузки в StreamShelf](docs/screenshots/2.5-beta-downloads.png)
 
 ### Настройки языка и компонентов
 
-![Настройки языка и компонентов StreamShelf](docs/screenshots/settings.png)
+![Настройки языка и компонентов StreamShelf](docs/screenshots/2.5-beta-settings.png)
 
 ### Подключение браузера
 
-![Настройки подключения браузера в StreamShelf](docs/screenshots/connection.png)
+![Настройки подключения браузера в StreamShelf](docs/screenshots/2.5-beta-connection.png)
 
 ### Расширение StreamShelf Connector
 
-![Расширение StreamShelf Connector в браузере](docs/screenshots/browser-extension.png)
+![Расширение StreamShelf Connector в браузере](docs/screenshots/2.5-beta-browser-extension.png)
 
 ## Поддержать проект
 

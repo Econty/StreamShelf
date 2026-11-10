@@ -52,27 +52,27 @@ StreamShelf 2.5 Beta in English, including the browser connector.
 
 ### Media overview
 
-![StreamShelf media overview](docs/screenshots/media-overview.png)
+![StreamShelf media overview](docs/screenshots/2.5-beta-media-overview.png)
 
 ### Media builder
 
-![StreamShelf media builder](docs/screenshots/constructor.png)
+![StreamShelf media builder](docs/screenshots/2.5-beta-constructor.png)
 
 ### Downloads
 
-![StreamShelf downloads](docs/screenshots/downloads.png)
+![StreamShelf downloads](docs/screenshots/2.5-beta-downloads.png)
 
 ### Language and component settings
 
-![StreamShelf language and component settings](docs/screenshots/settings.png)
+![StreamShelf language and component settings](docs/screenshots/2.5-beta-settings.png)
 
 ### Browser connection
 
-![StreamShelf browser connection settings](docs/screenshots/connection.png)
+![StreamShelf browser connection settings](docs/screenshots/2.5-beta-connection.png)
 
 ### StreamShelf Connector
 
-![StreamShelf Connector in the browser](docs/screenshots/browser-extension.png)
+![StreamShelf Connector in the browser](docs/screenshots/2.5-beta-browser-extension.png)
 
 ## Privacy and limitations
 
