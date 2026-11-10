@@ -22,7 +22,7 @@ Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
-ShowLanguageDialog=auto
+ShowLanguageDialog=yes
 LanguageDetectionMethod=uilanguage
 
 [Languages]
