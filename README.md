@@ -1,72 +1,87 @@
-# StreamShelf 2.4 Beta — Windows x64
+# StreamShelf
 
-Нативное приложение C++/WinAPI с интерфейсом OpenGL. Нужны Windows 10/11 x64 и драйвер с поддержкой OpenGL 3.3. Полностью распакуйте архив в постоянную папку и запустите `StreamShelf.exe`.
+### English | [Русский](README_RU.md)
 
-## Скриншоты
+**Find, download, and assemble media on Windows.**
 
-### Обзор медиа
+StreamShelf is a native Windows application for working with media from your browser and local files. The StreamShelf Connector extension connects the app to your active browser tab.
 
-Выбор доступных форматов и качества перед загрузкой.
+### [All releases](https://github.com/Econty/StreamShelf/releases) | [Русская инструкция](README_RU.md) | [Build guide (русский)](BUILDING.md)
 
-![Обзор медиа в StreamShelf](docs/screenshots/media-overview.png)
+**StreamShelf 2.5 Beta is in development and has not been published yet.** The latest published release is 2.4 Beta. The language features and English interface labels described below are planned for 2.5 Beta; 2.4 Beta uses a Russian interface.
 
-### Конструктор медиа
+## Features
 
-Сборка дорожек и настройка метаданных в одном окне.
+- Analyze a web page and find available video, audio, subtitles, images, and supported streams.
+- Download selected media or assemble tracks into a compatible container, with options for codecs, metadata, chapters, and cover art.
+- Import local files into the media builder, inspect their tracks, and edit supported metadata. MediaInfo provides additional properties when available.
+- Manage downloads, inspect a log, and install or update components from the app.
+- Use StreamShelf Connector with Chrome, Yandex Browser, Firefox, and other compatible browsers. The guided setup covers Chrome, Yandex Browser, and Firefox; other browsers use manual setup.
 
-![Конструктор медиа в StreamShelf](docs/screenshots/constructor.png)
+Availability depends on the site, file, codecs, and container. StreamShelf does not bypass DRM.
 
-### Загрузки
+## Languages
 
-Отслеживание загрузок и собранных файлов.
+StreamShelf 2.5 Beta is being prepared with English and Russian support. On first launch, it selects Russian when the Windows display language is Russian and English otherwise. The language can be changed under **Settings → Language / Язык**.
 
-![Загрузки в StreamShelf](docs/screenshots/downloads.png)
+The 1.0.4 extension being prepared for 2.5 Beta follows the app's language. When disconnected, it uses the browser's interface language, falling back to English for languages other than Russian.
 
-## Поддержать проект
+**Русскоязычным пользователям:** [открыть полную инструкцию на русском](README_RU.md).
 
-**USDT (BEP-20)**
+## Get started
+
+The English interface labels below apply to the upcoming 2.5 Beta. For the published Russian-language release, see the [Russian instructions](README_RU.md).
+
+1. Use Windows 10 or 11 x64 with an OpenGL 3.3-compatible graphics driver. If you downloaded an archive, extract it to a permanent folder and run `StreamShelf.exe`.
+2. Open **Settings → Components** to check and install the tools you need: yt-dlp, FFmpeg, FFprobe, and Deno. These tools are managed in `%LOCALAPPDATA%\StreamShelfNative\tools`.
+3. Open the connection page, select your browser, and start the extension setup. Follow the browser prompts to install and enable StreamShelf Connector. Firefox uses a signed XPI; Chrome and Yandex Browser load the unpacked Chromium extension.
+4. Open StreamShelf Connector in the browser, select **Connect extension**, and review the requested website access. Open a page with media, return to StreamShelf, and select **Analyze**. Deep analysis can look for additional page resources; dynamic streams may require playback or a page reload.
+5. Select media and a destination, then download it or open the builder to arrange tracks and adjust supported settings.
+
+The extension requests broad website access to find page and media resources. Grant it only if you trust the extension. The [Russian extension setup guide](BROWSER-INSTALLER.md) covers the guided flow in more detail.
+
+## Media builder
+
+Add local files in Downloads or directly in the builder, then wait for the scan. You can choose the tracks, their order, supported metadata and encoding options, and a compatible output format. StreamShelf checks supported properties after assembly and keeps sources when it cannot safely preserve required data.
+
+Not every file, tag, codec, or container combination is supported. One cover, one chapter source, and one global metadata source can be selected at a time; some programs and stream groups cannot be safely transferred.
+
+## Screenshots
+
+These screenshots show the Russian interface of an earlier version; the 2.5 Beta interface and labels may differ.
+
+### Media overview
+
+![StreamShelf media overview](docs/screenshots/media-overview.png)
+
+### Media builder
+
+![StreamShelf media builder](docs/screenshots/constructor.png)
+
+### Downloads
+
+![StreamShelf downloads](docs/screenshots/downloads.png)
+
+## Privacy and limitations
+
+When needed for analysis or downloads, the extension sends cookies to the local application. Temporary copies are removed after the operation; cookie values should not appear in the ordinary log. A successful preview or metadata lookup does not guarantee that the complete file is accessible.
+
+Sites with expiring links, browser-bound access, unusual authentication, or DRM may not work. Multiple profiles of the same browser and multi-monitor setups need further testing. Unfinished tasks need to be restarted after reopening the app and may require a new page analysis.
+
+## Build from source
+
+You need a C++20 compiler, Windows SDK, CMake 3.22 or newer, Ninja, and Node.js for the JavaScript tests. From the repository root:
+
+```powershell
+cmake --preset dev
+cmake --build --preset dev --parallel
+ctest --preset dev
+```
+
+For a release build, use the `release` preset. To include MediaInfo in the package, set `STREAMSHELF_MEDIAINFO_DLL` to a compatible signed DLL; otherwise the app looks for it separately. See the [detailed build guide in Russian](BUILDING.md), [Firefox signing notes](FIREFOX-SIGNING.md), and [third-party notices](THIRD_PARTY.md) (Russian).
+
+## Support the project
+
+**USDT (BEP-20)** — BNB Smart Chain:
 
 `0x6C6Ac3ffD6fFC841e9445545073d9E0BB5E15Cb2`
-
-Сеть перевода — BNB Smart Chain (BEP-20).
-
-## Что нового в 2.4 Beta
-
-Универсальный конструктор позволяет собирать и отдельно сохранять медиа, выбирать дорожки, кодеки и совместимый контейнер. При импорте локальных файлов он обнаруживает поддерживаемые дорожки, обложку, главы, метаданные и вложения; встроенные обложки отображаются в карточках загрузок. В конструктор добавлены подробные сведения MediaInfo и расширенное редактирование тегов. Обновлены мастера установки и повторного подключения расширений в Chrome, Яндекс Браузере и Firefox.
-
-Подробный список изменений и ограничений — в [CHANGES-2.4.md](CHANGES-2.4.md).
-
-## Конструктор и метаданные
-
-Добавьте файлы в «Загрузки», выберите их и откройте конструктор, либо добавьте файл непосредственно в конструкторе. Дождитесь анализа; «Автосборка» раскладывает обнаруженные источники по категориям. Вы можете изменить состав, порядок, метаданные и настройки кодирования, выбрать совместимый формат и папку сохранения.
-
-При сохранении программа проверяет доступные характеристики и предупреждает, если выбранный контейнер не сохранил обнаруженные данные. Разбор и сохранение зависят от возможностей FFprobe и FFmpeg; поддержка всех существующих файлов и сочетаний форматов не гарантируется. Сейчас одновременно выбирается одна обложка, один источник глав и один источник общих метаданных. Некоторые программы и группы потоков нельзя безопасно перенести: исходный файл сохраняется, а сборка останавливается с сообщением.
-
-В выпускной архив включена библиотека MediaInfo для просмотра подробных свойств. Часть характеристик определяется содержимым файла и доступна только для чтения; поля метаданных редактируются в конструкторе, а параметры кодирования — во вкладке «Кодирование».
-
-## Инструменты
-
-В разделе «Настройки → Компоненты» можно проверить установленные и доступные версии yt-dlp, FFmpeg, FFprobe и Deno и установить недостающие или устаревшие компоненты. Используемые программой файлы находятся в `%LOCALAPPDATA%\StreamShelfNative\tools`; кнопка «Папка компонентов» открывает именно этот каталог. При удалении файлов из него состояние обновляется автоматически. Удалённые компоненты не восстанавливаются при запуске без действия пользователя.
-
-Загрузка yt-dlp и Deno выполняется с GitHub соответствующих проектов; FFmpeg и FFprobe поставляются парой из сборки gyan.dev. Скачанные архивы и файлы проверяются по опубликованным SHA-256 и запускаются для проверки версии. Во время скачивания отображаются прогресс и объём полученных данных. Автоматическую проверку установленного yt-dlp при запуске можно выключить в настройках. Программа не использует копии из `bundled-tools` или системного PATH для определения установленных компонентов.
-
-В терминале команда `/versions` показывает локальные версии всех четырёх компонентов, а `/help` — доступные команды. Команды также можно запускать по отдельности: `yt-dlp --version`, `ffmpeg -version`, `ffprobe -version`, `deno --version`.
-
-## Подключение и анализ
-
-1. Мастер установки расширения работает только в Яндекс Браузере, Mozilla Firefox и Google Chrome. Выберите браузер и запустите «Установить с подсказками». В Яндекс Браузере и Chrome мастер проведёт через загрузку распакованного расширения, а в Firefox — через установку подписанного XPI. В остальных браузерах установите расширение вручную.
-2. Откройте StreamShelf Connector в меню расширений, нажмите «Подключить расширение» и самостоятельно подтвердите запрос доступа браузера. Разрешение «на всех сайтах» широкое: оно позволяет расширению получать доступ к сайтам и связано с анализом страниц и медиаресурсов. Подтверждайте его только если доверяете расширению. Настройки доступа можно изменить в браузере. После подключения откройте страницу с медиа: активная вкладка определяется автоматически.
-3. Откройте страницу с медиа и вернитесь в StreamShelf. В обзоре проверьте название и адрес и нажмите «Анализировать». «Глубокий анализ» дополнительно ищет данные страницы через расширение; для динамических потоков может потребоваться начать воспроизведение или обновить страницу.
-4. Выберите медиа, папку и нажмите «Скачать». Дополнительные форматы доступны в «Подробностях». Папка сохранения запоминается. «Очистить список» удаляет результаты анализа, но не скачанные файлы; в настройках можно включить сохранение предыдущих результатов.
-
-Закрепление значка в панели браузера необязательно. Для проверки подключения используется ответ расширения через Native Messaging, а не только наличие его карточки. Сценарий установки и ограничения описаны в `BROWSER-INSTALLER.md`, сведения о проверках — в `VERIFICATION.md`.
-
-## Приватность и ограничения
-
-Cookies передаются локально по запросу для анализа и скачивания, временные копии удаляются после операции. Обычный журнал не должен содержать значения cookies. Сайты с истёкшими ссылками, привязкой доступа к браузеру, нестандартной авторизацией или DRM могут не поддерживаться; DRM не обходится. Успешное превью или получение метаданных не гарантирует доступность всего файла.
-
-Работа в разных профилях одного и того же браузера и многомониторная конфигурация ещё требуют проверки; определение браузера по исполняемому файлу само по себе не отличает профили. Незавершённые задачи после перезапуска требуют повторного запуска. Запросу на скачивание могут понадобиться новые данные вкладки и повторный анализ.
-
-## Сборка
-
-Для Windows-сборки необходимы компилятор C++20, Windows SDK, CMake и Ninja. Для включения MediaInfo в установочный комплект задайте путь к подписанной библиотеке параметром CMake `STREAMSHELF_MEDIAINFO_DLL`; без него приложение ищет MediaInfo отдельно. Порядок настройки, сборки, тестирования и упаковки описан в [BUILDING.md](BUILDING.md). Исходники не содержат .NET-проекта. Инструменты yt-dlp, FFmpeg/FFprobe и Deno для поставки подготавливаются отдельно.
