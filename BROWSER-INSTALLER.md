@@ -1,25 +1,21 @@
-# StreamShelf: установка расширения, версия 4
+# StreamShelf Connector setup
 
-Мастер установки расширения доступен только для Яндекс Браузера, Mozilla Firefox и Google Chrome. Выберите браузер и профиль в разделе «Браузер» и нажмите «Установить с подсказками». Для остальных браузеров предусмотрена ручная установка.
+### English | [Русский](BROWSER-INSTALLER_RU.md)
 
-В Яндекс Браузере и Chrome мастер проводит через режим разработчика, загрузку распакованного расширения, проверку установки и подключение вкладки. В Firefox мастер проводит через установку подписанного XPI в менеджере дополнений и проверку подключения.
+The guided extension setup is available for Google Chrome, Yandex Browser, and Mozilla Firefox. In the Connection page, select the browser and profile, then choose **Install with guide**. Other compatible browsers require manual installation.
 
-После загрузки мастер ждёт подтверждённое появление расширения. Отсутствие карточки через несколько секунд больше не отправляет установку по кругу. Если вы отменили выбор папки или браузер показал ошибку, нажмите явную кнопку «Повторить загрузку».
+For Chrome and Yandex Browser, the guide walks through developer mode, loading the unpacked extension, checking installation, and connecting the tab. For Firefox, it guides you through installing the signed XPI in the add-ons manager and checking the connection.
 
-Если StreamShelf Connector выключен, появляется шаг «Включите расширение» с обводкой его переключателя либо кнопки включения в отдельном окне браузера. Проверьте разрешения и подтвердите включение самостоятельно. После подтверждённого включения мастер перейдёт к подключению. Уже включённое расширение пропускает этот этап автоматически.
+The guide waits until it confirms that the extension has appeared. If you cancel folder selection or the browser reports an error, use **Retry loading**. If StreamShelf Connector is disabled, the guide highlights the switch or the enable button. Review and confirm browser prompts yourself; an already enabled extension skips that step.
 
-В проверке 29.10.2026 Chrome и Яндекс включили расширение автоматически при загрузке, поэтому оба перешли с проверки установки к подключению. Это нормальное поведение.
+The extension folder opens in the system file dialog. Select the final **Select Folder** button yourself. The guide's overlay lets clicks pass through and remains visible while switching pages and windows. **Open page** returns to the extension setup page. Closing the guide does not close the browser.
 
-Папка расширения автоматически открывается в системном диалоге. Финальную кнопку «Выбор папки» нажимает пользователь. Постоянная обводка пропускает клики; панель остаётся видимой при переключении страниц и окон. «Открыть страницу» возвращает к установке. Закрытие мастера не закрывает браузер.
+To connect, open StreamShelf Connector from the browser's extensions menu and select **Connect extension**. Read the browser's request for access to all websites and decide whether to grant it. Then open the page you want to analyze: the active tab is selected automatically. StreamShelf verifies the connection through Native Messaging rather than relying only on the extension card.
 
-Для подключения откройте StreamShelf Connector в меню расширений браузера и нажмите «Подключить расширение». Ознакомьтесь с запросом браузера и самостоятельно решите, предоставлять ли доступ ко всем сайтам. После подключения откройте нужную страницу: активная вкладка определяется автоматически. Статус связи в программе подтверждает Native Messaging.
+The guide uses C++20, WinAPI, and UI Automation. The Chromium extension is loaded from `extensions/chromium-development` beside the application. The guide does not rewrite browser installation or enablement settings. As a fallback it reads the state of its own fixed extension ID in Preferences/Secure Preferences; live interface state takes precedence, and empty leftover entries are not treated as an installation.
 
-Технически: C++20, WinAPI, GDI, UI Automation, постоянная папка %LOCALAPPDATA%/StreamShelfNative/connector/extensions/chromium. Настройки установки и включения браузера не переписываются. Из Preferences/Secure Preferences читается только состояние фиксированного ID собственного расширения как резервный источник; живое состояние интерфейса имеет приоритет. Пустые остаточные записи не считаются установкой.
+To build, run `cmake --preset dev` followed by `cmake --build --preset dev`. Native desktop tests for the guide can be enabled with the CMake option `STREAMSHELF_NATIVE_GUIDE_TESTS=ON`.
 
-Сборка: `cmake --preset dev`, затем `cmake --build --preset dev`. Нативные проверки мастера включаются параметром CMake `STREAMSHELF_NATIVE_GUIDE_TESTS=ON`.
+The end-to-end installation check with manual confirmations can be run with `scripts/Test-BrowserGuide.ps1 -Browser chrome -InstallationFlow` (or `yandex`). It records the initially absent extension, the observed steps, and confirmed enablement; simply opening the page is not considered a successful installation.
 
-Сквозной тест установки с ручными подтверждениями: scripts/Test-BrowserGuide.ps1 -Browser chrome -InstallationFlow (либо yandex). Программа фиксирует исходное отсутствие расширения, переходы и подтверждённое включение; одно открытие страницы не считается успешной установкой.
-
-Сценарий ChromeExtensionInstaller переработан в нативный модуль; MIT-уведомление в licenses/ChromeExtensionInstaller-LICENSE.txt.
-
-Мастер проверяет соединение с расширением. Контур анимирован; вокруг цели включается затемнение с просветами, пропускающее клики. Уменьшение анимаций сохраняет статическую обводку. Состояние расширения проверяется через Native Messaging; несколько профилей одного браузера требуют отдельной проверки.
+The guide checks the extension connection and uses an animated outline and dimmed overlay around the target. Reduced motion keeps a static outline. Connection state is checked through Native Messaging; multiple profiles of the same browser require additional testing. The ChromeExtensionInstaller approach was adapted into a native module; its MIT notice is in `licenses/ChromeExtensionInstaller-LICENSE.txt`.

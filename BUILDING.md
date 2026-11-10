@@ -1,6 +1,8 @@
-# Сборка StreamShelf
+# Building StreamShelf
 
-Нужны Windows 10/11 x64, CMake 3.22 или новее, Ninja, компилятор C++20 (MSVC с Windows SDK либо LLVM-MinGW) и Node.js с поддержкой `node --test` (рекомендуется Node.js 22). Исходники не содержат .NET-проекта. Используйте инструменты x64 и запускайте команды из корня репозитория. Для MSVC откройте x64 Native Tools Command Prompt либо Developer PowerShell с активированными инструментами MSVC; для LLVM-MinGW добавьте его `bin` в PATH.
+### English | [Русский](BUILDING_RU.md)
+
+Build on Windows 10/11 x64 with CMake 3.22 or newer, Ninja, a C++20 compiler (MSVC with the Windows SDK or LLVM-MinGW), and Node.js with `node --test` support (Node.js 22 is recommended). This repository does not contain a .NET project. Use x64 tools and run commands from the repository root. For MSVC, open an x64 Native Tools Command Prompt or Developer PowerShell with the MSVC tools active; for LLVM-MinGW, add its `bin` directory to `PATH`.
 
 ```powershell
 cmake --preset dev
@@ -8,9 +10,11 @@ cmake --build --preset dev --parallel
 ctest --preset dev
 ```
 
-Повторите эти команды после изменений: Ninja пересоберёт затронутые файлы. Готовое приложение и папки Assets и extensions находятся в `build/dev`. Конфигурация `release` работает аналогично: замените `dev` на `release`. Если Node.js отсутствует при настройке CMake, JavaScript-тесты не регистрируются; установите Node.js и запустите настройку заново. CTest выводит только фактически зарегистрированные тесты.
+Repeat these commands after making changes; Ninja rebuilds the affected files. The application and its `Assets` and `extensions` directories are placed in `build/dev`. The release configuration works the same way: use `release` instead of `dev`. If Node.js is unavailable during configuration, the JavaScript tests are not registered; install Node.js and configure again. CTest reports only the tests that were registered.
 
-Для включения MediaInfo в выпускной комплект задайте CMake параметр `STREAMSHELF_MEDIAINFO_DLL` с полным путём к совместимой подписанной `MediaInfo.dll`. При установке библиотека будет скопирована рядом с `StreamShelf.exe`, а уведомление поставщика — из `licenses/MediaInfo-License.html`. Например, для установленной MediaInfo:
+## Including MediaInfo
+
+To include MediaInfo in a release package, set `STREAMSHELF_MEDIAINFO_DLL` to the full path of a compatible, signed `MediaInfo.dll`. Installation copies it next to `StreamShelf.exe` and includes the provider's license and notices from `licenses/MediaInfo-License.html`. For example:
 
 ```powershell
 cmake --preset release "-DSTREAMSHELF_MEDIAINFO_DLL=C:/Program Files/MediaInfo/MediaInfo.dll"
@@ -18,22 +22,22 @@ cmake --build --preset release --parallel
 ctest --preset release
 ```
 
-Без указанного параметра DLL в комплект не включается; приложение будет искать её в своей папке или стандартной папке установки MediaInfo. При подготовке архива проверяйте архитектуру, подпись и лицензии фактической библиотеки.
+Without this parameter the DLL is not packaged; the application looks for MediaInfo beside the executable or in its standard installation directory. Before distribution, verify the architecture, signature, and licenses of the actual library.
 
-Для установки в `release/StreamShelf-Native`:
+## Staging a release
 
 ```powershell
 cmake --install build/release --prefix release/StreamShelf-Native
-# Или выполнить настройку, сборку, тесты и установку одной командой:
+# Or configure, build, test, and stage in one command:
 ./scripts/Build.ps1 -Preset release
 ```
 
-Для отключения тестов используйте отдельную папку сборки, например `cmake -S . -B build/app -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF`. По умолчанию среда C++ связывается статически; `-DSTREAMSHELF_STATIC_RUNTIME=OFF` выбирает динамическую среду. Для распространения динамической сборки потребуются совместимые runtime DLL или соответствующий Microsoft Visual C++ Redistributable. Убедитесь в работоспособности комплекта на чистой машине.
+To disable tests, use a separate build directory, for example `cmake -S . -B build/app -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF`. The C++ runtime is linked statically by default; `-DSTREAMSHELF_STATIC_RUNTIME=OFF` selects the dynamic runtime. A distributed dynamic build requires compatible runtime DLLs or the appropriate Microsoft Visual C++ Redistributable. Check the package on a clean machine.
 
-Интерактивный тест мастера установки требует доступного рабочего стола и включается параметром `-DSTREAMSHELF_NATIVE_GUIDE_TESTS=ON` при настройке. Он не входит в обычный CI. Поддерживаемый способ сборки использует CMake presets и скрипт `scripts/Build.ps1`.
+The interactive extension setup guide test requires an available desktop and is enabled with the CMake option `-DSTREAMSHELF_NATIVE_GUIDE_TESTS=ON`. It is not part of the regular CI. CMake presets and `scripts/Build.ps1` are the supported build path.
 
-## Инструменты и расширения для выпуска
+## Tools and browser extensions
 
-Программа устанавливает yt-dlp, FFmpeg/FFprobe и Deno через раздел «Настройки → Компоненты» в `%LOCALAPPDATA%\StreamShelfNative\tools`. Компоненты из `bundled-tools` программа не использует. См. README и THIRD_PARTY.md.
+StreamShelf installs yt-dlp, FFmpeg/FFprobe, and Deno through **Settings → Components** into `%LOCALAPPDATA%\StreamShelfNative\tools`. It does not use copies from `bundled-tools` as installed components. See the [README](README.md) and [third-party notices](THIRD_PARTY.md) (Russian).
 
-В комплект входят исходники Chromium-расширения и имеющийся подписанный Firefox XPI. После изменения исходников Firefox прежний XPI не обновляется автоматически: для выпуска требуется новая подписанная версия, см. FIREFOX-SIGNING.md. Для подтверждения выпуска отдельно проверьте установку, тесты и загрузку медиа на Windows; исторический VERIFICATION.md не является результатом для текущего коммита.
+The package includes the Chromium extension source and a signed Firefox XPI. Changing the Firefox source does not automatically update the signed XPI: a new signed version is required for release. See [Firefox signing](FIREFOX-SIGNING.md). Verify installation, tests, and media downloads on Windows for the actual build; [VERIFICATION.md](VERIFICATION.md) is not a substitute for checking the current commit.

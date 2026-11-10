@@ -6,7 +6,7 @@
 
 StreamShelf is a native Windows application for working with media from your browser and local files. The StreamShelf Connector extension connects the app to your active browser tab.
 
-### [All releases](https://github.com/Econty/StreamShelf/releases) | [Русская инструкция](README_RU.md) | [Build guide (русский)](BUILDING.md)
+### [Releases](https://github.com/Econty/StreamShelf/releases) | [Getting started](#get-started) ([Русский](README_RU.md#подключение-и-анализ)) | [Build guide](BUILDING.md) ([Русский](BUILDING_RU.md))
 
 **StreamShelf 2.5 Beta** is available on the [releases page](https://github.com/Econty/StreamShelf/releases). The installer is not digitally signed.
 
@@ -38,7 +38,7 @@ The interface labels below apply to 2.5 Beta. See also the [Russian instructions
 4. Open StreamShelf Connector in the browser, select **Connect extension**, and review the requested website access. Open a page with media, return to StreamShelf, and select **Analyze**. Deep analysis can look for additional page resources; dynamic streams may require playback or a page reload.
 5. Select media and a destination, then download it or open the builder to arrange tracks and adjust supported settings.
 
-The extension requests broad website access to find page and media resources. Grant it only if you trust the extension. The [Russian extension setup guide](BROWSER-INSTALLER.md) covers the guided flow in more detail.
+The extension requests broad website access to find page and media resources. Grant it only if you trust the extension. See the [extension setup guide](BROWSER-INSTALLER.md) ([Русский](BROWSER-INSTALLER_RU.md)) for more details.
 
 ## Media builder
 
@@ -90,7 +90,7 @@ cmake --build --preset dev --parallel
 ctest --preset dev
 ```
 
-For a release build, use the `release` preset. To include MediaInfo in the package, set `STREAMSHELF_MEDIAINFO_DLL` to a compatible signed DLL; otherwise the app looks for it separately. See the [detailed build guide in Russian](BUILDING.md), [Firefox signing notes](FIREFOX-SIGNING.md), and [third-party notices](THIRD_PARTY.md) (Russian).
+For a release build, use the `release` preset. To include MediaInfo in the package, set `STREAMSHELF_MEDIAINFO_DLL` to a compatible signed DLL; otherwise the app looks for it separately. See the [build guide](BUILDING.md) ([Русский](BUILDING_RU.md)), [Firefox signing notes](FIREFOX-SIGNING.md), and [third-party notices](THIRD_PARTY.md) (Russian).
 
 ## Support the project
 
