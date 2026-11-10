@@ -48,7 +48,7 @@ Not every file, tag, codec, or container combination is supported. One cover, on
 
 ## Screenshots
 
-These screenshots show the Russian interface; the current interface and labels may differ.
+StreamShelf 2.5 Beta in English, including the browser connector.
 
 ### Media overview
 
@@ -61,6 +61,18 @@ These screenshots show the Russian interface; the current interface and labels m
 ### Downloads
 
 ![StreamShelf downloads](docs/screenshots/downloads.png)
+
+### Language and component settings
+
+![StreamShelf language and component settings](docs/screenshots/settings.png)
+
+### Browser connection
+
+![StreamShelf browser connection settings](docs/screenshots/connection.png)
+
+### StreamShelf Connector
+
+![StreamShelf Connector in the browser](docs/screenshots/browser-extension.png)
 
 ## Privacy and limitations
 
