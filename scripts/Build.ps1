@@ -23,6 +23,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
     cmake --install "build/$Preset" --prefix release/StreamShelf-Native
     if ($LASTEXITCODE -ne 0) { throw 'Install failed' }
+    # Remove obsolete packages from a staging directory reused by earlier builds.
+    foreach ($oldVersion in @('1.0.2', '1.0.3')) {
+        $oldXpi = Join-Path 'release/StreamShelf-Native/extensions/firefox-signed' "StreamShelf-Connector-$oldVersion.xpi"
+        if (Test-Path -LiteralPath $oldXpi -PathType Leaf) { Remove-Item -LiteralPath $oldXpi }
+    }
     if ($IncludeTools) {
         if (-not (Test-Path artifacts/bundled-tools/checksums.json)) { throw 'Verified tools bundle missing' }
         Copy-Item artifacts/bundled-tools release/StreamShelf-Native -Recurse -Force

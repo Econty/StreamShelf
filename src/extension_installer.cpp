@@ -366,7 +366,7 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
             if (!contains(name, {L"закрепить", L"открепить", L"pin to", L"unpin", L"управление", L"manage"}) &&
                 (type == UIA_MenuItemControlTypeId || toolbarAncestor(automation, element.p))) scene.toolbarAction = {rect, true};
         }
-        if (button && (name == L"подключить расширение" || name == L"подключить текущую вкладку" || name == L"подключить выбранную вкладку")) { scene.connectorPopup = true; scene.popupConnect = {rect, true}; }
+        if (button && connectorPopupButton(name)) { scene.connectorPopup = true; scene.popupConnect = {rect, true}; }
         if (button && (name == L"разрешить" || name == L"allow")) popupAllow = {rect, true};
         if (button && contains(name, {L"включить", L"enable", L"turn on", L"добавить расширение", L"add extension"}) && !contains(name, {L"разработчик", L"developer"})) popupEnable = {rect, true};
         if (!dialog && (button || type == UIA_CheckBoxControlTypeId || type == UIA_CustomControlTypeId) && contains(name, {L"режим разработчика", L"developer mode"})) {
@@ -692,7 +692,7 @@ struct ExtensionInstaller::Impl {
     HDC panelDc{};
     HGLRC panelContext{};
     Canvas canvas;
-    bool canvasReady = false, lightTheme = false;
+    bool canvasReady = false, lightTheme = false, english = false;
     float mouseX = -1, mouseY = -1;
     int pressedButton = -1, focusedButton = 0;
     std::array<Spring, 4> buttonHover{}, buttonPress{};
@@ -717,6 +717,45 @@ struct ExtensionInstaller::Impl {
     }
     void setNotice(const std::wstring &value) {
         if (notice != value) { notice = value; if (panel) InvalidateRect(panel, nullptr, FALSE); }
+    }
+    std::wstring displayNotice(const std::wstring &value) const {
+        if (!english) return value;
+        static const std::map<std::wstring, std::wstring> translations = {
+            {L"Открываю выбранный браузер и страницу расширений…", L"Opening the selected browser and its extensions page…"},
+            {L"Страница не подтверждена. Нажмите «Открыть страницу» для повтора.", L"The page could not be verified. Click Open page to try again."},
+            {L"Не удалось проверить открытые вкладки. Переключитесь на страницу расширений вручную.", L"Could not check open tabs. Switch to the extensions page manually."},
+            {L"Вкладка расширений найдена. Переключитесь на неё, чтобы продолжить.", L"The extensions tab was found. Switch to it to continue."},
+            {L"Переключитесь на открытую вкладку расширений, чтобы продолжить.", L"Switch to the open extensions tab to continue."},
+            {L"Браузер открыт, но страница расширений не подтверждена. Повторите открытие.", L"The browser is open, but the extensions page could not be verified. Open it again."},
+            {L"Ожидаю адресную строку окна выбора папки…", L"Waiting for the address bar in the folder picker…"},
+            {L"Перетащите окно мастера, чтобы открыть нужную кнопку.", L"Move this guide window to reveal the highlighted button."},
+            {L"Подключите расширение и подтвердите доступ к сайтам, если согласны.", L"Connect the extension and allow website access if you agree."},
+            {L"Ожидаю соединение. Если оно не появилось, нажмите значок StreamShelf в панели Firefox и подключите расширение.", L"Waiting for a connection. If it does not appear, click the StreamShelf icon in Firefox and connect the extension."},
+            {L"Проверяю связь. Если окно расширения не открылось, нажмите его значок в панели Firefox.", L"Checking the connection. If the extension did not open, click its icon in Firefox."},
+            {L"Выберите файл StreamShelf Connector в списке.", L"Select the StreamShelf Connector file in the list."},
+            {L"Файл указан. Нажмите кнопку «Открыть».", L"The file is selected. Click Open."},
+            {L"Откройте папку с XPI вручную или вставьте путь в поле имени файла.", L"Open the XPI folder manually or paste its path into the file name field."},
+            {L"Открываю папку с подписанным файлом расширения…", L"Opening the folder containing the signed extension…"},
+            {L"Ожидаю подтверждение Firefox. Если выбор отменён, откройте меню установки снова.", L"Waiting for Firefox confirmation. If you cancelled, open the installation menu again."},
+            {L"Включите StreamShelf Connector в списке дополнений Firefox.", L"Enable StreamShelf Connector in the Firefox add-ons list."},
+            {L"Страница расширений открыта и проверена.", L"The extensions page is open and verified."},
+            {L"Папка расширения открыта. Нажмите обведённую кнопку «Выбор папки».", L"The extension folder is open. Click the highlighted Select Folder button."},
+            {L"Вставьте путь вручную в адресную строку окна папки (Alt+D), затем Enter.", L"Paste the path into the folder picker address bar (Alt+D), then press Enter."},
+            {L"Обновите StreamShelf Connector на странице расширений (значок обновления на карточке), затем подключите расширение.", L"Reload StreamShelf Connector on the extensions page, then connect it."},
+            {L"Открываю окно расширения автоматически. Если оно не появилось, нажмите «Проверить связь».", L"Opening the extension automatically. If it does not appear, click Check connection."},
+            {L"Открыта другая страница. Нажмите «Открыть страницу», чтобы продолжить.", L"A different page is open. Click Open page to continue."},
+            {L"Найдите карточку StreamShelf Connector и прокрутите её в видимую область: мастер ищет её переключатель.", L"Find the StreamShelf Connector card and scroll it into view so the guide can find its switch."},
+            {L"Перетащите окно мастера, чтобы открыть доступ к переключателю браузера.", L"Move the guide window to reveal the browser switch."},
+            {L"Не удалось скопировать путь. Повторите попытку.", L"Could not copy the path. Try again."},
+            {L"Путь скопирован.", L"Path copied."},
+            {L"Проверяю связь и открываю окно StreamShelf Connector. Подтвердите доступ к сайтам, если согласны.", L"Checking the connection and opening StreamShelf Connector. Allow website access if you agree."},
+            {L"Не удалось прочитать интерфейс. Повторите действие в браузере.", L"Could not read the browser interface. Try the action again."},
+            {L"Следуйте подсказкам в браузере — шаги меняются автоматически.", L"Follow the browser instructions. The steps advance automatically."}
+        };
+        if (auto it = translations.find(value); it != translations.end()) return it->second;
+        const std::wstring prefix = L"Не удалось заполнить адресную строку. Нажмите «Открыть страницу». Код: ";
+        if (value.rfind(prefix, 0) == 0) return L"Could not fill the address bar. Click Open page. Code: " + value.substr(prefix.size());
+        return value;
     }
     void launchBrowser() {
         std::wstring command = quoteWide(exe);
@@ -989,6 +1028,28 @@ struct ExtensionInstaller::Impl {
             L"Окно расширения откроется автоматически. Нажмите «Подключить расширение», затем прочитайте запрос Firefox и подтвердите доступ к сайтам, если согласны.",
             L"Связь с расширением подтверждена."
         };
+        const wchar_t *titlesEn[] = {L"Enable developer mode", L"Load the extension", L"Opening the extension folder", L"Confirm the folder", L"Checking installation", L"Enable the extension", L"Connect the extension", L"Browser connected"};
+        const wchar_t *bodiesEn[] = {
+            L"Click the highlighted Developer mode switch. The next step appears automatically.",
+            L"Click the highlighted Load unpacked button. The guide will open the correct folder in the dialog.",
+            L"The StreamShelf Connector folder will open in the folder picker. Keep it open until Select Folder is highlighted.",
+            L"Click the highlighted Select Folder button. The next step appears when the extension card is found.",
+            L"Waiting for StreamShelf Connector. Find its card if installed. If you cancelled or saw an error, click Retry loading.",
+            L"Enable the switch on the StreamShelf Connector card. If a confirmation opens, review permissions and click the highlighted Enable button.",
+            L"StreamShelf Connector will open automatically. Click Connect extension, then review and allow website access if you agree.",
+            L"The extension connection is confirmed."
+        };
+        const wchar_t *firefoxTitlesEn[] = {L"Open Firefox add-ons", L"Open the settings menu", L"Install add-on from file", L"Select the signed file", L"Confirm installation", L"Enable the extension", L"Connect the extension", L"Browser connected"};
+        const wchar_t *firefoxBodiesEn[] = {
+            L"Open about:addons and select Extensions.",
+            L"Click the Tools for all add-ons gear on the extensions page.",
+            L"Choose Install Add-on From File in the menu.",
+            L"The guide will open the extension folder. Select the highlighted XPI file, then click the highlighted Open button.",
+            L"Review Firefox permissions and click Add if you agree.",
+            L"Enable StreamShelf Connector on the Firefox add-ons page.",
+            L"The extension will open automatically. Click Connect extension, then review and allow website access if you agree.",
+            L"The extension connection is confirmed."
+        };
         int s = std::clamp(int(flow.stage), 0, 7);
         auto now = GetTickCount64(); float dt = lastFrame ? std::min(.1f, float(now - lastFrame) / 1000.f) : .016f; lastFrame = now;
         if (paintedStage != s) { paintedStage = s; stageMotion.value = reducedMotion ? 1 : 0; stageMotion.velocity = 0; }
@@ -1000,16 +1061,16 @@ struct ExtensionInstaller::Impl {
         canvas.begin(width, height, r.right, r.bottom);
         canvas.rect({0, 0, width, height}, 0, bg);
         canvas.border({8, 8, width - 16, height - 16}, 20, edge, panelInk);
-        canvas.text("STREAMSHELF  /  УСТАНОВКА РАСШИРЕНИЯ", 24, 32, 11, accent, width - 48);
+        canvas.text(english ? "STREAMSHELF  /  EXTENSION SETUP" : "STREAMSHELF  /  УСТАНОВКА РАСШИРЕНИЯ", 24, 32, 11, accent, width - 48);
         canvas.text(utf8(browserName), 24, 57, 12, muted, width - 48);
-        canvas.text(utf8(firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall) ? L"Расширение добавлено" : firefox ? firefoxTitles[s] : titles[s]), 24, 94 + (1 - t) * 4, 21, ink.alpha(t), width - 48);
-        wrapped(utf8(firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall) ? L"Нажмите «OK» в уведомлении Firefox. Затем при необходимости включите расширение переключателем в его карточке." : firefox ? firefoxBodies[s] : bodies[s]), 24, 128 + (1 - t) * 4, width - 48, 13, 4, ink.alpha(t));
+        canvas.text(utf8(firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall) ? (english ? L"Extension added" : L"Расширение добавлено") : firefox ? (english ? firefoxTitlesEn[s] : firefoxTitles[s]) : (english ? titlesEn[s] : titles[s])), 24, 94 + (1 - t) * 4, 21, ink.alpha(t), width - 48);
+        wrapped(utf8(firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall) ? (english ? L"Click OK in the Firefox notification. Then enable the extension on its card if needed." : L"Нажмите «OK» в уведомлении Firefox. Затем при необходимости включите расширение переключателем в его карточке.") : firefox ? (english ? firefoxBodiesEn[s] : firefoxBodies[s]) : (english ? bodiesEn[s] : bodies[s])), 24, 128 + (1 - t) * 4, width - 48, 13, 4, ink.alpha(t));
         canvas.border({20, 218, width - 40, 45}, 12, edge, bg.alpha(.7f));
-        canvas.text(firefox ? "Подписанный файл расширения" : "Папка расширения", 32, 235, 10, muted, width - 64);
+        canvas.text(firefox ? (english ? "Signed extension file" : "Подписанный файл расширения") : (english ? "Extension folder" : "Папка расширения"), 32, 235, 10, muted, width - 64);
         canvas.text(utf8(extension.wstring()), 32, 253, 11, ink, width - 64);
-        wrapped(utf8(notice.empty() ? L"Следуйте подсказкам в браузере — шаги меняются автоматически." : notice), 24, 286, width - 48, 12, 3, muted);
+        wrapped(utf8(displayNotice(notice.empty() ? L"Следуйте подсказкам в браузере — шаги меняются автоматически." : notice)), 24, 286, width - 48, 12, 3, muted);
         for (int i = 0; i < 7; ++i) canvas.rect({24 + i * (width - 48) / 7, height - 112, (width - 48) / 7 - 5, 3}, 2, i <= s ? accent : edge);
-        const std::string names[] = {"Копировать путь", "Открыть папку", !firefox && s == int(GuideStage::Verify) ? "Повторить загрузку" : s >= int(GuideStage::Connect) ? "Проверить связь" : "Открыть страницу", "Закрыть"};
+        const std::string names[] = {english ? "Copy path" : "Копировать путь", english ? "Open folder" : "Открыть папку", !firefox && s == int(GuideStage::Verify) ? (english ? "Retry loading" : "Повторить загрузку") : s >= int(GuideStage::Connect) ? (english ? "Check connection" : "Проверить связь") : (english ? "Open page" : "Открыть страницу"), english ? "Close" : "Закрыть"};
         for (int i = 0; i < 4; ++i) {
             auto box = buttonRect(i, width, height); auto &hover = buttonHover[i]; auto &press = buttonPress[i];
             hover.target = box.contains(mouseX, mouseY) ? 1 : 0; press.target = pressedButton == i ? 1 : 0;
@@ -1472,7 +1533,7 @@ struct ExtensionInstaller::Impl {
         MONITORINFO monitor{sizeof(monitor)}; GetMonitorInfoW(MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST), &monitor);
         UINT dpi = parent ? GetDpiForWindow(parent) : GetDpiForSystem(); scale = std::max(96u, dpi) / 96.f;
         scale = std::min(scale, std::min((monitor.rcWork.right - monitor.rcWork.left) / 510.f, (monitor.rcWork.bottom - monitor.rcWork.top) / 510.f));
-        panel = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, panelClass, L"StreamShelf · Установка расширения",
+        panel = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, panelClass, english ? L"StreamShelf · Extension setup" : L"StreamShelf · Установка расширения",
             WS_POPUP | WS_CLIPCHILDREN, monitor.rcWork.right - px(500), monitor.rcWork.bottom - px(490), px(480), px(470), nullptr, nullptr, cls.hInstance, &panelBinding);
         if (!panel) throw std::runtime_error("Не удалось открыть мастер установки");
         updatePanelRegion(panel);
@@ -1578,6 +1639,10 @@ void ExtensionInstaller::setExtensionReloadRequired(bool required) { if (impl) {
 void ExtensionInstaller::setRetryConnection(std::function<void()> callback) { if (impl) impl->retryConnection = std::move(callback); }
 void ExtensionInstaller::setOpenSetup(std::function<bool()> callback) { if (impl) impl->openSetup = std::move(callback); }
 void ExtensionInstaller::setExtensionRunning(bool running) { if (impl) impl->extensionRunning = running; }
+void ExtensionInstaller::setLanguage(const std::string &language) {
+    english = language == "en";
+    if (impl) { impl->english = english; if (IsWindow(impl->panel)) { SetWindowTextW(impl->panel, english ? L"StreamShelf · Extension setup" : L"StreamShelf · Установка расширения"); InvalidateRect(impl->panel, nullptr, FALSE); } }
+}
 void ExtensionInstaller::close() { if (active()) SendMessageW(impl->panel, WM_CLOSE, 0, 0); }
 Json ExtensionInstaller::diagnostics() const {
     if (!impl) return {{"active", false}};
@@ -1611,7 +1676,7 @@ void ExtensionInstaller::start(HWND owner, const Browser &browser, const Profile
     auto kind = guidedBrowser(browser);
     auto arguments = extensionLaunchArguments(kind, profile);
     if (kind == GuidedBrowser::Firefox ? !fs::is_regular_file(extension) : !fs::is_regular_file(extension / L"manifest.json")) throw std::runtime_error("Сначала подготовьте расширение");
-    auto next = std::make_unique<Impl>(); next->reducedMotion = reduced; next->lightTheme = light;
+    auto next = std::make_unique<Impl>(); next->reducedMotion = reduced; next->lightTheme = light; next->english = english;
     if (profile) next->profileDirectory = wide(profile->path);
     else if (kind != GuidedBrowser::Firefox) {
         PWSTR local = nullptr;

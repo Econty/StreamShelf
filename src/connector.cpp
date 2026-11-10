@@ -91,7 +91,11 @@ static std::wstring userSid() {
 std::wstring pipeName() {
     DWORD session = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &session);
+#ifdef STREAMSHELF_UI_PREVIEW
+    return L"\\\\.\\pipe\\StreamShelfPreview-" + userSid() + L"-" + std::to_wstring(session);
+#else
     return L"\\\\.\\pipe\\StreamShelfNative-" + userSid() + L"-" + std::to_wstring(session);
+#endif
 }
 void Session::send(const Json &j) {
     std::lock_guard lock(writeMutex);
@@ -221,6 +225,9 @@ void Connector::start() {
                             s->id = str(j, "instanceId");
                             s->browser = str(j, "browser");
                         }
+                        if (j.contains("capabilities") && j["capabilities"].is_array())
+                            for (const auto &capability : j["capabilities"])
+                                if (capability.is_string() && capability.get<std::string>() == "language") s->languageSupported = true;
                         s->send({{"type", "helloAck"}, {"protocol", 1}, {"version", ConnectorVersion}});
                         s->verifyConnection();
                         if (message)

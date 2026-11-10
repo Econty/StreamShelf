@@ -16,7 +16,7 @@
 
 Технически: C++20, WinAPI, GDI, UI Automation, постоянная папка %LOCALAPPDATA%/StreamShelfNative/connector/extensions/chromium. Настройки установки и включения браузера не переписываются. Из Preferences/Secure Preferences читается только состояние фиксированного ID собственного расширения как резервный источник; живое состояние интерфейса имеет приоритет. Пустые остаточные записи не считаются установкой.
 
-Сборка: scripts/Build-Local.ps1 -Compiler <clang++.exe> -SkipBaseline. Нативные проверки включаются -IncludeUiTests.
+Сборка: `cmake --preset dev`, затем `cmake --build --preset dev`. Нативные проверки мастера включаются параметром CMake `STREAMSHELF_NATIVE_GUIDE_TESTS=ON`.
 
 Сквозной тест установки с ручными подтверждениями: scripts/Test-BrowserGuide.ps1 -Browser chrome -InstallationFlow (либо yandex). Программа фиксирует исходное отсутствие расширения, переходы и подтверждённое включение; одно открытие страницы не считается успешной установкой.
 

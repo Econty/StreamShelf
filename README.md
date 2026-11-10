@@ -8,7 +8,7 @@ StreamShelf is a native Windows application for working with media from your bro
 
 ### [All releases](https://github.com/Econty/StreamShelf/releases) | [Русская инструкция](README_RU.md) | [Build guide (русский)](BUILDING.md)
 
-**StreamShelf 2.5 Beta is in development and has not been published yet.** The latest published release is 2.4 Beta. The language features and English interface labels described below are planned for 2.5 Beta; 2.4 Beta uses a Russian interface.
+**StreamShelf 2.5 Beta** is available on the [releases page](https://github.com/Econty/StreamShelf/releases). The installer is not digitally signed.
 
 ## Features
 
@@ -22,15 +22,15 @@ Availability depends on the site, file, codecs, and container. StreamShelf does 
 
 ## Languages
 
-StreamShelf 2.5 Beta is being prepared with English and Russian support. On first launch, it selects Russian when the Windows display language is Russian and English otherwise. The language can be changed under **Settings → Language / Язык**.
+StreamShelf 2.5 Beta supports English and Russian. On first launch, it selects Russian when the Windows display language is Russian and English otherwise. The language can be changed under **Settings → Language / Язык**.
 
-The 1.0.4 extension being prepared for 2.5 Beta follows the app's language. When disconnected, it uses the browser's interface language, falling back to English for languages other than Russian.
+StreamShelf Connector 1.0.4 follows the app's language. When disconnected, it uses the browser's interface language, falling back to English for languages other than Russian.
 
 **Русскоязычным пользователям:** [открыть полную инструкцию на русском](README_RU.md).
 
 ## Get started
 
-The English interface labels below apply to the upcoming 2.5 Beta. For the published Russian-language release, see the [Russian instructions](README_RU.md).
+The interface labels below apply to 2.5 Beta. See also the [Russian instructions](README_RU.md).
 
 1. Use Windows 10 or 11 x64 with an OpenGL 3.3-compatible graphics driver. If you downloaded an archive, extract it to a permanent folder and run `StreamShelf.exe`.
 2. Open **Settings → Components** to check and install the tools you need: yt-dlp, FFmpeg, FFprobe, and Deno. These tools are managed in `%LOCALAPPDATA%\StreamShelfNative\tools`.
@@ -48,7 +48,7 @@ Not every file, tag, codec, or container combination is supported. One cover, on
 
 ## Screenshots
 
-These screenshots show the Russian interface of an earlier version; the 2.5 Beta interface and labels may differ.
+These screenshots show the Russian interface; the current interface and labels may differ.
 
 ### Media overview
 

@@ -12,6 +12,7 @@ std::vector<std::wstring> extensionLaunchArguments(GuidedBrowser, const Profile 
 class ExtensionInstaller {
     struct Impl;
     std::unique_ptr<Impl> impl;
+    bool english = false;
   public:
     ExtensionInstaller();
     ~ExtensionInstaller();
@@ -25,6 +26,7 @@ class ExtensionInstaller {
     void setRetryConnection(std::function<void()> callback);
     void setOpenSetup(std::function<bool()> callback);
     void setExtensionRunning(bool running);
+    void setLanguage(const std::string &language);
     void close();
     Json diagnostics() const;
 #ifdef STREAMSHELF_INSTALLER_TESTING

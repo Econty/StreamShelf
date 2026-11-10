@@ -71,10 +71,12 @@ std::wstring pipeName();
 int nativeHostMain();
 void installConnector(const fs::path &);
 void updateConnectorExtensions(const fs::path &);
-// Both browser extensions use the same release version.
-inline constexpr const char *ConnectorVersion = "1.0.3";
+// Keep existing 1.0.3 installations working while localized extensions are rolled out.
+inline constexpr const char *ConnectorVersion = "1.0.4";
+inline constexpr const wchar_t *SignedFirefoxConnectorFilename = L"StreamShelf-Connector-1.0.4.xpi";
 inline bool compatibleExtensionHello(const Json &hello) {
-    return str(hello, "version") == ConnectorVersion;
+    const auto version = str(hello, "version");
+    return version == ConnectorVersion || version == "1.0.3";
 }
 void unregisterConnector();
 struct Session {
@@ -91,7 +93,7 @@ struct Session {
     std::atomic_bool alive{true};
     std::atomic<DWORD> readerId{0};
     std::atomic_bool readerEnded{false};
-    std::atomic_bool verified{false}, setupReady{false}, setupApiSupported{false};
+    std::atomic_bool verified{false}, setupReady{false}, setupApiSupported{false}, languageSupported{false};
     std::atomic<ULONGLONG> lastPong{0};
     std::atomic<ULONGLONG> verificationSent{0};
     std::string id, url, title, browser, browserExecutable, verificationToken;

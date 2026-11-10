@@ -4,6 +4,7 @@
 #include "mux_options.hpp"
 #include "assembly_source.hpp"
 #include "component_manager.hpp"
+#include "log_text.hpp"
 #include <deque>
 #include <array>
 #include <shared_mutex>
@@ -103,7 +104,7 @@ class App {
     std::map<std::string,std::shared_ptr<Preview>> previews;
     uint64_t previewGeneration = 0;
     std::vector<std::shared_ptr<Job>> jobs;
-    std::vector<std::string> logs;
+    std::vector<LogEntry> logs;
     Analysis analysis;
     std::shared_ptr<Session> analysisSession;
     std::string url, title = "Медиа", destination, search, logSearch, terminalCommand,
@@ -112,6 +113,11 @@ class App {
     std::function<void()> modalConfirm;
     int browserIndex = 0, profileIndex = 0, sessionIndex = -1, category = 1, audioIndex = -1;
     std::atomic_int fragments{4};
+    std::string interfaceLanguage = "en";
+    std::mutex languageDispatchMutex;
+    std::atomic_uint64_t languageRevision{0};
+    void setInterfaceLanguage(const std::string &);
+    void saveSettings();
     bool scanCommandPending = false;
     bool splashEnabled = true;
     int splashSeconds = 3;
@@ -145,7 +151,7 @@ class App {
     void post(std::function<void()>);
     void drain();
     void work(std::function<void()>);
-    void log(const std::string &);
+    void log(const std::string &, bool localizable = true);
     void notify(const std::string &);
     void error(const std::string &);
     void action(const std::string &);
@@ -171,6 +177,7 @@ struct Hit {
 };
 class UI {
     App &app;
+    const char *tr(const char *ru, const char *en) const { return app.interfaceLanguage == "ru" ? ru : en; }
     Canvas c;
     std::map<std::string, Spring> motion;
     struct LabelState {
@@ -193,6 +200,7 @@ class UI {
     int suggestionIndex = 0;
     void acceptSuggestion(int);
     std::wstring logSelectionBuffer;
+    std::string logBufferLanguage;
     size_t logAnchor=0, logCaret=0;
     std::map<std::string, size_t> carets, anchors;
     float mx = 0, my = 0, downX = 0, downY = 0, dt = .016f, width = 1440, height = 920, scale = 1;

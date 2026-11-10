@@ -2,6 +2,7 @@
 #include <cwctype>
 #include "app.hpp"
 #include "media_display.hpp"
+#include "interface_text.hpp"
 #include "language_options.hpp"
 #include <windowsx.h>
 #include <set>
@@ -163,7 +164,7 @@ void UI::input(const std::string &id, Rect r, std::string &value, const std::str
         std::vector<std::pair<std::string, std::string>> options;
         if (id == "track:language") {
             for (const auto &[code, label] : trackLanguages())
-                if (!code.empty()) options.emplace_back(code, label + " · " + code);
+                if (!code.empty()) options.emplace_back(code, trackLanguageLabel(code, label, app.interfaceLanguage == "en") + " · " + code);
         } else {
             std::vector<std::string> values;
             if (id == "track:samplerate") values = {"44100", "48000", "88200", "96000"};
@@ -251,7 +252,7 @@ void UI::choice(const std::string &id, Rect r, const std::vector<std::string> &o
                 std::function<void(int)> select) {
     float h = hover(id, r), p = to(id + ":press", down && capture && capture->id == id ? 1 : 0);
     c.border(r.scale(1 - .015f * p), 12, mix(edge, accent, h * .4f), panel);
-    auto s = selected >= 0 && selected < int(options.size()) ? options[selected] : "Не выбрано";
+    auto s = selected >= 0 && selected < int(options.size()) ? options[selected] : tr("Не выбрано", "Not selected");
     label(id + ":value", s, r.x + 13, r.y + r.h / 2 + 4, 12, text, r.w - 42);
     float v = to(id + ":arrow", menuOpen && menuId == id ? 1 : 0);
     c.line(r.x + r.w - 23, r.y + r.h / 2 - 2 + v * 4, r.x + r.w - 18, r.y + r.h / 2 + 3 - v * 6, 1.5f, muted);
@@ -340,7 +341,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
         c.circle(cx + 11, cy - 105 + drift, 2.5f + pulse, hex(0x8be2d1));
         centered("KRECHETOV LABS", cy - 48, 13, hex(0x8be2d1));
         centered("StreamShelf", cy + 5, 36, hex(0xeef3fc));
-        centered("Версия 2.4 Beta", cy + 41, 12, hex(0x8999b4));
+        centered(tr("Версия 2.5 Beta", "Version 2.5 Beta"), cy + 41, 12, hex(0x8999b4));
         c.rect({cx - 50, cy + 69, 100, 2}, 1, hex(0x2a374b));
         c.rect({cx - 50, cy + 69, 100 * std::clamp(elapsedSeconds / float(app.splashSeconds), 0.f, 1.f), 2}, 1, hex(0x8be2d1));
         c.opacity = 1; c.render(); return;
@@ -387,13 +388,13 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     const bool showMessage = !app.toast.empty() && clock - toastTime < 6 && app.modalTitle.empty();
     c.circle(260, 34, 3.5f, app.busy ? hex(0xffd697) : accent);
     if (showMessage) {
-        c.text(app.toast, 273, 39, 11, accent, width - 585);
+        c.text(interfaceText(app.interfaceLanguage, app.toast), 273, 39, 11, accent, width - 585);
     } else if(app.busy||app.scanning){
         float pulse=app.reduced?1.f:float(.5+.5*std::sin(clock*5));
         c.circle(260,34,3.5f+2*pulse,accent.alpha(.55f+.45f*pulse));
-        c.text((app.busy?"Анализ страницы":"Поиск медиа")+std::string(" · найдено ")+std::to_string(app.media.size()),273,39,11,accent,width-585);
-    } else label("status", app.status, 273, 39, 11, muted, width - 585);
-    button("theme", {width - 234, 17, 92, 31}, app.light ? "Темнее" : "Светлее",
+        c.text((app.busy?tr("Анализ страницы", "Analyzing page"):tr("Поиск медиа", "Searching for media"))+std::string(tr(" · найдено ", " · found "))+std::to_string(app.media.size()),273,39,11,accent,width-585);
+    } else label("status", interfaceText(app.interfaceLanguage, app.status), 273, 39, 11, muted, width - 585);
+    button("theme", {width - 234, 17, 92, 31}, app.light ? tr("Темнее", "Darker") : tr("Светлее", "Lighter"),
            [this] { app.light = !app.light; });
     button("min", {width - 126, 17, 32, 31}, "−", [this] { ShowWindow(app.hwnd, SW_MINIMIZE); });
     button("max", {width - 88, 17, 32, 31}, "",
@@ -407,7 +408,9 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     c.rect({0, 65, width, 1}, 0, edge.alpha(.5f));
     c.rect({17, nav.value, compactMenu?48.f:199.f, 44}, 13, accent.alpha(.11f));
     c.rect({17, nav.value + 13, 3, 18}, 2, accent);
-    const char *names[] = {"Обзор медиа", "Подключение", "Загрузки", "Терминал", "Настройки", "О программе"};
+    const char *namesRu[] = {"Обзор медиа", "Подключение", "Загрузки", "Терминал", "Настройки", "О программе"};
+    const char *namesEn[] = {"Media", "Connection", "Downloads", "Terminal", "Settings", "About"};
+    const auto names = app.interfaceLanguage == "ru" ? namesRu : namesEn;
     for (int i = 0; i < 6; i++) {
         Rect r{23, 111.f + i * 57, compactMenu?42.f:186.f, 44};
         float h = hover("nav:" + std::to_string(i), r),
@@ -450,10 +453,10 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
         hit("nav:" + std::to_string(i), r, [this, i] { navigate(i); });
     }
     c.circle(40, height - 28, 3, app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady ? accent : muted);
-    if(!compactMenu)c.text(app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady?"Браузер подключён":"Нет соединения",52,height-24,10,muted,150);
+    if(!compactMenu)c.text(app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady?tr("Браузер подключён", "Browser connected"):tr("Нет соединения", "Not connected"),52,height-24,10,muted,150);
     if (!compactMenu) {
-        c.text("KRECHETOV LABS · StreamShelf 2.4 Beta", 25, height - 80, 9, muted, 195);
-        c.text("Разработчик: Арсений Кречетов", 25, height - 59, 9, muted, 195);
+        c.text("KRECHETOV LABS · StreamShelf 2.5 Beta", 25, height - 80, 9, muted, 195);
+        c.text(tr("Разработчик: Арсений Кречетов", "Developer: Arseniy Krechetov"), 25, height - 59, 9, muted, 195);
     }
     float contentLeft=compactMenu?76.f:226.f;
     Rect area{contentLeft, 74, width - contentLeft - 12, height - 94};
@@ -487,7 +490,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
         c.drawSnapshot({0, 0, width, height}, 1 - transition.value);
         c.pop();
     }
-    c.text(std::to_string(app.media.size()) + " ресурсов", width - 170, height - 15, 9, muted);
+    c.text(std::to_string(app.media.size()) + tr(" ресурсов", " resources"), width - 170, height - 15, 9, muted);
     overlays();
     c.opacity = 1;
     c.render();
@@ -528,7 +531,7 @@ std::vector<Media *> UI::filtered() {
     for (auto &m : app.media)
         if (matchesMediaCategory(m, categories[std::clamp<int>(app.category, 0, int(categories.size() - 1))]) &&
             (q.empty() ||
-             lower(m.title + " " + m.language + " " + m.id + " " + m.vcodec + " " + m.acodec).find(q) !=
+             lower(mediaSearchText(app.interfaceLanguage, m)).find(q) !=
                  std::string::npos))
             out.push_back(&m);
     auto field = [&](Media *m) {
@@ -587,40 +590,41 @@ void UI::mediaPage(Rect r) {
     float saved=198;
     Rect search{r.x, r.y, r.w, 78};
     card(search);
-    input("url", {r.x + 14, r.y + 10, r.w - 524, 36}, app.url, "Ссылка на страницу или поток");
-    button("deepAnalyze", {r.x + r.w - 500, r.y + 10, 154, 36}, "Глубокий анализ", [this] { startMediaAnalysis(true); });
-    button("clearMedia", {r.x + r.w - 336, r.y + 10, 144, 36}, "Очистить список", [this] { app.action("clearMedia"); });
+    input("url", {r.x + 14, r.y + 10, r.w - 524, 36}, app.url, tr("Ссылка на страницу или поток", "Page or stream URL"));
+    button("deepAnalyze", {r.x + r.w - 500, r.y + 10, 154, 36}, tr("Глубокий анализ", "Deep analysis"), [this] { startMediaAnalysis(true); });
+    button("clearMedia", {r.x + r.w - 336, r.y + 10, 144, 36}, tr("Очистить список", "Clear list"), [this] { app.action("clearMedia"); });
     button(
-        "analyze", {r.x + r.w - 182, r.y + 10, 168, 36}, app.busy ? "Отменить" : "Анализировать",
+        "analyze", {r.x + r.w - 182, r.y + 10, 168, 36}, app.busy ? tr("Отменить", "Cancel") : tr("Анализировать", "Analyze"),
         [this] { if (app.busy) app.action("cancelAnalysis"); else startMediaAnalysis(false); }, true);
     c.circle(r.x + 18, r.y + 61, 3, app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady ? accent : muted);
-    label("connection", app.connection, r.x + 29, r.y + 65, 11, muted, std::max(80.f, r.w - 500));
+    label("connection", interfaceText(app.interfaceLanguage, app.connection), r.x + 29, r.y + 65, 11, muted, std::max(80.f, r.w - 500));
     if (app.busy || app.scanning) {
         float pulse=app.reduced?1.f:float(.55+.45*std::sin(clock*5));
         c.circle(r.x+r.w-447,r.y+61,3+2*pulse,accent.alpha(.5f+.5f*pulse));
-        c.text((app.busy ? "Анализируем страницу" : "Ищем медиа во вкладке") + std::string(" · найдено ") + std::to_string(app.media.size()), r.x + r.w - 435, r.y + 65, 11, accent, 290);
+        c.text((app.busy ? tr("Анализируем страницу", "Analyzing page") : tr("Ищем медиа во вкладке", "Searching the tab")) + std::string(tr(" · найдено ", " · found ")) + std::to_string(app.media.size()), r.x + r.w - 435, r.y + 65, 11, accent, 290);
     }
     else if (app.browserIndex >= 0 && app.browserIndex < int(app.browsers.size())) {
         auto &browser = app.browsers[app.browserIndex];
         if (app.profileIndex >= 0 && app.profileIndex < int(browser.profiles.size()))
-            c.text(browser.name + " · " + browser.profiles[app.profileIndex].status, r.x + r.w - 450, r.y + 65, 11, muted, 310);
+            c.text(interfaceText(app.interfaceLanguage, browser.name) + " · " + interfaceText(app.interfaceLanguage, browser.profiles[app.profileIndex].status), r.x + r.w - 450, r.y + 65, 11, muted, 310);
     }
     int selected = 0;
     for (auto &m : app.media)
         if (m.selected)
             selected++;
-    c.text(std::to_string(selected) + " выбрано", r.x + r.w - 130, r.y + 65, 11, accent);
-    input("media:search", {r.x, r.y + 291 - saved, r.w - 454, 36}, app.search, "Поиск файлов…");
+    c.text(std::to_string(selected) + tr(" выбрано", " selected"), r.x + r.w - 130, r.y + 65, 11, accent);
+    input("media:search", {r.x, r.y + 291 - saved, r.w - 454, 36}, app.search, tr("Поиск файлов…", "Search files…"));
     std::vector<std::string> categories = {"Все категории", "Видео", "Аудио", "Субтитры", "Автосубтитры", "Превью", "HLS", "DASH", "Данные", "Изображения", "Защищённые", "Требуют проверки"};
+    for (auto &category : categories) category = interfaceText(app.interfaceLanguage, category);
     choice("category", {r.x + r.w - 444, r.y + 291 - saved, 166, 36}, categories, app.category,
            [this](int i) { app.category = i; });
     auto visible=filtered();
     const bool selectable=std::any_of(visible.begin(),visible.end(),[](const auto *m){return !m->drm;});
     const bool allMediaSelected=selectable && std::all_of(visible.begin(),visible.end(),[](const auto *m){return m->drm || m->selected;});
-    button("selectall", {r.x + r.w - 268, r.y + 291 - saved, 138, 36}, allMediaSelected?"Снять все галочки":"Выбрать все", [this,allMediaSelected] {
+    button("selectall", {r.x + r.w - 268, r.y + 291 - saved, 138, 36}, allMediaSelected?tr("Снять все галочки", "Deselect all"):tr("Выбрать все", "Select all"), [this,allMediaSelected] {
         for (auto *m : filtered()) if (!m->drm) m->selected = !allMediaSelected;
     },false,selectable);
-    button("view",{r.x+r.w-120,r.y+291-saved,120,36},cardView?"Подробности":"Карточки",[this]{cardView=!cardView;mediaScroll.p.target=0;});
+    button("view",{r.x+r.w-120,r.y+291-saved,120,36},cardView?tr("Подробности", "Details"):tr("Карточки", "Cards"),[this]{cardView=!cardView;mediaScroll.p.target=0;});
     Rect table{r.x, r.y + 342 - saved, r.w, std::max(100.f, r.h - 462 + saved)};
     card(table);
     if(cardView){
@@ -637,28 +641,28 @@ void UI::mediaPage(Rect r) {
             collectionSurface(id,box,false,m.selected,i);
             Rect image{box.x+6,box.y+6,box.w-12,box.h-122};
             previewTile(m,image);
-            auto name = m.format && m.page == app.analysis.page ? app.analysis.title : m.title;
-            if (name.empty()) name = "Медиа " + std::to_string(i + 1);
+            auto name = m.format && m.page == app.analysis.page ? app.analysis.title : displayMediaTitle(app.interfaceLanguage, m);
+            if (name.empty()) name = tr("Медиа ", "Media ") + std::to_string(i + 1);
             c.text(name,box.x+10,box.y+box.h-75,12,text,box.w-20);
             double seconds = number(m.data, "duration");
             if (seconds <= 0 && m.page == app.analysis.page) seconds = number(app.analysis.raw, "duration");
             std::string duration;
             if (seconds > 0) { auto whole = int(seconds); duration = " · " + std::to_string(whole / 60) + ":" + (whole % 60 < 10 ? "0" : "") + std::to_string(whole % 60); }
             bool video = matchesMediaCategory(m, "Видео");
-            std::string info = (video ? "Видео" : m.category) + (m.quality.empty() ? "" : " · " + m.quality) + duration;
+            std::string info = (video ? std::string(tr("Видео", "Video")) : interfaceText(app.interfaceLanguage, m.category)) + (m.quality.empty() ? "" : " · " + m.quality) + duration;
             c.text(info,box.x+10,box.y+box.h-54,10,muted,box.w-20);
             std::string properties = m.ext.empty() ? "" : m.ext;
             if (m.fps > 0) properties += (properties.empty() ? "" : " · ") + std::to_string(int(m.fps)) + " FPS";
-            if (m.size > 0) properties += (properties.empty() ? "" : " · ") + sizeText(m.size, m.approx);
-            if (properties.empty()) properties = "Размер и формат не указаны";
+            if (m.size > 0) properties += (properties.empty() ? "" : " · ") + interfaceSize(app.interfaceLanguage, sizeText(m.size, m.approx));
+            if (properties.empty()) properties = tr("Размер и формат не указаны", "Size and format unknown");
             c.text(properties,box.x+10,box.y+box.h-36,10,muted,box.w-20);
             std::string codecs = m.vcodec.empty() || m.vcodec == "none" ? "" : m.vcodec;
             if (!m.acodec.empty() && m.acodec != "none") codecs += (codecs.empty() ? "" : " · ") + m.acodec;
             if (!m.language.empty()) codecs += (codecs.empty() ? "" : " · ") + m.language;
-            if (codecs.empty()) codecs = "Кодеки не указаны";
+            if (codecs.empty()) codecs = tr("Кодеки не указаны", "Codecs unknown");
             c.text(codecs,box.x+10,box.y+box.h-18,10,muted,box.w-20);
             if (video) {
-                auto sound = videoSoundLabel(m);
+                auto sound = interfaceText(app.interfaceLanguage, videoSoundLabel(m));
                 float badgeWidth = std::min(image.w - 40.f, c.measure(sound, 10) + 18.f);
                 Rect badge{image.x + image.w - badgeWidth - 5, image.y + 5, badgeWidth, 22};
                 c.rect(badge, 7, hex(m.videoOnly || m.category == "Видео без звука" ? 0x8f462a : 0x263a48, .94f));
@@ -668,7 +672,7 @@ void UI::mediaPage(Rect r) {
             check(id+":check",{box.x+6,box.y+7,30,30},m.selected,[this,key=m.key]{for(auto &item:app.media)if(item.key==key&&!item.drm){item.selected=!item.selected;app.selectedMedia=key;}});
         }
         c.pop();scrollbar("media:scroll",{table.x,table.y+6,table.w-5,table.h-12},mediaScroll);
-        if(rows.empty())c.text(app.scanning?"Поиск включён — запустите медиа в браузере":"Нет файлов. Добавьте ссылку или включите поиск во вкладке «Подключение».",table.x+20,table.y+40,12,muted,table.w-40);
+        if(rows.empty())c.text(app.scanning?tr("Поиск включён — запустите медиа в браузере", "Search is active — play media in your browser"):tr("Нет файлов. Добавьте ссылку или включите поиск во вкладке «Подключение».", "No files. Add a URL or start searching on the Connection page."),table.x+20,table.y+40,12,muted,table.w-40);
     }else{
     float contentWidth = std::max(1120.f, table.w - 28);
     tableScroll.step(dt);
@@ -687,8 +691,8 @@ void UI::mediaPage(Rect r) {
     if (mediaScroll.maximum > 0) headerClip.w -= 18;
     c.push(headerClip);
     c.rect({table.x + 1, table.y + 1, table.w - 2, 41}, 16, mix(panel, hex(0x26354b), .3f));
-    const char *heads[] = {"Тип",   "Название / ID", "Качество", "FPS",    "Видео",
-                           "Аудио", "Язык",          "kbps",     "Размер", "Протокол"};
+    const char *heads[] = {tr("Тип", "Type"), tr("Название / ID", "Name / ID"), tr("Качество", "Quality"), "FPS", tr("Видео", "Video"),
+                           tr("Аудио", "Audio"), tr("Язык", "Language"), "kbps", tr("Размер", "Size"), tr("Протокол", "Protocol")};
     selectionHeading("media:sort:checked",{table.x,table.y,columns[0],42},mediaSelectedFirst);
     c.push({table.x+columns[0],headerClip.y,std::max(0.f,headerClip.w-columns[0]),headerClip.h});
     float x = table.x + columns[0] - hx;
@@ -733,15 +737,15 @@ void UI::mediaPage(Rect r) {
                        : m->category == "Аудио"                           ? hex(0xc9a7ff)
                        : m->category.find("Субтитры") != m->category.npos ? hex(0xffd18d)
                                                                           : hex(0x8bbfff);
-        std::vector<std::string> values = {m->category,
-                                           m->title.empty() ? m->id : m->title,
-                                           m->quality,
+        std::vector<std::string> values = {interfaceText(app.interfaceLanguage, m->category),
+                                           m->title.empty() ? m->id : displayMediaTitle(app.interfaceLanguage, *m),
+                                           interfaceText(app.interfaceLanguage, m->quality),
                                            m->fps > 0 ? std::to_string(int(m->fps)) : "—",
                                            m->vcodec.empty() ? "—" : m->vcodec,
                                            m->acodec.empty() ? "—" : m->acodec,
                                            m->language.empty() ? "—" : m->language,
                                            m->rate > 0 ? std::to_string(int(m->rate)) : "—",
-                                           sizeText(m->size, m->approx),
+                                           interfaceSize(app.interfaceLanguage, sizeText(m->size, m->approx)),
                                            m->protocol};
         c.push({table.x + columns[0], body.y, std::max(0.f, body.x + body.w - table.x - columns[0]), body.h});
         x = table.x + columns[0] - hx;
@@ -771,16 +775,16 @@ void UI::mediaPage(Rect r) {
     }
     }
     float bottom = r.y + r.h - 98;
-    c.text("Выбранные файлы сохраняются раздельно в одну папку", r.x, bottom + 3, 10, muted);
-    input("destination", {r.x, bottom + 15, r.w - 250, 36}, app.destination, "Папка сохранения");
-    button("folder", {r.x + r.w - 238, bottom + 15, 78, 36}, "Папка", [this] { app.action("folder"); });
+    c.text(tr("Выбранные файлы сохраняются раздельно в одну папку", "Selected files are saved separately in one folder"), r.x, bottom + 3, 10, muted);
+    input("destination", {r.x, bottom + 15, r.w - 250, 36}, app.destination, tr("Папка сохранения", "Destination folder"));
+    button("folder", {r.x + r.w - 238, bottom + 15, 78, 36}, tr("Папка", "Folder"), [this] { app.action("folder"); });
     button(
-        "enqueue", {r.x + r.w - 150, bottom + 15, 150, 36}, "Скачать ↓", [this] { cancelInput(); app.downloadChoice=true; },
+        "enqueue", {r.x + r.w - 150, bottom + 15, 150, 36}, tr("Скачать ↓", "Download ↓"), [this] { cancelInput(); app.downloadChoice=true; },
         true, selected > 0);
     button(
-        "resource", {r.x, bottom + 63, 166, 32}, "Анализ ресурса", [this] { app.action("analyzeResource"); },
+        "resource", {r.x, bottom + 63, 166, 32}, tr("Анализ ресурса", "Analyze resource"), [this] { app.action("analyzeResource"); },
         false, !app.selectedMedia.empty());
-    button("json", {r.x+178,bottom+63,126,32},"Метаданные",[this]{app.action("json");});
+    button("json", {r.x+178,bottom+63,126,32},tr("Метаданные", "Metadata"),[this]{app.action("json");});
 }
 void UI::previewTile(const Media &media,Rect box){
     c.rect(box,7,hex(app.light?0xe5eaf1:0x0b121d));
@@ -793,65 +797,66 @@ void UI::previewTile(const Media &media,Rect box){
         }
         c.image(previewTextures[key],box,preview->image.width,preview->image.height);
     }else{
-        c.text(preview?preview->message:"Ожидание превью…",box.x+12,box.y+box.h/2,11,muted,box.w-24);
+        c.text(preview?interfaceText(app.interfaceLanguage, preview->message):tr("Ожидание превью…", "Waiting for preview…"),box.x+12,box.y+box.h/2,11,muted,box.w-24);
     }
 }
 void UI::browserPage(Rect r) {
+    auto tr = [this](const char *ru, const char *en) { return app.interfaceLanguage == "ru" ? ru : en; };
     Rect view{r.x, r.y, r.w, r.h};
     browserScroll.bounds(578, view.h);
     if (browserScroll.maximum > 0) r.w -= 18;
     c.push(view);
     float y = view.y - browserScroll.p.value;
     card({r.x, y, r.w, 200});
-    c.text("01  ВЫБЕРИТЕ БРАУЗЕР", r.x + 22, y + 29, 10, accent);
+    c.text(tr("01  ВЫБЕРИТЕ БРАУЗЕР", "01  SELECT A BROWSER"), r.x + 22, y + 29, 10, accent);
     std::vector<std::string> options;
     for (auto &b : app.browsers)
-        options.push_back(b.name + (b.running ? " · открыт" : " · закрыт"));
+        options.push_back(interfaceText(app.interfaceLanguage, b.name) + (b.running ? tr(" · открыт", " · open") : tr(" · закрыт", " · closed")));
     choice("browser", {r.x + 22, y + 48, r.w - 174, 40}, options, app.browserIndex, [this](int i) {
         app.browserIndex = i;
         app.profileIndex = 0;
     });
-    button("browser:open", {r.x + r.w - 140, y + 48, 119, 40}, "Открыть",
+    button("browser:open", {r.x + r.w - 140, y + 48, 119, 40}, tr("Открыть", "Open"),
            [this] { app.action("openBrowser"); });
     std::vector<std::string> profiles;
-    std::string info = "Браузеры не найдены. Откройте установленный браузер и обновите список.";
+    std::string info = tr("Браузеры не найдены. Откройте установленный браузер и обновите список.", "No browsers found. Open an installed browser and refresh the list.");
     if (app.browserIndex < int(app.browsers.size())) {
         auto &b = app.browsers[app.browserIndex];
         for (auto &p : b.profiles)
             profiles.push_back(p.name);
         if (app.profileIndex < int(b.profiles.size()))
-            info = b.profiles[app.profileIndex].status + " · " + b.profiles[app.profileIndex].path;
+            info = interfaceText(app.interfaceLanguage, b.profiles[app.profileIndex].status) + " · " + b.profiles[app.profileIndex].path;
     }
     choice("profile", {r.x + 22, y + 103, r.w - 44, 38}, profiles, app.profileIndex,
            [this](int i) { app.profileIndex = i; });
     c.text(info, r.x + 22, y + 174, 11, muted, r.w - 470);
-    button("browser:custom", {r.x + r.w - 430, y + 151, 199, 32}, "Указать EXE",
+    button("browser:custom", {r.x + r.w - 430, y + 151, 199, 32}, tr("Указать EXE", "Choose EXE"),
            [this] { app.action("customBrowser"); });
-    button("browser:customProfile", {r.x + r.w - 220, y + 151, 199, 32}, "Папка профиля",
+    button("browser:customProfile", {r.x + r.w - 220, y + 151, 199, 32}, tr("Папка профиля", "Profile folder"),
            [this] { app.action("customProfile"); });
     y += 216;
     card({r.x, y, r.w, 158});
-    c.text("02  УСТАНОВИТЕ ЛОКАЛЬНОЕ РАСШИРЕНИЕ", r.x + 22, y + 30, 10, accent);
+    c.text(tr("02  УСТАНОВИТЕ ЛОКАЛЬНОЕ РАСШИРЕНИЕ", "02  INSTALL THE LOCAL EXTENSION"), r.x + 22, y + 30, 10, accent);
     bool guided = app.browserIndex >= 0 && app.browserIndex < int(app.browsers.size()) &&
         guidedBrowser(app.browsers[app.browserIndex]) != GuidedBrowser::None;
-    c.text(guided ? "Мастер покажет шаги установки и подсветит доступные элементы браузера."
-                  : "Для этого браузера расширение устанавливается вручную. Папку подготовит программа.", r.x + 22, y + 57, 12, muted,
+    c.text(guided ? tr("Мастер покажет шаги установки и подсветит доступные элементы браузера.", "The guide will walk you through installation and highlight browser controls.")
+                  : tr("Для этого браузера расширение устанавливается вручную. Папку подготовит программа.", "This browser requires manual installation. StreamShelf will prepare the folder."), r.x + 22, y + 57, 12, muted,
            r.w - 44);
     button(
-        "prepare", {r.x + 22, y + 83, 288, 40}, app.preparingInstaller ? "Подготовка…" : guided ? "Установить с подсказками" : "Подготовить для ручной установки",
+        "prepare", {r.x + 22, y + 83, 288, 40}, app.preparingInstaller ? tr("Подготовка…", "Preparing…") : guided ? tr("Установить с подсказками", "Install with guide") : tr("Подготовить для ручной установки", "Prepare manual installation"),
         [this] { app.action("prepareConnector"); }, true, !app.preparingInstaller);
-    button("ext:folder", {r.x + 326, y + 83, 213, 40}, "Папка расширения",
+    button("ext:folder", {r.x + 326, y + 83, 213, 40}, tr("Папка расширения", "Extension folder"),
            [this] { app.action("extensionFolder"); });
     y += 174;
     card({r.x, y, r.w, 157});
-    c.text("COOKIES И АВТОРИЗАЦИЯ", r.x + 22, y + 30, 10, accent);
+    c.text(tr("COOKIES И АВТОРИЗАЦИЯ", "COOKIES AND AUTHENTICATION"), r.x + 22, y + 30, 10, accent);
     c.text(fs::exists(dataRoot() / L"cookies.dpapi")
-               ? "Импорт cookies подключён · защищён Windows DPAPI"
-               : "Cookies запрашиваются у расширения только для выбранного ресурса.",
+               ? tr("Импорт cookies подключён · защищён Windows DPAPI", "Imported cookies enabled · protected by Windows DPAPI")
+               : tr("Cookies запрашиваются у расширения только для выбранного ресурса.", "Cookies are requested from the extension only for the selected resource."),
            r.x + 22, y + 59, 12, muted, r.w - 44);
-    button("cookie:import", {r.x + 22, y + 83, 210, 40}, "Импорт cookies.txt",
+    button("cookie:import", {r.x + 22, y + 83, 210, 40}, tr("Импорт cookies.txt", "Import cookies.txt"),
            [this] { app.action("importCookies"); });
-    button("cookie:delete", {r.x + 245, y + 83, 184, 40}, "Удалить импорт",
+    button("cookie:delete", {r.x + 245, y + 83, 184, 40}, tr("Удалить импорт", "Remove import"),
            [this] { app.action("deleteCookies"); });
     c.pop();
     scrollbar("browser:scroll", view, browserScroll);
@@ -877,61 +882,61 @@ void UI::selectionHeading(const std::string &id,Rect area,bool &selectedFirst) {
     hit(id,area,[&selectedFirst]{selectedFirst=!selectedFirst;});
 }
 void UI::downloadsPage(Rect r) {
-    c.text("Загрузки · "+std::to_string(app.jobs.size()), r.x, r.y + 28, 20, text, r.w - 400);
-    button("jobs:view", {r.x + r.w - 390, r.y + 8, 140, 38}, jobDetails ? "Карточки" : "Подробности", [this] { jobDetails = !jobDetails; jobsScroll.p.target = jobsScroll.p.value = 0; });
+    c.text(tr("Загрузки · ", "Downloads · ")+std::to_string(app.jobs.size()), r.x, r.y + 28, 20, text, r.w - 400);
+    button("jobs:view", {r.x + r.w - 390, r.y + 8, 140, 38}, jobDetails ? tr("Карточки", "Cards") : tr("Подробности", "Details"), [this] { jobDetails = !jobDetails; jobsScroll.p.target = jobsScroll.p.value = 0; });
     choice(
         "parallel", {r.x + r.w - 240, r.y + 8, 240, 38},
-        {"1 задача одновременно", "2 задачи одновременно", "3 задачи одновременно", "4 задачи одновременно"},
+        {tr("1 задача одновременно", "1 task at a time"), tr("2 задачи одновременно", "2 tasks at a time"), tr("3 задачи одновременно", "3 tasks at a time"), tr("4 задачи одновременно", "4 tasks at a time")},
         app.getParallel() - 1, [this](int i) { app.setParallel(i + 1); });
     float topWidth = (r.w - 40) / 5;
     const bool allJobsSelected=!app.jobs.empty() && std::all_of(app.jobs.begin(),app.jobs.end(),
         [this](const auto &job){return app.selectedJobs.count(job->id)!=0;});
-    button("jobs:selectAll", {r.x,r.y+54,topWidth,34}, allJobsSelected?"Снять все галочки":"Выбрать все", [this,allJobsSelected] {
+    button("jobs:selectAll", {r.x,r.y+54,topWidth,34}, allJobsSelected?tr("Снять все галочки", "Deselect all"):tr("Выбрать все", "Select all"), [this,allJobsSelected] {
         if(allJobsSelected) app.selectedJobs.clear();
         else app.action("selectAllJobs");
     },false,!app.jobs.empty());
-    button("jobs:clearSelected", {r.x + topWidth + 10, r.y + 54, topWidth, 34}, "Убрать выбранные", [this] { app.action("clearSelectedJobs"); }, false, !app.selectedJobs.empty());
-    button("jobs:clearFinished", {r.x + 2*(topWidth + 10), r.y + 54, topWidth, 34}, "Очистить завершённые", [this] { app.action("clearFinishedJobs"); }, false, !app.jobs.empty());
-    button("jobs:constructor", {r.x + 3*(topWidth + 10), r.y + 54, topWidth, 34}, "Конструктор", [this] { cancelInput(); app.openConstructor(true); });
-    button("jobs:addLocal", {r.x + 4*(topWidth + 10), r.y + 54, topWidth, 34}, "Добавить файлы", [this] { app.action("addLocalDownloads"); });
+    button("jobs:clearSelected", {r.x + topWidth + 10, r.y + 54, topWidth, 34}, tr("Убрать выбранные", "Remove selected"), [this] { app.action("clearSelectedJobs"); }, false, !app.selectedJobs.empty());
+    button("jobs:clearFinished", {r.x + 2*(topWidth + 10), r.y + 54, topWidth, 34}, tr("Очистить завершённые", "Clear completed"), [this] { app.action("clearFinishedJobs"); }, false, !app.jobs.empty());
+    button("jobs:constructor", {r.x + 3*(topWidth + 10), r.y + 54, topWidth, 34}, tr("Конструктор", "Builder"), [this] { cancelInput(); app.openConstructor(true); });
+    button("jobs:addLocal", {r.x + 4*(topWidth + 10), r.y + 54, topWidth, 34}, tr("Добавить файлы", "Add files"), [this] { app.action("addLocalDownloads"); });
     float viewTop = 96;
     for(const auto &job:app.jobs)if(job->id==app.selectedJob&&job->assembly&&job->decisionNeeded){
         card({r.x,r.y+96,r.w,100});
-        c.text("Не все источники доступны. Сохранённые файлы оставлены отдельно.",r.x+14,r.y+121,12,text,r.w-28);
-        button("assembly:retry",{r.x+14,r.y+140,210,38},"Повторить загрузки",[this]{app.action("retryAssemblySources");});
+        c.text(tr("Не все источники доступны. Сохранённые файлы оставлены отдельно.", "Some sources are unavailable. Saved files have been kept separately."),r.x+14,r.y+121,12,text,r.w-28);
+        button("assembly:retry",{r.x+14,r.y+140,210,38},tr("Повторить загрузки", "Retry downloads"),[this]{app.action("retryAssemblySources");});
         bool canAssemble=false;
         for(const auto &source:job->sources)if(source.role<2){
             if(source.dependency.empty()&&!source.path.empty()&&fs::is_regular_file(wide(source.path)))canAssemble=true;
             for(const auto &child:app.jobs)if(child->id==source.dependency&&child->done&&child->state=="Готово"&&!child->output.empty()&&fs::is_regular_file(wide(child->output)))canAssemble=true;
         }
-        button("assembly:partial",{r.x+238,r.y+140,220,38},"Собрать доступное",[this]{app.action("assemblePartial");},true,canAssemble);
+        button("assembly:partial",{r.x+238,r.y+140,220,38},tr("Собрать доступное", "Build from available"),[this]{app.action("assemblePartial");},true,canAssemble);
         viewTop=206;break;
     }
     if(viewTop==96)for(const auto &job:app.jobs)if(job->state=="Сборка контейнера"||job->state=="Проверка результата"){
         card({r.x,r.y+96,r.w,122});
-        c.text(job->state+" · "+job->title,r.x+14,r.y+119,13,text,r.w-220);
-        c.text(job->detail,r.x+14,r.y+141,11,muted,r.w-220);
+        c.text(interfaceText(app.interfaceLanguage, job->state)+" · "+job->title,r.x+14,r.y+119,13,text,r.w-220);
+        c.text(interfaceText(app.interfaceLanguage, job->detail),r.x+14,r.y+141,11,muted,r.w-220);
         int active=0,waiting=0;for(const auto &entry:app.jobs)if(!entry->done){if(entry->claimed)++active;else ++waiting;}
         c.text(job->metrics,r.x+14,r.y+160,10,muted,r.w-220);
-        std::string device="CPU (автоматически)";for(const auto &source:job->sources)if(source.role==0&&source.codec>=5){device=source.codec<=6?"NVIDIA GPU":source.codec<=8?"Intel GPU":"AMD GPU";break;}
-        c.text("Задач: "+std::to_string(active)+" выполняется · "+std::to_string(waiting)+" в очереди · "+device+" · логических ядер: "+std::to_string(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)),r.x+14,r.y+181,10,muted,r.w-220);
+        std::string device=tr("CPU (автоматически)", "CPU (automatic)");for(const auto &source:job->sources)if(source.role==0&&source.codec>=5){device=source.codec<=6?"NVIDIA GPU":source.codec<=8?"Intel GPU":"AMD GPU";break;}
+        c.text(tr("Задач: ", "Tasks: ")+std::to_string(active)+tr(" выполняется · ", " running · ")+std::to_string(waiting)+tr(" в очереди · ", " queued · ")+device+tr(" · логических ядер: ", " · logical cores: ")+std::to_string(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)),r.x+14,r.y+181,10,muted,r.w-220);
         Rect track{r.x+14,r.y+200,r.w-230,5};c.rect(track,3,edge);
         if(job->percent<0){float segment=track.w*.2f,offset=(track.w-segment)*float(.5+.5*std::sin(clock*2.4));c.rect({track.x+offset,track.y,segment,track.h},3,accent);}
         else c.rect({track.x,track.y,track.w*std::clamp(float(job->percent/100.),0.f,1.f),track.h},3,accent);
-        auto id=job->id;button("assembly:active:cancel",{r.x+r.w-196,r.y+120,180,38},"Отменить",[this,id]{app.selectedJob=id;app.action("cancelJob");});
+        auto id=job->id;button("assembly:active:cancel",{r.x+r.w-196,r.y+120,180,38},tr("Отменить", "Cancel"),[this,id]{app.selectedJob=id;app.action("cancelJob");});
         viewTop=228;break;
     }
-    static constexpr std::array<const char *, 11> headings={
-        "Название", "Статус", "Тип", "Формат", "Качество", "Кодеки", "Язык", "Размер", "Длительность", "Готово", "Протокол"
+    const std::array<const char *, 11> headings={
+        tr("Название", "Name"), tr("Статус", "Status"), tr("Тип", "Type"), tr("Формат", "Format"), tr("Качество", "Quality"), tr("Кодеки", "Codecs"), tr("Язык", "Language"), tr("Размер", "Size"), tr("Длительность", "Duration"), tr("Готово", "Done"), tr("Протокол", "Protocol")
     };
     static constexpr std::array<float, 11> widths={.195f,.135f,.08f,.06f,.105f,.10f,.05f,.065f,.075f,.065f,.07f};
-    const std::array<const char *, 4> groupNames={"Загрузки", "Конвертация", "Файлы с компьютера", "Сборка контейнеров"};
+    const std::array<const char *, 4> groupNames={tr("Загрузки", "Downloads"), tr("Конвертация", "Conversion"), tr("Файлы с компьютера", "Local files"), tr("Сборка контейнеров", "Container builds")};
     struct QueueRow {
         std::shared_ptr<Job> job;
         int group;
         float y=0;
         int slot=0;
-        std::array<std::string, headings.size()> values{};
+        std::array<std::string, 11> values{};
         double duration=0;
     };
     auto groupFor=[](const Job &job){
@@ -973,15 +978,15 @@ void UI::downloadsPage(Rect r) {
         }
         std::string quality=m.quality;
         if(m.fps>0)quality+=(quality.empty()?"":" · ")+std::to_string(int(m.fps))+" FPS";
-        if(m.rate>0 && m.rate<1e9)quality+=(quality.empty()?"":" · ")+std::to_string(int(m.rate))+" кбит/с";
+        if(m.rate>0 && m.rate<1e9)quality+=(quality.empty()?"":" · ")+std::to_string(int(m.rate))+tr(" кбит/с", " kbps");
         row.duration=number(m.data,"duration");
         std::string duration;
         if(row.duration>0 && row.duration<1e10){
             auto seconds=static_cast<long long>(row.duration);
             duration=std::to_string(seconds/60)+":"+(seconds%60<10?"0":"")+std::to_string(seconds%60);
         }
-        row.values={job->title,job->state,m.category,std::move(format),std::move(quality),std::move(codecs),
-                    m.language,m.size>0?sizeText(m.size,m.approx):"",std::move(duration),
+        row.values={job->title,interfaceText(app.interfaceLanguage, job->state),interfaceText(app.interfaceLanguage, m.category),std::move(format),std::move(quality),std::move(codecs),
+                    m.language,m.size>0?interfaceSize(app.interfaceLanguage, sizeText(m.size,m.approx)):"",std::move(duration),
                     job->percent>=0?std::to_string(int(std::clamp(job->percent,0.,100.)))+"%":"",m.protocol};
         rows.push_back(std::move(row));
     }
@@ -1052,8 +1057,8 @@ void UI::downloadsPage(Rect r) {
     c.push(view);
     if(rows.empty()){
         card({r.x,view.y+4,r.w,170});
-        c.text("Здесь появятся ваши загрузки",r.x+28,view.y+55,22,text);
-        c.text("Выберите медиа в обзоре или перетащите сюда файлы из Проводника.",r.x+28,view.y+91,13,muted);
+        c.text(tr("Здесь появятся ваши загрузки", "Your downloads will appear here"),r.x+28,view.y+55,22,text);
+        c.text(tr("Выберите медиа в обзоре или перетащите сюда файлы из Проводника.", "Choose media or drag files here from File Explorer."),r.x+28,view.y+91,13,muted);
     }
     previous=-1;
     for(size_t index=0;index<rows.size();++index){
@@ -1119,7 +1124,7 @@ void UI::downloadsPage(Rect r) {
                 }
                 if(!info.empty())c.text(info,x,y+32+15*detailRow++,10,muted,w);
             }
-            auto detail=j->detail.empty()?j->output:j->detail;
+            auto detail=j->detail.empty()?j->output:interfaceText(app.interfaceLanguage, j->detail);
             if(!detail.empty())c.text(detail,x,y+32+15*detailRow,10,muted,w);
         }
         auto select=[this,j]{
@@ -1133,11 +1138,11 @@ void UI::downloadsPage(Rect r) {
     c.pop();
     scrollbar("jobs:scroll",view,jobsScroll);
     float y = r.y + r.h - 52;
-    std::vector<std::pair<std::string, std::string>> actions = {{"cancelSelectedJobs", "Остановить"},
-                                                                {"retryJob", "Повторить"},
-                                                                {"openJobFolder", "Открыть папку"},
-                                                                {"openJobFile", "Открыть файл"},
-                                                                {"removeJob", "Убрать запись"}};
+    std::vector<std::pair<std::string, std::string>> actions = {{"cancelSelectedJobs", tr("Остановить", "Stop")},
+                                                                {"retryJob", tr("Повторить", "Retry")},
+                                                                {"openJobFolder", tr("Открыть папку", "Open folder")},
+                                                                {"openJobFile", tr("Открыть файл", "Open file")},
+                                                                {"removeJob", tr("Убрать запись", "Remove entry")}};
     float x = r.x;
     float actionWidth = std::min(145.f, (r.w - 4 * 10) / 5);
     for (auto &[cmd, name] : actions) {
@@ -1148,20 +1153,26 @@ void UI::downloadsPage(Rect r) {
     }
 }
 void UI::logsPage(Rect r) {
-    input("logs:search", {r.x, r.y, r.w - 450, 40}, app.logSearch, "Поиск в журнале…");
-    button("logs:copy", {r.x + r.w - 435, r.y, 137, 40}, "Скопировать",
+    input("logs:search", {r.x, r.y, r.w - 450, 40}, app.logSearch, tr("Поиск в журнале…", "Search log…"));
+    button("logs:copy", {r.x + r.w - 435, r.y, 137, 40}, tr("Скопировать", "Copy"),
            [this] { app.action("copyLogs"); });
-    button("logs:export", {r.x + r.w - 286, r.y, 137, 40}, "Экспорт",
+    button("logs:export", {r.x + r.w - 286, r.y, 137, 40}, tr("Экспорт", "Export"),
            [this] { app.action("exportLogs"); });
-    button("logs:clear", {r.x + r.w - 137, r.y, 137, 40}, "Очистить",
+    button("logs:clear", {r.x + r.w - 137, r.y, 137, 40}, tr("Очистить", "Clear"),
            [this] { app.action("clearLogs"); });
     Rect box{r.x, r.y + 54, r.w, r.h - 104};
     card(box);
     Rect view = box.inset(17);
-    std::vector<const std::string *> lines;
-    for (auto &line : app.logs)
+    if (logBufferLanguage != app.interfaceLanguage) {
+        logBufferLanguage = app.interfaceLanguage;
+        logAnchor = logCaret = 0;
+    }
+    std::vector<std::string> lines;
+    for (const auto &entry : app.logs) {
+        auto line = displayLog(entry, app.interfaceLanguage);
         if (app.logSearch.empty() || line.find(app.logSearch) != line.npos)
-            lines.push_back(&line);
+            lines.push_back(std::move(line));
+    }
     if (lines.size() > 1500)
         lines.erase(lines.begin(), lines.end() - 1500);
     float old = logScroll.maximum;
@@ -1171,12 +1182,12 @@ void UI::logsPage(Rect r) {
     if (follow)
         logScroll.p.target = logScroll.maximum;
     std::vector<std::wstring> wideLines;std::vector<size_t> offsets;std::wstring buffer;
-    for(const auto *line:lines){
+    for(const auto &line:lines){
         offsets.push_back(buffer.size());
         // A legacy or external log entry must never terminate the UI frame.
-        int n=MultiByteToWideChar(CP_UTF8,0,line->data(),int(line->size()),nullptr,0);
+        int n=MultiByteToWideChar(CP_UTF8,0,line.data(),int(line.size()),nullptr,0);
         std::wstring decoded(size_t(std::max(n,0)),L'\0');
-        if(n>0)MultiByteToWideChar(CP_UTF8,0,line->data(),int(line->size()),decoded.data(),n);
+        if(n>0)MultiByteToWideChar(CP_UTF8,0,line.data(),int(line.size()),decoded.data(),n);
         wideLines.push_back(std::move(decoded));buffer+=wideLines.back();buffer+=L'\n';
     }
     logSelectionBuffer=std::move(buffer);logAnchor=std::min(logAnchor,logSelectionBuffer.size());logCaret=std::min(logCaret,logSelectionBuffer.size());
@@ -1196,39 +1207,46 @@ void UI::logsPage(Rect r) {
         logCaret=position(mx,std::clamp(my,view.y,view.y+view.h-1));
     }
     c.push(view);
-    if(lines.empty())c.text("Журнал пока пуст",view.x+3,view.y+26,13,muted);
+    if(lines.empty())c.text(tr("Журнал пока пуст", "The log is empty"),view.x+3,view.y+26,13,muted);
     size_t lo=std::min(logAnchor,logCaret),hi=std::max(logAnchor,logCaret);
     for(size_t i=0;i<lines.size();++i){float y=view.y+20+i*25-logScroll.p.value;if(y<view.y-15||y>=view.y+view.h+20)continue;
         size_t start=offsets[i],end=start+wideLines[i].size(),a=std::max(lo,start),b=std::min(hi,end);
         if(focus=="log:selection"&&a<b){float l=c.measure(utf8(wideLines[i].substr(0,a-start)),12),rr=c.measure(utf8(wideLines[i].substr(0,b-start)),12);c.rect({view.x+4+l,y-15,rr-l,19},3,accent.alpha(.25f));}
-        c.text(*lines[i],view.x+4,y,12,text,view.w-20);
+        c.text(lines[i],view.x+4,y,12,text,view.w-20);
     }
     hit("log:select",view,[this,position]{editing=nullptr;focus="log:selection";logAnchor=logCaret=position(mx,my);},true);
     c.pop();scrollbar("logs:scroll",view,logScroll);
-    input("terminal:command",{r.x,r.y+r.h-38,r.w-126,36},app.terminalCommand,"Команда Windows…");
-    button("terminal:run",{r.x+r.w-116,r.y+r.h-38,116,36},"Выполнить",[this]{runTerminalCommand();},true,!app.terminalCommand.empty());
+    input("terminal:command",{r.x,r.y+r.h-38,r.w-126,36},app.terminalCommand,tr("Команда Windows…", "Windows command…"));
+    button("terminal:run",{r.x+r.w-116,r.y+r.h-38,116,36},tr("Выполнить", "Run"),[this]{runTerminalCommand();},true,!app.terminalCommand.empty());
 }
 void UI::settingsPage(Rect r) {
+    auto tr = [this](const char *ru, const char *en) { return app.interfaceLanguage == "ru" ? ru : en; };
     Rect view{r.x, r.y, r.w, r.h};
-    settingsScroll.bounds(1280, view.h);
+    settingsScroll.bounds(1376, view.h);
     if (settingsScroll.maximum > 0) r.w -= 18;
     c.push(view);
     float y = view.y - settingsScroll.p.value;
+    card({r.x, y, r.w, 80});
+    c.text("Language / Язык", r.x + 24, y + 46, 15, text);
+    choice("settings:language", {r.x + r.w - 230, y + 20, 200, 40},
+           {"English", "Русский"}, app.interfaceLanguage == "ru" ? 1 : 0,
+           [this](int i) { app.setInterfaceLanguage(i == 1 ? "ru" : "en"); });
+    y += 96;
     card({r.x, y, r.w, 233});
-    c.text("ОФОРМЛЕНИЕ И ДВИЖЕНИЕ", r.x + 24, y + 32, 10, accent);
-    c.text("Светлая тема", r.x + 24, y + 77, 15, text);
-    c.text("Мягкий переход между светлой и тёмной палитрой", r.x + 24, y + 101, 11, muted);
+    c.text(tr("ОФОРМЛЕНИЕ И ДВИЖЕНИЕ", "APPEARANCE AND MOTION"), r.x + 24, y + 32, 10, accent);
+    c.text(tr("Светлая тема", "Light theme"), r.x + 24, y + 77, 15, text);
+    c.text(tr("Мягкий переход между светлой и тёмной палитрой", "Smooth transition between light and dark themes"), r.x + 24, y + 101, 11, muted);
     toggle("settings:light", {r.x + r.w - 80, y + 62, 51, 28}, app.light, [this] { app.light = !app.light; });
     c.rect({r.x + 24, y + 124, r.w - 48, 1}, 0, edge);
-    c.text("Уменьшить движение", r.x + 24, y + 162, 15, text);
-    c.text("Более короткие переходы с минимальным пружинным эффектом", r.x + 24, y + 188, 11, muted);
+    c.text(tr("Уменьшить движение", "Reduce motion"), r.x + 24, y + 162, 15, text);
+    c.text(tr("Более короткие переходы с минимальным пружинным эффектом", "Shorter transitions with less animation"), r.x + 24, y + 188, 11, muted);
     toggle("settings:reduced", {r.x + r.w - 80, y + 148, 51, 28}, app.reduced,
            [this] { app.reduced = !app.reduced; });
     y += 249;
     card({r.x, y, r.w, 495});
-    c.text("КОМПОНЕНТЫ", r.x + 24, y + 32, 10, accent);
-    c.text(app.componentsBusy ? app.componentsActivity : "Проверяйте версии и устанавливайте отсутствующие компоненты.", r.x + 24, y + 61, 13, text, r.w - 48);
-    c.text("Автоматически обновлять yt-dlp при запуске", r.x + 24, y + 95, 12, muted, r.w - 130);
+    c.text(tr("КОМПОНЕНТЫ", "COMPONENTS"), r.x + 24, y + 32, 10, accent);
+    c.text(app.componentsBusy ? interfaceText(app.interfaceLanguage, app.componentsActivity) : tr("Проверяйте версии и устанавливайте отсутствующие компоненты.", "Check versions and install missing components."), r.x + 24, y + 61, 13, text, r.w - 48);
+    c.text(tr("Автоматически обновлять yt-dlp при запуске", "Automatically update yt-dlp on startup"), r.x + 24, y + 95, 12, muted, r.w - 130);
     toggle("settings:update", {r.x + r.w - 80, y + 77, 51, 28}, app.autoUpdate, [this] { app.autoUpdate = !app.autoUpdate; });
     static const wchar_t *files[] = {L"yt-dlp.exe", L"ffmpeg.exe", L"ffprobe.exe", L"deno.exe"};
     static const auto componentsRoot = dataRoot() / L"tools";
@@ -1238,13 +1256,13 @@ void UI::settingsPage(Rect r) {
             const auto &component = app.components[i];
             c.text(component.name, r.x + 24, row, 14, text, 130);
             const bool filePresent = componentFilePresent(componentsRoot / files[i]);
-            const auto version = "Установлена: " + (!filePresent || component.installed.empty() ? std::string("нет") : component.installed) + "   ·   Доступна: " + (component.latest.empty() ? std::string("неизвестно") : component.latest);
+            const auto version = tr("Установлена: ", "Installed: ") + (!filePresent || component.installed.empty() ? std::string(tr("нет", "none")) : component.installed) + tr("   ·   Доступна: ", "   ·   Available: ") + (component.latest.empty() ? std::string(tr("неизвестно", "unknown")) : component.latest);
             c.text(version, r.x + 160, row, 12, muted, r.w - 190);
-            c.text(filePresent ? component.status : "Файл отсутствует", r.x + 160, row + 19, 11, (!filePresent || component.update) ? accent : muted, r.w - 190);
+            c.text(filePresent ? interfaceText(app.interfaceLanguage, component.status) : tr("Файл отсутствует", "File missing"), r.x + 160, row + 19, 11, (!filePresent || component.update) ? accent : muted, r.w - 190);
         } else {
             static const char *names[] = {"yt-dlp", "FFmpeg", "FFprobe", "Deno"};
             c.text(names[i], r.x + 24, row, 14, text, 130);
-            c.text("Нажмите «Проверить компоненты»", r.x + 160, row, 12, muted, r.w - 190);
+            c.text(tr("Нажмите «Проверить компоненты»", "Click Check components"), r.x + 160, row, 12, muted, r.w - 190);
         }
     }
     if (app.componentProgressVisible) {
@@ -1252,12 +1270,12 @@ void UI::settingsPage(Rect r) {
         const double percent = componentProgressPercent(progress);
         std::ostringstream description;
         if (progress.phase == ComponentPhase::Downloading) {
-            description << "Скачано " << std::fixed << std::setprecision(1)
-                        << double(progress.received) / (1024.0 * 1024.0) << " МиБ";
+            description << tr("Скачано ", "Downloaded ") << std::fixed << std::setprecision(1)
+                        << double(progress.received) / (1024.0 * 1024.0) << tr(" МиБ", " MiB");
             if (progress.total) description << " / " << double(progress.total) / (1024.0 * 1024.0)
-                                            << " МиБ · " << int(percent) << "%";
-            else description << " · размер неизвестен";
-        } else description << "Обработка скачанного компонента…";
+                                            << tr(" МиБ · ", " MiB · ") << int(percent) << "%";
+            else description << tr(" · размер неизвестен", " · size unknown");
+        } else description << tr("Обработка скачанного компонента…", "Processing downloaded component…");
         c.text(description.str(), r.x + 24, y + 337, 11, muted, r.w - 48);
         Rect track{r.x + 24, y + 345, r.w - 48, 6};
         c.rect(track, 3, edge);
@@ -1270,41 +1288,41 @@ void UI::settingsPage(Rect r) {
         }
     }
     const bool available = std::any_of(app.components.begin(), app.components.end(), [](const Component &c) { return c.update; });
-    button("settings:scanComponents", {r.x + 24, y + 405, 220, 40}, app.componentsBusy ? "Выполняется…" : "Проверить компоненты", [this] { app.action("update"); }, true, !app.componentsBusy);
-    button("settings:installComponents", {r.x + 254, y + 405, 220, 40}, "Установить / обновить", [this] { app.action("installComponents"); }, false, !app.componentsBusy && app.componentsScanned && available);
-    button("settings:data", {r.x + 484, y + 405, 170, 40}, "Папка компонентов", [this] { app.action("dataFolder"); }, false, !app.componentsBusy);
+    button("settings:scanComponents", {r.x + 24, y + 405, 220, 40}, app.componentsBusy ? tr("Выполняется…", "Working…") : tr("Проверить компоненты", "Check components"), [this] { app.action("update"); }, true, !app.componentsBusy);
+    button("settings:installComponents", {r.x + 254, y + 405, 220, 40}, tr("Установить / обновить", "Install / update"), [this] { app.action("installComponents"); }, false, !app.componentsBusy && app.componentsScanned && available);
+    button("settings:data", {r.x + 484, y + 405, 170, 40}, tr("Папка компонентов", "Components folder"), [this] { app.action("dataFolder"); }, false, !app.componentsBusy);
     static const auto toolsPath = utf8((dataRoot() / L"tools").wstring());
-    c.text("Папка: " + toolsPath, r.x + 24, y + 464, 11, muted, r.w - 48);
-    c.text("yt-dlp и Deno — GitHub; FFmpeg и FFprobe — gyan.dev. Проверка SHA-256.", r.x + 24, y + 485, 10, muted, r.w - 48);
+    c.text(tr("Папка: ", "Folder: ") + toolsPath, r.x + 24, y + 464, 11, muted, r.w - 48);
+    c.text(tr("yt-dlp и Deno — GitHub; FFmpeg и FFprobe — gyan.dev. Проверка SHA-256.", "yt-dlp and Deno: GitHub; FFmpeg and FFprobe: gyan.dev. SHA-256 verified."), r.x + 24, y + 485, 10, muted, r.w - 48);
     y += 511;
     card({r.x, y, r.w, 217});
-    c.text("ЗАГРУЗКИ И ПОДКЛЮЧЕНИЕ", r.x + 24, y + 32, 10, accent);
-    c.text("Параллельные фрагменты на одну загрузку", r.x + 24, y + 77, 13, text);
+    c.text(tr("ЗАГРУЗКИ И ПОДКЛЮЧЕНИЕ", "DOWNLOADS AND CONNECTION"), r.x + 24, y + 32, 10, accent);
+    c.text(tr("Параллельные фрагменты на одну загрузку", "Parallel fragments per download"), r.x + 24, y + 77, 13, text);
     choice("settings:fragments", {r.x + r.w - 230, y + 53, 200, 40},
-           {"1 фрагмент", "2 фрагмента", "4 фрагмента", "8 фрагментов"},
+           {tr("1 фрагмент", "1 fragment"), tr("2 фрагмента", "2 fragments"), tr("4 фрагмента", "4 fragments"), tr("8 фрагментов", "8 fragments")},
            app.fragments == 1   ? 0
            : app.fragments == 2 ? 1
            : app.fragments == 4 ? 2
                                 : 3,
            [this](int i) { app.fragments = 1 << i; });
-    button("settings:unregister", {r.x + 24, y + 112, 293, 38}, "Удалить регистрацию подключения",
+    button("settings:unregister", {r.x + 24, y + 112, 293, 38}, tr("Удалить регистрацию подключения", "Remove connector registration"),
            [this] { app.action("unregisterConnector"); });
-    c.text("DRM не обходится. Авторизация используется только для вашего контента.", r.x + 24, y + 188, 11,
+    c.text(tr("DRM не обходится. Авторизация используется только для вашего контента.", "DRM is not bypassed. Authentication is used only for your content."), r.x + 24, y + 188, 11,
            muted, r.w - 48);
     y += 233;
     card({r.x, y, r.w, 90});
-    c.text("Сохранять предыдущие результаты анализа", r.x + 24, y + 48, 13, text, r.w - 130);
+    c.text(tr("Сохранять предыдущие результаты анализа", "Keep previous analysis results"), r.x + 24, y + 48, 13, text, r.w - 130);
     toggle("settings:keepResults", {r.x + r.w - 80, y + 28, 51, 28}, app.keepResults,
            [this] { app.keepResults = !app.keepResults; });
     y += 106;
     card({r.x, y, r.w, 138});
-    c.text("ЗАСТАВКА ПРИ ЗАПУСКЕ", r.x + 24, y + 30, 10, accent);
-    c.text("Показывать заставку", r.x + 24, y + 70, 13, text);
+    c.text(tr("ЗАСТАВКА ПРИ ЗАПУСКЕ", "STARTUP SCREEN"), r.x + 24, y + 30, 10, accent);
+    c.text(tr("Показывать заставку", "Show startup screen"), r.x + 24, y + 70, 13, text);
     toggle("settings:splash", {r.x + r.w - 80, y + 50, 51, 28}, app.splashEnabled,
            [this] { app.splashEnabled = !app.splashEnabled; });
-    c.text("Длительность", r.x + 24, y + 113, 13, text);
+    c.text(tr("Длительность", "Duration"), r.x + 24, y + 113, 13, text);
     choice("settings:splashDuration", {r.x + r.w - 230, y + 86, 200, 38},
-           {"1 секунда", "2 секунды", "3 секунды", "4 секунды", "5 секунд", "6 секунд", "7 секунд", "8 секунд", "9 секунд", "10 секунд"},
+           {tr("1 секунда", "1 second"), tr("2 секунды", "2 seconds"), tr("3 секунды", "3 seconds"), tr("4 секунды", "4 seconds"), tr("5 секунд", "5 seconds"), tr("6 секунд", "6 seconds"), tr("7 секунд", "7 seconds"), tr("8 секунд", "8 seconds"), tr("9 секунд", "9 seconds"), tr("10 секунд", "10 seconds")},
            app.splashSeconds - 1, [this](int i) { app.splashSeconds = i + 1; });
     c.pop();
     scrollbar("settings:scroll", view, settingsScroll);
@@ -1318,34 +1336,34 @@ void UI::aboutPage(Rect r) {
     card({r.x, y, r.w, 152});
     c.text("KRECHETOV LABS", r.x + 24, y + 30, 11, accent, r.w - 48);
     c.text("StreamShelf", r.x + 24, y + 69, 25, text, r.w - 48);
-    c.text("Версия 2.4 Beta · Windows x64", r.x + 24, y + 100, 12, muted, r.w - 48);
-    c.text("Разработчик: Арсений Кречетов", r.x + 24, y + 126, 12, muted, r.w - 48);
+    c.text(tr("Версия 2.5 Beta · Windows x64", "Version 2.5 Beta · Windows x64"), r.x + 24, y + 100, 12, muted, r.w - 48);
+    c.text(tr("Разработчик: Арсений Кречетов", "Developer: Arseniy Krechetov"), r.x + 24, y + 126, 12, muted, r.w - 48);
     y += 168;
     card({r.x, y, r.w, 220});
-    c.text("О ПРОГРАММЕ", r.x + 24, y + 30, 10, accent, r.w - 48);
-    c.text("StreamShelf помогает находить и сохранять доступные медиа со страниц браузера.", r.x + 24, y + 62, 12, text, r.w - 48);
-    c.text("Расширение передаёт активную вкладку и доступные данные для анализа.", r.x + 24, y + 87, 12, text, r.w - 48);
-    c.text("Обычный анализ использует yt-dlp; глубокий дополняет его данными страницы.", r.x + 24, y + 112, 12, text, r.w - 48);
-    c.text("Результаты доступны в карточках и подробном списке с выбором форматов.", r.x + 24, y + 137, 12, text, r.w - 48);
-    c.text("Для динамических потоков может понадобиться запустить воспроизведение.", r.x + 24, y + 162, 12, muted, r.w - 48);
-    c.text("Доступность скачивания зависит от источника и его ограничений.", r.x + 24, y + 187, 12, muted, r.w - 48);
+    c.text(tr("О ПРОГРАММЕ", "ABOUT"), r.x + 24, y + 30, 10, accent, r.w - 48);
+    c.text(tr("StreamShelf помогает находить и сохранять доступные медиа со страниц браузера.", "StreamShelf finds and saves available media from browser pages."), r.x + 24, y + 62, 12, text, r.w - 48);
+    c.text(tr("Расширение передаёт активную вкладку и доступные данные для анализа.", "The extension sends the active tab and available data for analysis."), r.x + 24, y + 87, 12, text, r.w - 48);
+    c.text(tr("Обычный анализ использует yt-dlp; глубокий дополняет его данными страницы.", "Standard analysis uses yt-dlp; deep analysis adds page data."), r.x + 24, y + 112, 12, text, r.w - 48);
+    c.text(tr("Результаты доступны в карточках и подробном списке с выбором форматов.", "Results are available as cards or a detailed list with format selection."), r.x + 24, y + 137, 12, text, r.w - 48);
+    c.text(tr("Для динамических потоков может понадобиться запустить воспроизведение.", "Dynamic streams may require starting playback."), r.x + 24, y + 162, 12, muted, r.w - 48);
+    c.text(tr("Доступность скачивания зависит от источника и его ограничений.", "Download availability depends on the source and its restrictions."), r.x + 24, y + 187, 12, muted, r.w - 48);
     y += 236;
     card({r.x, y, r.w, 205});
-    c.text("ЗАГРУЗКА И ОБРАБОТКА", r.x + 24, y + 30, 10, accent, r.w - 48);
-    c.text("Очередь загрузок поддерживает выбор файлов, повтор и открытие результата.", r.x + 24, y + 62, 12, text, r.w - 48);
-    c.text("FFmpeg объединяет скачанные видео, аудио, субтитры и главы в контейнер.", r.x + 24, y + 87, 12, text, r.w - 48);
-    c.text("Доступны MKV, MP4, MOV и WebM, копирование потоков и выбор кодеков.", r.x + 24, y + 112, 12, text, r.w - 48);
-    c.text("FFprobe уточняет параметры и проверяет обработанные файлы.", r.x + 24, y + 137, 12, text, r.w - 48);
-    c.text("Поддержка конкретного формата зависит от контейнера, кодеков и источника.", r.x + 24, y + 170, 12, muted, r.w - 48);
+    c.text(tr("ЗАГРУЗКА И ОБРАБОТКА", "DOWNLOADS AND PROCESSING"), r.x + 24, y + 30, 10, accent, r.w - 48);
+    c.text(tr("Очередь загрузок поддерживает выбор файлов, повтор и открытие результата.", "The queue supports file selection, retries, and opening results."), r.x + 24, y + 62, 12, text, r.w - 48);
+    c.text(tr("FFmpeg объединяет скачанные видео, аудио, субтитры и главы в контейнер.", "FFmpeg combines downloaded video, audio, subtitles, and chapters in a container."), r.x + 24, y + 87, 12, text, r.w - 48);
+    c.text(tr("Доступны MKV, MP4, MOV и WebM, копирование потоков и выбор кодеков.", "MKV, MP4, MOV, and WebM, stream copy, and codec selection are supported."), r.x + 24, y + 112, 12, text, r.w - 48);
+    c.text(tr("FFprobe уточняет параметры и проверяет обработанные файлы.", "FFprobe reads properties and verifies processed files."), r.x + 24, y + 137, 12, text, r.w - 48);
+    c.text(tr("Поддержка конкретного формата зависит от контейнера, кодеков и источника.", "Format support depends on the container, codecs, and source."), r.x + 24, y + 170, 12, muted, r.w - 48);
     y += 221;
     card({r.x, y, r.w, 238});
-    c.text("РАЗРАБОТКА И ПОДКЛЮЧЕНИЕ", r.x + 24, y + 30, 10, accent, r.w - 48);
-    c.text("Нативное приложение на C++ и WinAPI; интерфейс отрисовывается через OpenGL.", r.x + 24, y + 62, 12, text, r.w - 48);
-    c.text("Мастер установки расширения работает в Яндекс Браузере, Firefox и Chrome.", r.x + 24, y + 87, 12, text, r.w - 48);
-    c.text("Связь с расширением использует локальный Native Messaging.", r.x + 24, y + 112, 12, text, r.w - 48);
-    c.text("Для поиска на сайтах расширению требуется подтверждённый доступ в браузере.", r.x + 24, y + 137, 12, text, r.w - 48);
-    c.text("В работе используются yt-dlp, FFmpeg, FFprobe и Deno.", r.x + 24, y + 162, 12, text, r.w - 48);
-    c.text("Информация о лицензиях сторонних компонентов находится в папке программы.", r.x + 24, y + 194, 12, muted, r.w - 48);
+    c.text(tr("РАЗРАБОТКА И ПОДКЛЮЧЕНИЕ", "DEVELOPMENT AND CONNECTION"), r.x + 24, y + 30, 10, accent, r.w - 48);
+    c.text(tr("Нативное приложение на C++ и WinAPI; интерфейс отрисовывается через OpenGL.", "A native C++ and WinAPI application with an OpenGL interface."), r.x + 24, y + 62, 12, text, r.w - 48);
+    c.text(tr("Мастер установки расширения работает в Яндекс Браузере, Firefox и Chrome.", "The extension setup guide supports Yandex Browser, Firefox, and Chrome."), r.x + 24, y + 87, 12, text, r.w - 48);
+    c.text(tr("Связь с расширением использует локальный Native Messaging.", "The extension connects using local Native Messaging."), r.x + 24, y + 112, 12, text, r.w - 48);
+    c.text(tr("Для поиска на сайтах расширению требуется подтверждённый доступ в браузере.", "The extension needs browser permission to search websites."), r.x + 24, y + 137, 12, text, r.w - 48);
+    c.text(tr("В работе используются yt-dlp, FFmpeg, FFprobe и Deno.", "StreamShelf uses yt-dlp, FFmpeg, FFprobe, and Deno."), r.x + 24, y + 162, 12, text, r.w - 48);
+    c.text(tr("Информация о лицензиях сторонних компонентов находится в папке программы.", "Third-party license information is in the application folder."), r.x + 24, y + 194, 12, muted, r.w - 48);
     c.pop();
     scrollbar("about:scroll", view, aboutScroll);
 }
@@ -1402,8 +1420,8 @@ void UI::overlays() {
     float mv = to("modal:visibility", app.modalTitle.empty() ? 0 : 1, 0, 4.5f, 1);
     static std::string lastTitle, lastBody;
     if (!app.modalTitle.empty()) {
-        lastTitle = app.modalTitle;
-        lastBody = app.modalBody;
+        lastTitle = interfaceText(app.interfaceLanguage, app.modalTitle);
+        lastBody = interfaceText(app.interfaceLanguage, app.modalBody);
     }
     if (mv > .002f) {
         hits.clear();
@@ -1473,7 +1491,7 @@ void UI::overlays() {
         scrollbar("modal:scroll", body, modalScroll);
         if (app.modalConfirm)
             button(
-                "modal:confirm", {box.x + box.w - 390, box.y + box.h - 60, 210, 38}, app.modalConfirmLabel,
+                "modal:confirm", {box.x + box.w - 390, box.y + box.h - 60, 210, 38}, interfaceText(app.interfaceLanguage, app.modalConfirmLabel),
                 [this] {
                     auto f = app.modalConfirm;
                     app.modalTitle.clear();
@@ -1482,7 +1500,7 @@ void UI::overlays() {
                         f();
                 },
                 true);
-        button("modal:close", {box.x + box.w - 164, box.y + box.h - 60, 136, 38}, "Закрыть", [this] {
+        button("modal:close", {box.x + box.w - 164, box.y + box.h - 60, 136, 38}, tr("Закрыть", "Close"), [this] {
             app.modalTitle.clear();
             app.modalConfirm = nullptr;
         });
@@ -1500,7 +1518,7 @@ void UI::rightClick(float x,float y) {
     for(auto it=hits.rbegin();it!=hits.rend();++it)if(it->edit&&it->rect.contains(mx,my)){
         if(focus!=it->id && !(it->id=="log:select"&&focus=="log:selection")){if(it->action)it->action();}
         bool logFocus=focus=="log:selection";
-        menuId="context:text";menuAnchor={mx,my,1,1};menuItems=logFocus?std::vector<std::string>{"Копировать","Выделить всё"}:std::vector<std::string>{"Копировать","Вырезать","Вставить","Выделить всё"};
+        menuId="context:text";menuAnchor={mx,my,1,1};menuItems=logFocus?std::vector<std::string>{tr("Копировать", "Copy"),tr("Выделить всё", "Select all")}:std::vector<std::string>{tr("Копировать", "Copy"),tr("Вырезать", "Cut"),tr("Вставить", "Paste"),tr("Выделить всё", "Select all")};
         menuSelect=[this,logFocus](int n){if(logFocus){key(n==0?'C':'A',true,false);}else{const int keys[]={'C','X','V','A'};if(n>=0&&n<4)key(keys[n],true,false);}};
         menuScroll.p.target=menuScroll.p.value=0;menuOpen=true;return;
     }

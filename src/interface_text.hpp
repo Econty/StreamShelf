@@ -1,0 +1,535 @@
+#pragma once
+#include <string>
+#include <string_view>
+#include <unordered_map>
+namespace ss {
+// Windows LANGID stores the primary language in its low ten bits; Russian is 0x19.
+constexpr const char *defaultInterfaceLanguage(unsigned windowsUiLanguage) {
+    return (windowsUiLanguage & 0x03ffu) == 0x0019u ? "ru" : "en";
+}
+// Only call this for application-owned status and category values, never user content.
+inline std::string interfaceText(std::string_view language, const std::string &value) {
+    if (language != "en") return value;
+    static const std::unordered_map<std::string, std::string> translations = {
+        {"Все категории", "All categories"}, {"Видео", "Video"}, {"Видео без звука", "Video without audio"},
+        {"Видео · звук не проверен", "Video · audio not checked"}, {"Аудио", "Audio"}, {"Субтитры", "Subtitles"},
+        {"Автосубтитры", "Automatic subtitles"}, {"Превью", "Preview"}, {"Данные", "Data"},
+        {"Изображения", "Images"}, {"Защищённые", "Protected"}, {"Требуют проверки", "Needs verification"},
+        {"Тип потока", "Stream type"}, {"Формат", "Format"}, {"Описание формата", "Format description"},
+        {"Расширение не найдено", "Extension not found"}, {"Расширение установлено", "Extension installed"},
+        {"Расширение установлено · выключено", "Extension installed · disabled"}, {"Подключение подтверждается расширением", "Connection is verified by the extension"},
+        {"DRM / лицензия · кандидат", "DRM / license · candidate"}, {"Этот источник не содержит медиа подходящего типа", "This source does not contain the required media type"},
+        {"Браузер", "Browser"}, {"Яндекс Браузер", "Yandex Browser"},
+        {"Сеть", "Network"}, {"Код страницы", "Page source"}, {"Обложка", "Cover"}, {"Главы", "Chapters"}, {"Метаданные", "Metadata"}, {"Вложения", "Attachments"},
+        {"Ресурс", "Resource"}, {"Без звука", "No audio"}, {"Со звуком", "With audio"},
+        {"Звук не проверен", "Audio not checked"}, {"Ожидание", "Waiting"},
+        {"Пауза сервера", "Server pause"}, {"Загрузка остановлена", "Download stopped"}, {"Файл сохранён", "File saved"},
+        {"Превью недоступно", "Preview unavailable"}, {"Вложенная обложка не найдена", "Embedded cover not found"},
+        {"Не удалось прочитать вложенную обложку", "Could not read the embedded cover"}, {"Аудиофайл", "Audio file"}, {"Обложка не предоставлена", "No cover provided"},
+        {"Ожидание повтора", "Waiting to retry"}, {"Ожидание источника", "Waiting for source"},
+        {"Ожидание источников", "Waiting for sources"}, {"Нужен выбор", "Action required"},
+        {"Готово", "Completed"}, {"Ошибка", "Error"}, {"Отменено", "Cancelled"},
+        {"Проверка результата", "Checking result"}, {"Распознавание субтитров", "Recognizing subtitles"},
+        {"Сборка контейнера", "Building container"}, {"Объединение", "Merging"}, {"Скачивание", "Downloading"},
+        {"Уточняем параметры…", "Checking properties…"}, {"Не удалось уточнить параметры", "Could not determine properties"},
+        {"Браузер не подключён", "Browser not connected"}, {"Подготовка инструментов…", "Preparing tools…"},
+        {"yt-dlp отсутствует · установите в настройках", "yt-dlp missing · install it in Settings"},
+        {"yt-dlp · движок готов", "yt-dlp · ready"}, {"Не удалось выполнить действие", "Action failed"},
+        {"Продолжить", "Continue"}, {"Загрузка превью…", "Loading preview…"}, {"Ожидание превью…", "Waiting for preview…"},
+        {"Ошибка подготовки инструментов", "Failed to prepare tools"},
+        {"Проверка официального выпуска yt-dlp…", "Checking the official yt-dlp release…"},
+        {"yt-dlp · локальная версия готова", "yt-dlp · local version ready"},
+        {"Расширение установлено и подключено", "Extension installed and connected"},
+        {"Поиск включён. Воспроизведите медиа.", "Search enabled. Play media in the browser."},
+        {"Поиск остановлен", "Search stopped"},
+        {"Установка завершена. Версии компонентов проверены.", "Installation complete. Component versions checked."},
+        {"Проверка компонентов завершена", "Component check complete"},
+        {"Анализ завершён", "Analysis complete"},
+        {"Отметьте нужные файлы галочками", "Select the files you want"},
+        {"Список очищен", "List cleared"},
+        {"Браузер добавлен. Укажите папку профиля при необходимости.", "Browser added. Select a profile folder if needed."},
+        {"Мастер установки открыт. Следуйте подсказкам поверх браузера.", "Setup guide opened. Follow its instructions over the browser."},
+        {"Отправка команды расширению…", "Sending command to the extension…"},
+        {"Cookies импортированы и защищены DPAPI", "Cookies imported and protected with DPAPI"},
+        {"Журнал сохранён", "Log saved"},
+        {"Импортированные cookies удалены", "Imported cookies removed"},
+        {"Журнал скопирован", "Log copied"},
+        {"Дождитесь завершения команды или нажмите Ctrl+C", "Wait for the command to finish or press Ctrl+C"},
+        {"Нет активных или ожидающих задач", "No active or waiting tasks"},
+        {"Нет записей для удаления", "No entries to remove"},
+        {"Итоговый файл не найден. Откройте папку загрузки.", "Output file not found. Open the download folder."},
+        {"Регистрация Native Messaging удалена", "Native Messaging registration removed"},
+        {"Не установлен · выпуск не проверен", "Not installed · release not checked"},
+        {"Установлен · выпуск не проверен", "Installed · release not checked"},
+        {"Не установлен", "Not installed"},
+        {"Доступно обновление", "Update available"},
+        {"Актуальная версия", "Up to date"},
+        {"Не удалось проверить выпуск", "Could not check release"},
+        {"Установленная версия новее доступной; обновление пары отменено", "Installed version is newer; pair update cancelled"},
+        {"Остановить загрузки?", "Stop downloads?"},
+        {"Текущие загрузки будут отменены. Частичные файлы останутся для повторного запуска.", "Current downloads will be cancelled. Partial files will remain for retry."},
+        {"Остановить и выйти", "Stop and exit"},
+        {"Ручная установка расширения", "Manual extension installation"},
+        {"JSON анализа · содержит временные адреса", "Analysis JSON · contains temporary URLs"},
+        {"Сначала выполните анализ ссылки", "Analyze a URL first"},
+        {"Не все медиа удалось скачать", "Some media could not be downloaded"},
+        {"Собрать доступное", "Build from available"},
+        {"Файл на компьютере", "Local file"},
+        {"Не все источники доступны. Сохранённые файлы оставлены отдельно.", "Some sources are unavailable. Saved files have been kept separately."},
+        {"Подготовка обработки FFmpeg…", "Preparing FFmpeg processing…"},
+        {"Обработка завершена, проверяем итоговый файл…", "Processing complete; checking the output file…"},
+        {"Соединяемся с сервером…", "Connecting to server…"},
+        {"Обновляем ссылку на субтитры…", "Refreshing the subtitle URL…"},
+        {"Дождитесь чтения дорожек файлов", "Wait for file tracks to be read"},
+        {"Не удалось разобрать потоки файла; исходник сохранён", "Could not read file streams; the original was kept"},
+        {"Не удалось прочитать главы для редактирования", "Could not read chapters for editing"},
+        {"Не удалось прочитать метаданные источника", "Could not read source metadata"},
+        {"Дождитесь чтения всех импортированных файлов", "Wait for all imported files to be read"},
+        {"Дождитесь чтения метаданных дорожек", "Wait for track metadata to be read"},
+        {"Выберите от 1 до 64 источников.", "Select between 1 and 64 sources."},
+        {"Выберите полную папку сохранения", "Select an absolute destination folder"},
+        {"Укажите имя итогового файла", "Enter an output file name"},
+        {"Проверьте качество сохранения.", "Check the export quality."},
+        {"Защищённые потоки нельзя скачать", "Protected streams cannot be downloaded"},
+        {"Локальный файл недоступен", "Local file is unavailable"},
+        {"Проверьте формат сохранения.", "Check the export format."},
+        {"Добавьте медиа в конструктор", "Add media to the builder"},
+        {"В одной сборке допускается до 64 источников", "A build can contain up to 64 sources"},
+        {"Укажите имя контейнера", "Enter a container name"},
+        {"Некорректные параметры дорожки", "Invalid track settings"},
+        {"Укажите максимальный битрейт и размер буфера вместе", "Specify both maximum bitrate and buffer size"},
+        {"FLAC использует качество без потерь; уберите заданный битрейт", "FLAC is lossless; remove the specified bitrate"},
+        {"Для расширенных параметров выберите кодек перекодирования", "Select a transcoding codec to use advanced settings"},
+        {"Введите существующий код ISO 639 или название языка; для неизвестного языка укажите und", "Enter a valid ISO 639 code or language name; use und for an unknown language"},
+        {"Дата должна быть в формате ГГГГ или ГГГГ-ММ-ДД", "Date must use YYYY or YYYY-MM-DD"},
+        {"Год должен быть больше нуля", "Year must be greater than zero"},
+        {"Укажите существующую календарную дату", "Enter a valid calendar date"},
+        {"Выбранный кодировщик недоступен. Выберите другой кодек.", "Selected encoder unavailable. Choose another codec."},
+        {"Проверка кодировщиков ещё выполняется. Дождитесь её завершения.", "Encoders are still being checked. Wait for completion."},
+        {"В каждой категории выберите одну дорожку по умолчанию", "Select one default track per category"},
+        {"Добавьте видео или аудио", "Add video or audio"},
+        {"Выберите одну обложку, один источник глав и один источник метаданных", "Select one cover, one chapter source, and one metadata source"},
+        {"Неверный источник обновления", "Invalid update source"},
+        {"Нет SHA-256 yt-dlp.exe", "Missing yt-dlp.exe SHA-256 checksum"},
+        {"SHA-256 обновления не совпал", "Update SHA-256 checksum mismatch"},
+        {"Новая версия yt-dlp не запускается", "The new yt-dlp version failed to start"},
+        {"Не удалось заменить yt-dlp", "Could not replace yt-dlp"},
+        {"Введите HTTP/HTTPS-ссылку", "Enter an HTTP/HTTPS URL"},
+        {"Анализ отменён", "Analysis cancelled"},
+        {"Нет пути к контейнеру", "Container path is missing"},
+        {"Превью требует отдельной авторизации", "Preview requires separate authorization"},
+        {"Путь к папке некорректен. Выберите папку заново кнопкой «Папка».", "Invalid folder path. Select the folder again using the Folder button."},
+        {"Защищённые потоки недоступны для скачивания", "Protected streams cannot be downloaded"},
+        {"Не удалось сохранить файл в выбранной папке.", "Could not save the file in the selected folder."},
+        {"Не удалось подобрать свободное имя файла.", "Could not find an available file name."},
+        {"Не удалось проверить файл вовремя. Скачанный файл сохранён в папке задачи.", "File verification timed out. The download was kept in the task folder."},
+        {"Выберите от 1 до 64 медиафайлов", "Select between 1 and 64 media files"},
+        {"Не удалось прочитать дорожки одного из файлов. Проверьте файл и повторите.", "Could not read tracks from a file. Check it and try again."},
+        {"Исходный файл отсутствует: выберите загрузки заново", "Source file missing: select the downloads again"},
+        {"В выбранном файле нет поддерживаемых видео-, аудио- или субтитровых дорожек", "The selected file has no supported video, audio, or subtitle tracks"},
+        {"Выберите хотя бы одну видео- или аудиодорожку", "Select at least one video or audio track"},
+        {"Итоговый файл не содержит все выбранные дорожки или главы. Попробуйте другой контейнер.", "The output file is missing selected tracks or chapters. Try another container."},
+        {"Субтитры выбранного языка и формата больше не доступны", "Subtitles in the selected language and format are no longer available"},
+        {"Сервер вернул пустые субтитры", "The server returned empty subtitles"},
+        {"Вместо файла сервер вернул HTML-страницу. Обновите страницу и повторите анализ.", "The server returned an HTML page instead of a file. Reload the page and retry analysis."},
+        {"Не удалось определить итоговый файл загрузки.", "Could not determine the downloaded file."},
+        {"Итоговый файл не найден в папке загрузки.", "Output file not found in the download folder."},
+        {"Некорректный сохранённый кодек. Откройте конструктор и выберите доступный вариант.", "Invalid saved codec. Open the builder and choose an available option."},
+        {"Выберите страницу для анализа", "Select a page to analyze"},
+        {"Для глубокого анализа подключите расширение и откройте страницу с медиа в браузере", "For deep analysis, connect the extension and open a media page in the browser"},
+        {"Выберите открытую вкладку браузера и повторите анализ", "Select an open browser tab and retry analysis"},
+        {"Выберите EXE браузера", "Select the browser EXE"},
+        {"Сначала выберите браузер", "Select a browser first"},
+        {"Откройте страницу с медиа в браузере и вернитесь в StreamShelf", "Open a media page in the browser and return to StreamShelf"},
+        {"Не найден системный командный процессор", "Windows command processor not found"},
+        {"В файле не найдены поддерживаемые дорожки", "No supported tracks found in the file"},
+        {"Выберите формат обложки PNG или JPG", "Choose PNG or JPG for the cover"},
+        {"Выбранный контейнер не сохраняет флаг принудительных субтитров. Снимите флаг или смените контейнер.", "The selected container cannot save the forced subtitle flag. Clear the flag or choose another container."},
+        {"Имя обработчика дорожки доступно для MP4 и MOV.", "Track handler names are available for MP4 and MOV."},
+        {"Для расширенных тегов дорожки выберите MKV или WebM либо очистите эти поля.", "Choose MKV or WebM for extended track tags, or clear those fields."},
+        {"Для MP3, M4A и FLAC выберите ровно одну аудиодорожку.", "For MP3, M4A, and FLAC, select exactly one audio track."},
+        {"Некорректная структура MOV.", "Invalid MOV structure."},
+        {"Файл обложки пуст.", "The cover file is empty."},
+        {"Обложка слишком велика.", "The cover is too large."},
+        {"Не удалось прочитать MOV.", "Could not read the MOV file."},
+        {"Не удалось прочитать структуру MOV.", "Could not read the MOV structure."},
+        {"Не удалось безопасно добавить обложку в MOV.", "Could not safely add the cover to the MOV file."},
+        {"Не удалось сохранить обложку в MOV. Исходники сохранены.", "Could not save the cover in the MOV file. Sources were kept."},
+        {"Для отдельного сохранения нужен один доступный источник.", "Separate export requires one available source."},
+        {"Источник недоступен. Сохранённые файлы не удалены.", "Source unavailable. Saved files were not deleted."},
+        {"Некорректные настройки сохранения.", "Invalid export settings."},
+        {"Итоговый файл уже существует. Исходник сохранён.", "The output file already exists. The original was kept."},
+        {"Проверьте языки Tesseract, например eng или rus+eng.", "Check Tesseract languages, for example eng or rus+eng."},
+        {"Превышено время распознавания. Исходник сохранён.", "Recognition timed out. The original was kept."},
+        {"Не найдено изображений субтитров для распознавания. Исходник сохранён.", "No subtitle images found for recognition. The original was kept."},
+        {"Такое преобразование не поддерживается.", "This conversion is not supported."},
+        {"Для вложений и дополнительных потоков выберите MKV. Исходники сохранены.", "Choose MKV for attachments and additional streams. Sources were kept."},
+        {"Вложение не найдено в исходном файле.", "Attachment not found in the source file."},
+        {"Нет доступных видео- или аудиодорожек", "No video or audio tracks are available"},
+        {"Выберите формат обложки PNG или JPG.", "Choose PNG or JPG for the cover."},
+        {"Для обложки выберите файл изображения. Исходники сохранены.", "Select an image file for the cover. Sources were kept."},
+        {"Некорректное имя тега дорожки.", "Invalid track tag name."},
+        {"Некорректное имя общего тега.", "Invalid global tag name."},
+        {"Источник метаданных должен содержать JSON-объект", "The metadata source must contain a JSON object"},
+        {"Нет списка файлов выпуска", "Release file list is missing"},
+        {"Файлы выпуска не найдены", "Release files not found"},
+        {"Не удалось определить версию выпуска", "Could not determine release version"},
+        {"Неизвестный формат версии", "Unknown version format"},
+        {"Версия FFmpeg недоступна", "FFmpeg version unavailable"},
+        {"Контрольная сумма не найдена", "Checksum not found"},
+        {"Нет системного каталога", "System directory unavailable"},
+        {"Для распаковки требуется системный tar.exe", "The system tar.exe is required for extraction"},
+        {"Загрузка отменена", "Download cancelled"},
+        {"Повторяющийся файл в архиве", "Duplicate file in archive"},
+        {"В архиве отсутствуют ожидаемые файлы", "The archive is missing expected files"},
+        {"Распакованный файл отсутствует", "Extracted file is missing"},
+        {"Сначала проверьте компоненты", "Check components first"},
+        {"Для этого браузера доступна ручная установка", "Manual installation is available for this browser"},
+        {"Для мастера выберите стандартный профиль браузера (Default / Profile N)", "Select a standard browser profile (Default / Profile N) for the guide"},
+        {"Для этого браузера мастер недоступен", "The guide is unavailable for this browser"},
+        {"Сначала подготовьте расширение", "Prepare the extension first"},
+        {"Не удалось подготовить окно мастера", "Could not prepare the guide window"},
+        {"Формат OpenGL окна мастера", "Invalid guide window OpenGL format"},
+        {"Контекст OpenGL окна мастера", "Could not create the guide OpenGL context"},
+        {"Не удалось создать OpenGL 3.3 для мастера", "Could not create an OpenGL 3.3 context for the guide"},
+        {"Не удалось создать мастер установки", "Could not create the setup guide"},
+        {"Не удалось создать подсветку", "Could not create the highlight"},
+        {"Не удалось создать затемнение", "Could not create the dimming layer"},
+        {"Не удалось открыть мастер установки", "Could not open the setup guide"},
+        {"Не удалось открыть обводку", "Could not open the highlight"},
+        {"Неверный UTF-8", "Invalid UTF-8"},
+        {"Нет LocalAppData", "LocalAppData unavailable"},
+        {"Не удалось прочитать файл", "Could not read file"},
+        {"Файл слишком большой", "File is too large"},
+        {"Ошибка чтения файла", "Error reading file"},
+        {"Ошибка записи файла", "Error writing file"},
+        {"Изображение слишком большое или пустое", "Image is empty or too large"},
+        {"Некорректный размер изображения", "Invalid image size"},
+        {"MP3 поддерживает не более 255 глав. Выберите M4A или сохраните главы отдельно. Исходники сохранены.", "MP3 supports at most 255 chapters. Choose M4A or save chapters separately. Sources were kept."},
+        {"MP3, M4A и FLAC поддерживают одну аудиодорожку. Выберите другой формат или источник. Исходники сохранены.", "MP3, M4A, and FLAC support one audio track. Choose another format or source. Sources were kept."},
+        {"OCR доступен для графических субтитров. Исходник сохранён.", "OCR is available for bitmap subtitles. The original was kept."},
+        {"Tesseract не выполнил распознавание. Проверьте установку и языковые данные. Исходник сохранён.", "Tesseract recognition failed. Check its installation and language data. The original was kept."},
+        {"Tesseract не распознал один из фрагментов. Исходник сохранён; проверьте язык и изображение.", "Tesseract could not recognize a segment. The original was kept; check the language and image."},
+        {"В итоговом файле отсутствуют выбранные дорожки. Исходники сохранены.", "The output file is missing selected tracks. Sources were kept."},
+        {"Вложенная обложка не поддерживается в WebM. Выберите другой формат.", "Embedded cover art is not supported in WebM. Choose another format."},
+        {"Выберите изображение для преобразования. Исходник сохранён.", "Select an image to convert. The original was kept."},
+        {"Выберите один источник общих метаданных.", "Select one global metadata source."},
+        {"Графические субтитры нельзя преобразовать в текст без распознавания. Оставьте исходный формат. Исходники сохранены.", "Bitmap subtitles cannot be converted to text without OCR. Keep the original format. Sources were kept."},
+        {"Допускается не более 1000 фрагментов OCR за одну задачу. Исходник сохранён.", "At most 1,000 OCR segments are allowed per task. The original was kept."},
+        {"Исходный аудиокодек несовместим с выбранным форматом. Выберите соответствующий кодек в настройках дорожки. Исходники сохранены.", "The source audio codec is incompatible with the selected format. Choose a compatible codec in track settings. Sources were kept."},
+        {"Исходный файл отсутствует. Сборка остановлена; остальные файлы сохранены.", "Source file is missing. The build stopped; remaining files were kept."},
+        {"Итоговый файл уже существует; сохранённый файл не заменён", "The output file already exists; the saved file was not replaced"},
+        {"Контейнер изменил границы или названия глав. Выберите другой формат. Исходники сохранены.", "The container changed chapter boundaries or names. Choose another format. Sources were kept."},
+        {"Контейнер изменил признаки дорожки по умолчанию или принудительной дорожки. Исходники сохранены.", "The container changed default or forced track flags. Sources were kept."},
+        {"Контейнер не сохранил все главы. Выберите другой формат.", "The container did not preserve all chapters. Choose another format."},
+        {"Контейнер не сохранил дату дорожки. Исходники сохранены.", "The container did not preserve the track date. Sources were kept."},
+        {"Контейнер не сохранил название обложки. Исходники сохранены.", "The container did not preserve the cover title. Sources were kept."},
+        {"Контейнер не сохранил название, автора или описание. Выберите другой формат. Исходники сохранены.", "The container did not preserve the title, author, or description. Choose another format. Sources were kept."},
+        {"Контейнер не сохранил одно из вложений. Исходники сохранены.", "The container did not preserve an attachment. Sources were kept."},
+        {"Контейнер не сохранил описание дорожки. Исходники сохранены.", "The container did not preserve the track description. Sources were kept."},
+        {"Контейнер не сохранил язык дорожки. Выберите другой формат. Исходники сохранены.", "The container did not preserve the track language. Choose another format. Sources were kept."},
+        {"Не найден tesseract.exe. Укажите полный путь к программе; исходник сохранён.", "tesseract.exe was not found. Enter the full program path; the original was kept."},
+        {"Не удалось извлечь изображение фрагмента субтитров. Исходник сохранён.", "Could not extract a subtitle segment image. The original was kept."},
+        {"Не удалось извлечь обложку. Исходник сохранён.", "Could not extract the cover. The original was kept."},
+        {"Не удалось надёжно определить конец фрагмента субтитров. Исходник сохранён.", "Could not reliably determine the end of a subtitle segment. The original was kept."},
+        {"Не удалось определить время субтитров. Исходник сохранён.", "Could not determine subtitle timing. The original was kept."},
+        {"Не удалось определить размер кадра графических субтитров. Исходник сохранён.", "Could not determine the bitmap subtitle frame size. The original was kept."},
+        {"Не удалось определить формат исходного файла. Исходник сохранён.", "Could not determine the source file format. The original was kept."},
+        {"Не удалось открыть MOV для сохранения обложки.", "Could not open the MOV file to save the cover."},
+        {"Не удалось подготовить временное изображение. Исходник сохранён.", "Could not prepare a temporary image. The original was kept."},
+        {"Не удалось проверить исходный кодек выбранной дорожки субтитров. Исходник сохранён.", "Could not verify the selected subtitle track codec. The original was kept."},
+        {"Не удалось проверить полученный SRT. Исходник сохранён.", "Could not verify the resulting SRT. The original was kept."},
+        {"Не удалось проверить преобразованный файл. Исходник сохранён.", "Could not verify the converted file. The original was kept."},
+        {"Не удалось проверить сохранённую дорожку. Исходник сохранён.", "Could not verify the saved track. The original was kept."},
+        {"Не удалось проверить сохранённый контейнер.", "Could not verify the saved container."},
+        {"Не удалось прочитать время графических субтитров. Исходник сохранён.", "Could not read bitmap subtitle timing. The original was kept."},
+        {"Не удалось прочитать дорожки одного из сохранённых файлов. Исходники оставлены на диске.", "Could not read tracks from one of the saved files. Sources were kept on disk."},
+        {"Не удалось сохранить тег главы. Исходники сохранены.", "Could not save the chapter tag. Sources were kept."},
+        {"Неизвестный формат встроенной обложки. Исходник сохранён.", "Unknown embedded cover format. The original was kept."},
+        {"Некорректное время графических субтитров. Исходник сохранён.", "Invalid bitmap subtitle timing. The original was kept."},
+        {"Некорректный кодек или качество", "Invalid codec or quality"},
+        {"Неподдерживаемые метаданные главы. Исходники сохранены.", "Unsupported chapter metadata. Sources were kept."},
+        {"Неподдерживаемый тег обложки. Исходники сохранены.", "Unsupported cover tag. Sources were kept."},
+        {"Обложка не сохранилась в контейнере. Исходники сохранены.", "The cover was not saved in the container. Sources were kept."},
+        {"Отдельное извлечение этого вложения пока недоступно; используйте сборку MKV. Исходник сохранён.", "Separate extraction of this attachment is not yet available; use an MKV build. The original was kept."},
+        {"Слишком много событий субтитров для распознавания. Исходник сохранён.", "Too many subtitle events for recognition. The original was kept."},
+        {"Субтитры состоят из изображений и не преобразуются в текст без распознавания. Сохраните исходный файл.", "These subtitles are images and cannot be converted to text without OCR. Save the original file."},
+        {"Требуется OpenGL 3.3. Установите драйвер видеокарты Intel / AMD / NVIDIA.", "OpenGL 3.3 is required. Install your Intel, AMD, or NVIDIA graphics driver."},
+        {"Не удалось создать OpenGL 3.3 core context", "Could not create an OpenGL 3.3 core context"},
+        {"Можно добавить не более 256 файлов за раз", "You can add at most 256 files at a time"},
+        {"Перетащите файлы на вкладку «Загрузки»", "Drag files to the Downloads page"},
+        {"Проверьте время глав: укажите число секунд.", "Check chapter times: enter a number of seconds."},
+        {"Для этого кодека не найден поддерживаемый формат отдельной дорожки. Выберите преобразование или сохраните исходный файл целиком.", "No supported separate-track format was found for this codec. Choose conversion or save the original file."},
+        {"Выбранная дорожка субтитров не найдена. Исходник сохранён.", "The selected subtitle track was not found. The original was kept."},
+        {"Редактирование доступно для JSON-объекта. Исходник сохранён.", "Editing requires a JSON object. The original was kept."},
+        {"Некорректный список изменений JSON.", "Invalid JSON change list."},
+        {"Некорректный путь", "Invalid path"},
+        {"Поле не найдено", "Field not found"},
+        {"Некорректный индекс массива", "Invalid array index"},
+        {"Индекс вне массива", "Array index out of bounds"},
+        {"Родительское значение не является объектом или массивом", "Parent value is not an object or array"},
+        {"Не удалось применить путь JSON. Проверьте существование родительских полей и индексов; исходник сохранён.", "Could not apply the JSON path. Check parent fields and indices; the original was kept."},
+        {"Укажите имя поля длиной до 256 символов.", "Enter a field name of up to 256 characters."},
+        {"Для этого поля используйте соответствующую строку выше.", "Use the corresponding field above for this value."},
+        {"Некорректный путь JSON. Используйте /объект/поле; ~ и / в именах кодируются как ~0 и ~1.", "Invalid JSON path. Use /object/field; encode ~ and / in names as ~0 and ~1."},
+        {"Допускается не более 256 изменений вложенных полей.", "At most 256 nested field changes are allowed."},
+        {"Значение слишком велико.", "Value is too large."},
+        {"WebM: выберите VP9 или AV1 либо контейнер MKV/MP4.", "WebM: choose VP9 or AV1, or use an MKV/MP4 container."},
+        {"WebM: выберите аудиокодек Opus или контейнер MKV.", "WebM: choose the Opus audio codec or an MKV container."},
+        {"WebM: выберите субтитры WebVTT или контейнер MKV.", "WebM: choose WebVTT subtitles or an MKV container."},
+        {"MP4/MOV: выберите субтитры mov_text или контейнер MKV.", "MP4/MOV: choose mov_text subtitles or an MKV container."},
+        {"MKV: выберите SRT, WebVTT или ASS вместо mov_text.", "MKV: choose SRT, WebVTT, or ASS instead of mov_text."},
+        {"Выбранный аудиоформат требует другого кодека: выберите перекодирование или совместимый формат.", "The selected audio format requires another codec: choose transcoding or a compatible format."},
+        {"MP4: перекодируйте видео в H.264/H.265 или выберите MKV.", "MP4: transcode video to H.264/H.265 or choose MKV."},
+        {"WebM: перекодируйте видео в VP9/AV1 или выберите MKV.", "WebM: transcode video to VP9/AV1 or choose MKV."},
+        {"WebM: перекодируйте аудио в Opus или выберите MKV.", "WebM: transcode audio to Opus or choose MKV."},
+        {"WebM: преобразуйте субтитры в WebVTT или выберите MKV.", "WebM: convert subtitles to WebVTT or choose MKV."},
+        {"MP4/MOV: преобразуйте субтитры в mov_text или выберите MKV.", "MP4/MOV: convert subtitles to mov_text or choose MKV."},
+        {"MKV: преобразуйте субтитры в SRT или выберите MP4.", "MKV: convert subtitles to SRT or choose MP4."},
+        {"WebM: выберите видео VP8, VP9 или AV1 либо другой контейнер.", "WebM: choose VP8, VP9, or AV1 video, or another container."},
+        {"WebM: выберите аудио Vorbis или Opus либо другой контейнер.", "WebM: choose Vorbis or Opus audio, or another container."},
+        {"WebM: преобразуйте текстовые субтитры в WebVTT или выберите MKV.", "WebM: convert text subtitles to WebVTT or choose MKV."},
+        {"Для выбранного аудиоформата требуется другой кодек. Выберите перекодирование или совместимый формат.", "The selected audio format requires another codec. Choose transcoding or a compatible format."},
+        {"Partitioned cookies нельзя безопасно передать через Netscape-файл", "Partitioned cookies cannot be safely passed through a Netscape file"},
+        {"Выберите отдельный ролик вместо плейлиста", "Select an individual video instead of a playlist"},
+        {"Данные источника недоступны. Повторите анализ страницы.", "Source data unavailable. Analyze the page again."},
+        {"Недопустимые данные cookies", "Invalid cookie data"},
+        {"Неизвестный источник данных", "Unknown data source"},
+        {"Некорректный cookies.txt", "Invalid cookies.txt"},
+        {"Некорректный ответ yt-dlp", "Invalid yt-dlp response"},
+        {"Некорректный снимок cookies", "Invalid cookie snapshot"},
+        {"Ожидается формат Netscape cookies.txt", "A Netscape cookies.txt file is required"},
+        {"Файл cookies пуст", "The cookie file is empty"},
+        {"Не удалось прочитать миниатюру", "Could not read the thumbnail"},
+        {"Формат миниатюры не поддерживается", "Unsupported thumbnail format"},
+        {"Неверный источник Deno", "Invalid Deno source"},
+        {"Неверный источник yt-dlp", "Invalid yt-dlp source"},
+        {"DPAPI: другой пользователь или повреждённый файл", "DPAPI: different user or corrupted file"},
+        {"SHA-256 недоступен", "SHA-256 is unavailable"},
+        {"Не удалось записать файл", "Could not write the file"},
+        {"Не удалось прочитать окружение процесса", "Could not read the process environment"},
+        {"Не удалось создать группу отмены процесса", "Could not create the process cancellation group"},
+        {"Не удалось сохранить защищённый файл", "Could not save the protected file"},
+        {"Небезопасное перенаправление HTTPS → HTTP", "Unsafe HTTPS → HTTP redirect"},
+        {"Некорректное перенаправление", "Invalid redirect"},
+        {"Некорректный URL", "Invalid URL"},
+        {"Нужен HTTP/HTTPS URL без логина в адресе", "An HTTP/HTTPS URL without embedded credentials is required"},
+        {"Обрыв соединения", "Connection lost"},
+        {"Ответ процесса слишком большой", "Process output is too large"},
+        {"Ошибка DPAPI", "DPAPI error"},
+        {"Ошибка HTTPS-запроса", "HTTPS request failed"},
+        {"Ошибка завершения записи файла", "Failed to finish writing the file"},
+        {"Перенаправление без Location", "Redirect has no Location header"},
+        {"Превышен размер ответа", "Response size limit exceeded"},
+        {"Слишком много перенаправлений", "Too many redirects"},
+        {"MP3, M4A и FLAC поддерживают одну аудиодорожку без видео и субтитров. Выберите другой формат или удалите лишние источники.", "MP3, M4A, and FLAC support one audio track without video or subtitles. Choose another format or remove extra sources."},
+        {"Графические субтитры нельзя преобразовать в текст без распознавания. Оставьте исходный формат или выберите другой источник.", "Bitmap subtitles cannot be converted to text without OCR. Keep the original format or choose another source."},
+        {"Для вложенной обложки выберите MKV, MP4 или MOV; WebM не поддерживается.", "Choose MKV, MP4, or MOV for embedded cover art; WebM is not supported."},
+        {"Для выбранного формата выберите соответствующий аудиокодек или исходный кодек.", "Choose the audio codec required by the selected format or the original codec."},
+        {"Для сохранения вложений и дополнительных потоков выберите MKV; исходник останется без изменений.", "Choose MKV to preserve attachments and extra streams; the original remains unchanged."},
+        {"Загрузка источников и сборка добавлены в очередь", "Source downloads and build added to the queue"},
+        {"Не удалось прочитать дорожки локального файла", "Could not read local file tracks"},
+        {"Неизвестный тип потока нельзя безопасно перенести; исходник сохранён.", "An unknown stream type cannot be safely transferred; the original was kept."},
+        {"Проверьте числовые параметры перекодирования: укажите положительные значения без единиц измерения", "Check transcoding parameters: enter positive numbers without units"},
+        {"Распознавание применяется к графическим субтитрам. Для текста выберите SRT, WebVTT или ASS.", "OCR applies to bitmap subtitles. For text, choose SRT, WebVTT, or ASS."},
+        {"Субтитры состоят из изображений: выберите исходный формат или используйте распознавание текста.", "These subtitles are images: choose the original format or use OCR."},
+        {"Укажите полный путь к установленному tesseract.exe.", "Enter the full path to the installed tesseract.exe."},
+        {"Укажите языки Tesseract, например eng или rus+eng.", "Enter Tesseract languages, for example eng or rus+eng."},
+        {"Часть источников не скачана", "Some sources were not downloaded"},
+        {"Для обложки, глав и источника метаданных дополнительные поля дорожки не поддерживаются. Очистите их или измените исходные данные.", "Additional track fields are not supported for covers, chapters, or metadata sources. Clear them or change the source."},
+        {"Нет сохранённых видео- или аудиодорожек для сборки. Файлы остальных типов остаются на диске.", "No saved video or audio tracks are available for the build. Other files remain on disk."},
+        {"Программы или группы потоков этого файла пока нельзя безопасно перенести. Исходник сохранён.", "Programs or stream groups in this file cannot yet be transferred safely. The original was kept."},
+        {"Формат встроенной обложки нельзя сохранить без преобразования. Исходник сохранён.", "The embedded cover format cannot be saved without conversion. The original was kept."},
+        {"Сборка недоступна до завершения загрузок и подтверждения пользователя", "The build is unavailable until downloads finish and the user confirms"},
+        {"В каждой категории может быть только одна дорожка по умолчанию", "Each category can have only one default track"},
+        {"Добавьте от 1 до 64 источников и хотя бы одну дорожку", "Add 1 to 64 sources and at least one track"},
+        {"Некорректная или повторяющаяся дорожка", "Invalid or duplicate track"},
+        {"Признак принудительной дорожки доступен только субтитрам", "Only subtitles can have the forced track flag"},
+        {"FLAC не сохраняет дополнительные теги глав. Выберите другой контейнер.", "FLAC does not preserve extra chapter tags. Choose another container."},
+        {"FLAC поддерживает от 1 до 1000 глав. Выберите M4A или сохраните главы отдельно.", "FLAC supports 1 to 1,000 chapters. Choose M4A or save chapters separately."},
+        {"FLAC сохраняет главы без промежутков и длительностью до 100 часов. Выберите M4A или сохраните главы отдельно.", "FLAC requires contiguous chapters no longer than 100 hours. Choose M4A or save chapters separately."},
+        {"Для FLAC конец последней главы должен совпадать с концом аудио. Выберите M4A или сохраните главы отдельно.", "For FLAC, the last chapter must end with the audio. Choose M4A or save chapters separately."},
+        {"Не удалось определить границы глав", "Could not determine chapter boundaries"},
+        {"Не удалось определить длительность аудио для глав FLAC.", "Could not determine the audio duration for FLAC chapters."},
+        {"Неизвестный кодек", "Unknown codec"},
+        {"Неизвестный контейнер", "Unknown container"},
+        {"Некорректные метаданные главы", "Invalid chapter metadata"},
+        {"Неподдерживаемые метаданные главы", "Unsupported chapter metadata"},
+        {"Список глав пуст или имеет неверный формат", "Chapter list is empty or invalid"},
+        {"Историю очереди не удалось восстановить", "Could not restore the queue history"},
+        {"Установка компонентов запущена", "Component installation started"},
+        {"Проверка компонентов запущена", "Component check started"},
+        {"Установка и проверка компонентов завершены", "Component installation and verification complete"},
+        {"API недоступен; проверяю страницу выпуска yt-dlp на GitHub", "API unavailable; checking the yt-dlp release page on GitHub"},
+        {"API недоступен; проверяю страницу выпуска Deno на GitHub", "API unavailable; checking the Deno release page on GitHub"},
+        {"Снимок доступа не получен, пробуем скачать без cookies.", "Could not obtain access details; trying to download without cookies."},
+        {"Команда прервана", "Command interrupted"},
+        {"Подготовка загрузки…", "Preparing download…"},
+        {"Проверяем версии…", "Checking versions…"},
+        {"Проверяем установленные версии…", "Checking installed versions…"},
+        {"Проверка отложена", "Verification postponed"},
+        {"Вкладка закрыта — выберите страницу в браузере", "Tab closed — select a page in your browser"},
+        {"Не удалось создать папку или сохранить файл. Проверьте путь и права доступа.", "Could not create the folder or save the file. Check the path and permissions."},
+        {"/versions — версии компонентов; /clear — очистить журнал. Отдельно: yt-dlp --version, ffmpeg -version, ffprobe -version, deno --version.", "/versions — component versions; /clear — clear log. Also: yt-dlp --version, ffmpeg -version, ffprobe -version, deno --version."},
+        {"Расширение не принимает команды или отключено. Подключите расширение заново.", "The extension is disconnected or not accepting commands. Reconnect it."},
+        {"Расширение не ответило на запрос cookies", "The extension did not respond to the cookie request"},
+        {"Браузерная сессия закрыта", "The browser session was closed"},
+        {"Ошибка расширения", "Extension error"},
+        {"Адрес снимка cookies не совпал", "The cookie snapshot URL did not match"},
+        {"Не удалось подготовить права канала расширения", "Could not configure extension channel permissions"},
+        {"Несовместимое расширение", "Incompatible extension"},
+        {"Устаревшее расширение", "Outdated extension"},
+        {"Установлено устаревшее расширение StreamShelf Connector. Установите текущую версию и перезагрузите расширение в браузере.", "StreamShelf Connector is out of date. Install the current version and reload the extension in the browser."},
+        {"Ошибка канала расширения", "Extension channel error"},
+        {"Ошибка регистрации Native Messaging", "Native Messaging registration failed"},
+        {"Ошибка записи реестра", "Could not write to the registry"},
+        {"Не удалось загрузить SDF-атлас", "Could not load the SDF font atlas"},
+        {"Подписанный файл расширения Firefox версии 1.0.4 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.4.xpi рядом с программой.", "Signed Firefox extension version 1.0.4 was not found. After Mozilla signs it, save the XPI as extensions/firefox-signed/StreamShelf-Connector-1.0.4.xpi next to the application."},
+        {"Неизвестен", "Unknown"}
+    };
+    if (const auto it = translations.find(value); it != translations.end()) return it->second;
+    const std::string_view expectedPrefix = "Ожидалось: ";
+    const std::string_view foundSeparator = "; обнаружено: ";
+    const std::string_view validationSuffix = ". Скачанный файл сохранён в папке задачи.";
+    if (value.rfind(expectedPrefix, 0) == 0 && value.size() >= validationSuffix.size() &&
+        value.compare(value.size() - validationSuffix.size(), validationSuffix.size(), validationSuffix) == 0) {
+        const auto split = value.find(foundSeparator, expectedPrefix.size());
+        if (split != std::string::npos && split < value.size() - validationSuffix.size()) {
+            const auto wanted = value.substr(expectedPrefix.size(), split - expectedPrefix.size());
+            const auto found = value.substr(split + foundSeparator.size(), value.size() - validationSuffix.size() - split - foundSeparator.size());
+            static const std::unordered_map<std::string, std::string> mediaKinds = {
+                {"аудио", "audio"}, {"видео", "video"}, {"видео и аудио", "video and audio"},
+                {"аудио или видео", "audio or video"}, {"только видео", "video only"},
+                {"только аудио", "audio only"}, {"нет видео и аудио", "no video or audio"}
+            };
+            const auto w = mediaKinds.find(wanted), f = mediaKinds.find(found);
+            if (w != mediaKinds.end() && f != mediaKinds.end())
+                return "Expected: " + w->second + "; found: " + f->second + ". The download was kept in the task folder.";
+        }
+    }
+    const std::string_view noFormats = "yt-dlp не получил доступные форматы для этой страницы.";
+    const std::string_view noDeno = " Не найден Deno, необходимый для обработки многих страниц YouTube.";
+    const std::string_view formatAdvice = " Проверьте, что ролик воспроизводится в подключённом браузере, затем повторите анализ. Доступность форматов также зависит от YouTube и учётной записи.";
+    if (value.rfind(noFormats, 0) == 0) {
+        auto remaining = std::string_view(value).substr(noFormats.size());
+        std::string result = "yt-dlp did not receive available formats for this page.";
+        if (remaining.starts_with(noDeno)) { result += " Deno, which is required for many YouTube pages, was not found."; remaining.remove_prefix(noDeno.size()); }
+        if (remaining.starts_with(formatAdvice)) {
+            result += " Check playback in the connected browser and retry analysis. Format availability also depends on YouTube and the account.";
+            remaining.remove_prefix(formatAdvice.size());
+            return result + std::string(remaining);
+        }
+    }
+    // Translate only application-generated message framing; keep the quoted tag or track name intact.
+    static const std::pair<std::string_view, std::string_view> quotedPrefixes[] = {
+        {"Контейнер изменил характеристику дорожки «", "The container changed the track property "},
+        {"Контейнер не сохранил изменённое поле дорожки «", "The container did not preserve the modified track field "},
+        {"Контейнер не сохранил исходный тег дорожки «", "The container did not preserve the original track tag "},
+        {"Контейнер не сохранил исходный тег «", "The container did not preserve the original tag "},
+        {"Контейнер не сохранил общий тег «", "The container did not preserve the global tag "},
+        {"Контейнер не сохранил признак дорожки «", "The container did not preserve the track flag "},
+        {"Контейнер не сохранил тег главы «", "The container did not preserve the chapter tag "},
+        {"Контейнер не сохранил тег дорожки «", "The container did not preserve the track tag "},
+        {"Контейнер не сохранил тег обложки «", "The container did not preserve the cover tag "},
+        {"В источнике «", "Source "}
+    };
+    static const std::pair<std::string_view, std::string_view> quotedSuffixes[] = {
+        {". Исходники сохранены.", ". Sources were kept."},
+        {". Выберите другой формат. Исходники сохранены.", ". Choose another format. Sources were kept."},
+        {". Выберите другой формат или удалите тег. Исходники сохранены.", ". Choose another format or remove the tag. Sources were kept."},
+        {". Выберите другой формат или отмените изменение. Исходники сохранены.", ". Choose another format or undo the change. Sources were kept."},
+        {" нет дорожек назначенного типа. Измените роль в конструкторе.", " has no tracks of the assigned type. Change its role in the builder."}
+    };
+    for (const auto &[ruPrefix, enPrefix] : quotedPrefixes) {
+        if (value.rfind(ruPrefix, 0) != 0) continue;
+        const auto end = value.find("»", ruPrefix.size());
+        if (end == std::string::npos) break;
+        const auto suffix = std::string_view(value).substr(end + std::string_view("»").size());
+        for (const auto &[ruSuffix, enSuffix] : quotedSuffixes)
+            if (suffix == ruSuffix) return std::string(enPrefix) + "\"" + value.substr(ruPrefix.size(), end - ruPrefix.size()) + "\"" + std::string(enSuffix);
+        break;
+    }
+    const std::string_view retryPrefix = "HTTP 429: субтитры отложены на ";
+    const std::string_view secondsSuffix = " с";
+    if (value.rfind(retryPrefix, 0) == 0 && value.size() > retryPrefix.size() + secondsSuffix.size() &&
+        value.compare(value.size() - secondsSuffix.size(), secondsSuffix.size(), secondsSuffix) == 0) {
+        const auto seconds = value.substr(retryPrefix.size(), value.size() - retryPrefix.size() - secondsSuffix.size());
+        if (seconds.find_first_not_of("0123456789") == std::string::npos)
+            return "HTTP 429: subtitles delayed for " + seconds + " s";
+    }
+    if (value.rfind("Скачано ", 0) == 0) {
+        std::string result = "Downloaded " + value.substr(std::string_view("Скачано ").size());
+        const auto replaceAll = [&](std::string_view from, std::string_view to) {
+            for (size_t at = 0; (at = result.find(from, at)) != std::string::npos; at += to.size())
+                result.replace(at, from.size(), to);
+        };
+        replaceAll(" из ", " of "); replaceAll(" МиБ", " MiB"); replaceAll("/с", "/s");
+        return result;
+    }
+    const std::string_view readySuffix = " · движок готов";
+    if (value.rfind("yt-dlp ", 0) == 0 && value.size() >= readySuffix.size() &&
+        value.compare(value.size() - readySuffix.size(), readySuffix.size(), readySuffix) == 0)
+        return value.substr(0, value.size() - readySuffix.size()) + " · ready";
+    static const std::pair<std::string_view, std::string_view> prefixes[] = {
+        {"Добавлено задач: ", "Tasks added: "},
+        {"Отдельное сохранение добавлено в очередь: ", "Separate exports queued: "},
+        {"Остановка задач: ", "Stopping tasks: "},
+        {"Не удалось добавить файлов: ", "Could not add files: "},
+        {"Распознано фрагментов: ", "Recognized segments: "},
+        {"Не удалось заполнить адресную строку", "Could not fill the address bar"},
+        {"Инструмент отсутствует в папке компонентов или является ссылкой: ", "Tool is missing from the components folder or is a link: "},
+        {"Не удалось установить все выбранные компоненты: ", "Could not install all selected components: "},
+        {"yt-dlp завершился с кодом ", "yt-dlp exited with code "},
+        {"Не удалось обновить ссылку на субтитры после ", "Could not refresh the subtitle URL after "},
+        {"Компонент отсутствует в папке ", "Component missing from folder "},
+        {"Контрольная сумма не совпала: ", "Checksum mismatch: "},
+        {"Не удалось запустить браузер. Код Windows: ", "Could not launch the browser. Windows error: "},
+        {"Не удалось преобразовать обложку. Исходники сохранены. ", "Could not convert the cover. Sources were kept. "},
+        {"Не удалось преобразовать файл. Исходник сохранён. ", "Could not convert the file. The original was kept. "},
+        {"Не удалось собрать контейнер. Исходники сохранены отдельно. Проверьте совместимость кодеков и контейнера. ", "Could not build the container. Sources were kept separately. Check codec and container compatibility. "},
+        {"Не удалось сохранить дорожку в исходном формате. Выберите сборку с совместимым контейнером. Исходник сохранён. ", "Could not save the track in its original format. Build it with a compatible container. The original was kept. "},
+        {"FFmpeg не смог объединить дорожки. Проверьте совместимость контейнера и кодеков или выберите перекодирование.", "FFmpeg could not merge tracks. Check container and codec compatibility or choose transcoding."},
+        {"Не удалось прочитать сведения о скачанном файле. Код FFprobe: ", "Could not read the downloaded file. FFprobe exit code: "},
+        {"Временная папка уже существует: ", "Temporary folder already exists: "},
+        {"Не удалось восстановить прежний компонент: ", "Could not restore the previous component: "},
+        {"Не удалось заменить ", "Could not replace "},
+        {"Не удалось прочитать архив ", "Could not read archive "},
+        {"Не удалось распаковать ", "Could not extract "},
+        {"Скачанный компонент не запускается или его версия не совпадает: ", "Downloaded component failed to start or its version does not match: "},
+        {"Не удалось запустить ", "Could not start "},
+        {"YouTube ограничил запрос или запросил подтверждение входа. Проверьте воспроизведение в подключённом браузере и повторите попытку позже.", "YouTube rate-limited the request or asked for sign-in confirmation. Check playback in the connected browser and try again later."},
+        {"Этот поток требует Authorization: глобальный заголовок yt-dlp не применяется к сторонним CDN", "This stream requires Authorization; a global yt-dlp header does not apply to third-party CDNs"},
+        {"yt-dlp не поддерживает эту страницу. Откройте «Подключение», нажмите «Обновить вкладку и искать» и запустите видео или аудио в выбранной вкладке. Найденные прямые ссылки появятся в «Обзоре медиа». Поиск расширением работает отдельно от анализа yt-dlp.", "yt-dlp does not support this page. Open Connection, select Reload tab and search, and play video or audio in the selected tab. Direct links will appear in Media. Extension search runs separately from yt-dlp analysis."},
+        {"Загрузка: ", "Downloading: "},
+        {"Проверка SHA-256: ", "Verifying SHA-256: "},
+        {"Распаковка: ", "Extracting: "},
+        {"Установка: ", "Installing: "},
+        {"Не удалось создать канал расширения (код ", "Could not create the extension channel (error "},
+        {"В папке программы отсутствует файл расширения Chromium: ", "Chromium extension file missing from the application folder: "},
+        {"Расширение отключено · ", "Extension disconnected · "},
+        {"Нет подтверждения связи · ", "Connection not verified · "},
+        {"Требуется разрешение · ", "Permission required · "},
+        {"Расширение подключено · ", "Extension connected · "},
+        {"Расширение ", "Extension "}
+    };
+    for (const auto &[ru, en] : prefixes) {
+        if (value.rfind(ru, 0) != 0) continue;
+        auto remainder = value.substr(ru.size());
+        if ((ru == "Загрузка: " || ru == "Проверка SHA-256: " || ru == "Распаковка: " || ru == "Установка: ") && remainder == "FFmpeg и FFprobe")
+            remainder = "FFmpeg and FFprobe";
+        return std::string(en) + remainder;
+    }
+    return value;
+}
+inline std::string interfaceSize(std::string_view language, const std::string &value) {
+    if (language != "en") return value;
+    if (value == "Неизвестен") return "Unknown";
+    const auto space = value.find(' ');
+    if (space == std::string::npos) return value;
+    const auto suffix = value.find(" ~", space);
+    const auto unit = value.substr(space + 1, suffix == std::string::npos ? suffix : suffix - space - 1);
+    static const std::unordered_map<std::string, std::string> units = {{"Б", "B"}, {"КБ", "KB"}, {"МБ", "MB"}, {"ГБ", "GB"}, {"ТБ", "TB"}};
+    const auto it = units.find(unit);
+    return it == units.end() ? value : value.substr(0, space + 1) + it->second + (suffix == std::string::npos ? "" : value.substr(suffix));
+}
+}

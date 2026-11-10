@@ -56,6 +56,7 @@ static Media mediaFrom(const Json &j) {
     return m;
 }
 App::App() {
+    interfaceLanguage = defaultInterfaceLanguage(GetUserDefaultUILanguage());
     auto root = dataRoot();
     fs::create_directories(root / L"tools");
     fs::create_directories(root / L"temp");
@@ -71,6 +72,8 @@ App::App() {
     try {
         if (fs::exists(root / L"settings.dpapi")) {
             auto j = Json::parse(unprotectFile(root / L"settings.dpapi"));
+            const auto savedLanguage = str(j, "interfaceLanguage");
+            if (savedLanguage == "en" || savedLanguage == "ru") interfaceLanguage = savedLanguage;
             destination = str(j, "destination", destination);
             autoUpdate = j.value("autoUpdate", true);
             light = j.value("light", false);
@@ -81,6 +84,9 @@ App::App() {
         }
     } catch (...) {
     }
+    title = interfaceLanguage == "ru" ? "Медиа" : "Media";
+    assemblyName = interfaceLanguage == "ru" ? "Мой контейнер" : "My container";
+    extensionInstaller.setLanguage(interfaceLanguage);
     try {
         if (fs::exists(root / L"queue.dpapi")) {
             auto j = Json::parse(unprotectFile(root / L"queue.dpapi"));
@@ -122,7 +128,7 @@ App::App() {
                     for (const auto &child : jobs) if (child->id == source.dependency) {child->assemblyInput = true;if(source.codec>0)child->conversionSource=true;}
         }
     } catch (...) {
-        logs.push_back("Историю очереди не удалось восстановить");
+        logs.push_back({"Историю очереди не удалось восстановить", true});
     }
 }
 App::~App() {
@@ -148,16 +154,28 @@ App::~App() {
             t.thread.join();
     try {
         saveHistory();
-        protectFile(dataRoot() / L"settings.dpapi", Json{{"destination", destination},
-                                                         {"autoUpdate", autoUpdate},
-                                                         {"light", light},
-                                                         {"reduced", reduced},
-                                                         {"keepResults", keepResults},
-                                                         {"splashEnabled", splashEnabled}, {"splashSeconds", splashSeconds}}
-                                                        .dump());
+        saveSettings();
     } catch (...) {
     }
     connector.message = nullptr;
+}
+void App::saveSettings() {
+    protectFile(dataRoot() / L"settings.dpapi", Json{{"destination", destination},
+        {"interfaceLanguage", interfaceLanguage}, {"autoUpdate", autoUpdate}, {"light", light},
+        {"reduced", reduced}, {"keepResults", keepResults},
+        {"splashEnabled", splashEnabled}, {"splashSeconds", splashSeconds}}.dump());
+}
+void App::setInterfaceLanguage(const std::string &language) {
+    if ((language != "ru" && language != "en") || interfaceLanguage == language) return;
+    interfaceLanguage = language;
+    if (analysis.title.empty()) title = language == "ru" ? "Медиа" : "Media";
+    extensionInstaller.setLanguage(language);
+    refreshSessions();
+    const auto revision = ++languageRevision;
+    try { saveSettings(); } catch (...) { log("Could not save language settings"); }
+    for (const auto &s : connector.list()) if (s && s->alive && s->languageSupported) {
+        work([this, s, language, revision] { std::lock_guard lock(languageDispatchMutex); if (revision != languageRevision) return; try { s->send({{"type", "language"}, {"language", language}}); } catch (...) {} });
+    }
 }
 void App::post(std::function<void()> f) {
     std::lock_guard l(eventsMutex);
@@ -204,14 +222,14 @@ static std::string logTextUtf8(const std::string &s) {
         return "[Не удалось прочитать вывод программы]";
     return utf8(decoded);
 }
-void App::log(const std::string &s) {
+void App::log(const std::string &s, bool localizable) {
     auto clean = redact(logTextUtf8(s));
-    post([this, clean] {
+    post([this, clean, localizable] {
         SYSTEMTIME t;
         GetLocalTime(&t);
         char time[32];
         snprintf(time, sizeof(time), "%02d:%02d:%02d  ", t.wHour, t.wMinute, t.wSecond);
-        logs.push_back(std::string(time) + clean);
+        logs.push_back({std::string(time) + clean, localizable});
         if (logs.size() > 4000)
             logs.erase(logs.begin(), logs.begin() + 500);
     });
@@ -248,9 +266,9 @@ void App::start() {
                 s->setupApiSupported = currentSetup && j.value("setupApi", false);
                 if (extensionInstaller.active() && matching) {
                     extensionInstaller.setExtensionRunning(s->alive && s->verified);
-                    extensionInstaller.setExtensionReloadRequired(!currentSetup);
+                    extensionInstaller.setExtensionReloadRequired(!currentSetup || !s->languageSupported);
                 }
-                if (extensionInstaller.active() && s->verified && matching && s->setupReady) {
+                if (extensionInstaller.active() && s->verified && matching && s->setupReady && s->languageSupported) {
                     extensionInstaller.connectionEstablished();
                     notify("Расширение установлено и подключено");
                     requestedPage = 0;
@@ -269,6 +287,11 @@ void App::start() {
                 return;
             }
             if (type == "hello" || type == "tabSelected" || type == "tabClosed" || type == "disconnected") {
+                if (type == "hello" && s->languageSupported) {
+                    const auto language = interfaceLanguage;
+                    const auto revision = languageRevision.load();
+                    work([this, s, language, revision] { std::lock_guard lock(languageDispatchMutex); if (revision != languageRevision) return; try { s->send({{"type", "language"}, {"language", language}}); } catch (...) {} });
+                }
                 refreshSessions();
                 if (type == "disconnected" && extensionInstaller.active()) {
                     bool running = false;
@@ -359,7 +382,7 @@ void App::start() {
                 mediaSessions[m.key] = s;
                 if (needsProbe) enqueueProbe(m, s, scanGeneration, int(number(j, "tabId", -1)));
             } else if (type == "notice" || type == "error") {
-                log(str(j, "message"));
+                log(str(j, "message"), false);
                 notify(str(j, "message"));
             }
         });
@@ -582,7 +605,7 @@ void App::refreshSessions() {
     auto s = session();
     if (s) {
         std::lock_guard l(s->mutex);
-        std::string browser = s->browser.find("YaBrowser/") != std::string::npos ? "Яндекс Браузер" : s->browser.find("Chrome/") != std::string::npos ? "Chrome" : "Браузер";
+        std::string browser = s->browser.find("YaBrowser/") != std::string::npos ? (interfaceLanguage == "ru" ? "Яндекс Браузер" : "Yandex Browser") : s->browser.find("Chrome/") != std::string::npos ? "Chrome" : (interfaceLanguage == "ru" ? "Браузер" : "Browser");
         connection = !s->alive ? "Расширение отключено · " + browser : !s->verified ? "Нет подтверждения связи · " + browser : !s->setupReady ? "Требуется разрешение · " + browser : "Расширение подключено · " + browser + (s->title.empty() ? "" : " · " + s->title);
     } else
         connection = "Браузер не подключён";
@@ -795,7 +818,7 @@ void App::analyze(const std::string &u, bool deep) {
                 throw std::runtime_error(redact(details));
             }
             if (!result.error.empty())
-                log(result.error);
+                log(result.error, false);
             auto a = parseAnalysis(Json::parse(result.output), u);
             post([this, a = std::move(a), s, cancel, generation]() mutable {
                 if (*cancel || generation != analysisGeneration) return;
@@ -1407,7 +1430,7 @@ void App::download(const std::shared_ptr<Job> &j) {
         tool(L"yt-dlp.exe"), args,
         [this, j](const std::string &line) {
             if (line.rfind("STREAMSHELF_FINAL:", 0) == 0) return;
-            log(line);
+            log(line, false);
             static const std::regex percent(R"((\d+(?:\.\d+)?)%)");
             std::smatch m;
             double p = -1;
@@ -1565,7 +1588,7 @@ void App::action(const std::string &cmd) {
             installerBrowserExecutable = selected.exe;
             for (auto &existing : sessions) {
                 std::string actual; { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
-                if (existing->alive && existing->verified && existing->setupReady && sameBrowserExecutable(actual, selected.exe)) {
+                if (existing->alive && existing->verified && existing->setupReady && existing->languageSupported && sameBrowserExecutable(actual, selected.exe)) {
                     notify("Расширение установлено и подключено"); return;
                 }
             }
@@ -1589,14 +1612,14 @@ void App::action(const std::string &cmd) {
                         (selected.family == "firefox" ? L"firefox-signed" : L"chromium-development");
                     if (guidedBrowser(selected) != GuidedBrowser::None) {
                         auto guideTarget = guidedBrowser(selected) == GuidedBrowser::Firefox
-                            ? executable().parent_path() / L"extensions" / L"firefox-signed" / L"StreamShelf-Connector-1.0.3.xpi" : folder;
-                        if (guidedBrowser(selected) == GuidedBrowser::Firefox && !fs::is_regular_file(guideTarget)) throw std::runtime_error("Подписанный файл расширения Firefox версии 1.0.3 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.3.xpi рядом с программой.");
+                            ? executable().parent_path() / L"extensions" / L"firefox-signed" / SignedFirefoxConnectorFilename : folder;
+                        if (guidedBrowser(selected) == GuidedBrowser::Firefox && !fs::is_regular_file(guideTarget)) throw std::runtime_error("Подписанный файл расширения Firefox версии 1.0.4 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.4.xpi рядом с программой.");
                         extensionInstaller.start(hwnd, selected, profile ? &*profile : nullptr, guideTarget, reduced, light);
                         auto checkConnection = [this, expected = selected.exe] {
                             for (auto &existing : sessions) {
                                 std::string actual; { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
                                 if (existing->alive && sameBrowserExecutable(actual, expected)) {
-                                    if (existing->verified && existing->setupReady && extensionInstaller.active()) {
+                                    if (existing->verified && existing->setupReady && existing->languageSupported && extensionInstaller.active()) {
                                         extensionInstaller.connectionEstablished();
                                         notify("Расширение установлено и подключено");
                                         requestedPage = 0;
@@ -1621,16 +1644,22 @@ void App::action(const std::string &cmd) {
                         notify("Мастер установки открыт. Следуйте подсказкам поверх браузера.");
                     } else {
                         auto signedDir = executable().parent_path() / L"extensions" / L"firefox-signed";
-                        auto signedXpi = signedDir / L"StreamShelf-Connector-1.0.3.xpi";
+                        auto signedXpi = signedDir / SignedFirefoxConnectorFilename;
                         bool signedAvailable = selected.family == "firefox" && fs::is_regular_file(signedXpi);
-                        openPath(signedAvailable ? signedDir : folder);
+                        auto developmentFolder = selected.family == "firefox" ? executable().parent_path() / L"extensions" / L"firefox-development" : folder;
+                        openPath(signedAvailable ? signedDir : developmentFolder);
                         modalTitle = "Ручная установка расширения";
-                        modalBody = "Мастер с подсветкой доступен только для Google Chrome и Яндекс Браузера.\n\n";
-                        modalBody += selected.family == "firefox"
-                            ? (signedAvailable ? "Firefox: откройте about:addons, выберите шестерёнку → «Установить дополнение из файла» и укажите подписанный файл XPI. Подтвердите установку и разрешения в браузере.\n\n" : "Подписанный файл Firefox не найден в комплекте. Временная установка для разработки: about:debugging#/runtime/this-firefox → Загрузить временное дополнение → manifest.json; она действует до перезапуска.\n\n")
-                            : "Откройте страницу расширений выбранного браузера, включите режим разработчика и выберите «Загрузить распакованное расширение».\n\n";
-                        modalBody += "Путь: " + utf8((signedAvailable ? signedXpi : folder).wstring()) +
-                            "\n\nПосле установки откройте StreamShelf Connector в меню расширений и подключите расширение.";
+                        const bool english = interfaceLanguage == "en";
+                        modalBody = english ? "The highlighted guide is available for Google Chrome and Yandex Browser.\n\n" : "Мастер с подсветкой доступен только для Google Chrome и Яндекс Браузера.\n\n";
+                        if (selected.family == "firefox") {
+                            modalBody += signedAvailable
+                                ? (english ? "Firefox: open about:addons, select the gear, choose Install Add-on From File, and select the signed XPI. Confirm installation and permissions in the browser.\n\n" : "Firefox: откройте about:addons, выберите шестерёнку → «Установить дополнение из файла» и укажите подписанный файл XPI. Подтвердите установку и разрешения в браузере.\n\n")
+                                : (english ? "The signed Firefox file is not included. For temporary development installation, open about:debugging#/runtime/this-firefox, choose Load Temporary Add-on, and select manifest.json. This lasts until Firefox restarts.\n\n" : "Подписанный файл Firefox не найден в комплекте. Временная установка для разработки: about:debugging#/runtime/this-firefox → Загрузить временное дополнение → manifest.json; она действует до перезапуска.\n\n");
+                        } else {
+                            modalBody += english ? "Open the browser extensions page, enable developer mode, and choose Load unpacked.\n\n" : "Откройте страницу расширений выбранного браузера, включите режим разработчика и выберите «Загрузить распакованное расширение».\n\n";
+                        }
+                        modalBody += (english ? "Path: " : "Путь: ") + utf8((signedAvailable ? signedXpi : developmentFolder).wstring()) +
+                            (english ? "\n\nAfter installation, open StreamShelf Connector from the extensions menu and connect it." : "\n\nПосле установки откройте StreamShelf Connector в меню расширений и подключите расширение.");
                         modalConfirm = nullptr;
                     }
                     } catch (const std::exception &e) { error(e.what()); }
@@ -1684,8 +1713,8 @@ void App::action(const std::string &cmd) {
                 }
         } else if (cmd == "folder" || cmd == "importCookies" || cmd == "exportLogs") {
             std::string text;
-            for (auto &line : logs)
-                text += line + "\r\n";
+            for (const auto &line : logs)
+                text += displayLog(line, interfaceLanguage) + "\r\n";
             work([this, cmd, text] {
                 auto path = pickFile(hwnd, cmd == "folder", cmd == "exportLogs");
                 if (path.empty())
@@ -1721,9 +1750,10 @@ void App::action(const std::string &cmd) {
         }
         else if (cmd == "copyLogs") {
             std::string text;
-            for (auto &line : logs)
-                if (logSearch.empty() || line.find(logSearch) != line.npos)
-                    text += line + "\r\n";
+            for (const auto &line : logs) {
+                auto displayed = displayLog(line, interfaceLanguage);
+                if (logSearch.empty() || displayed.find(logSearch) != displayed.npos) text += displayed + "\r\n";
+            }
             copyText(text);
             notify("Журнал скопирован");
         } else if (cmd == "addLocalDownloads") {
@@ -1740,10 +1770,10 @@ void App::action(const std::string &cmd) {
             std::transform(normalized.begin(),normalized.end(),normalized.begin(),[](unsigned char c){return char(std::tolower(c));});
             if(normalized=="clear"||normalized=="cls"||normalized=="/clear")logs.clear();
             else if(normalized=="/help") {
-                log("> " + command);
+                log("> " + command, false);
                 log("/versions — версии компонентов; /clear — очистить журнал. Отдельно: yt-dlp --version, ffmpeg -version, ffprobe -version, deno --version.");
             } else if(normalized=="/versions") {
-                log("> " + command);
+                log("> " + command, false);
                 work([this] {
                     std::vector<Component> versions;
                     { std::shared_lock lock(toolsMutex); versions=refreshInstalledComponents(dataRoot()/L"tools",{},stopping); }
@@ -1757,10 +1787,10 @@ void App::action(const std::string &cmd) {
                     try {
                         wchar_t shell[MAX_PATH]{};
                         if(!GetSystemDirectoryW(shell,MAX_PATH))throw std::runtime_error("Не найден системный командный процессор");
-                        auto exe=fs::path(shell)/L"cmd.exe";log("> "+command);
+                        auto exe=fs::path(shell)/L"cmd.exe";log("> "+command, false);
                         auto resolved = terminalComponentCommand(wide(command), dataRoot()/L"tools");
                         auto result=runProcess(exe,{L"/d",L"/s",L"/c",L"chcp 65001>nul & " + resolved},
-                            [this](const std::string &line){log(line);},
+                            [this](const std::string &line){log(line, false);},
                             *cancel,true,true,dataRoot()/L"tools");
                         log(*cancel?"Команда прервана":"Команда завершена: код "+std::to_string(result.code));
                     } catch (const std::exception &e) { log(std::string("Ошибка команды: ") + e.what()); finished(); throw; }

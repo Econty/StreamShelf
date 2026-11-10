@@ -39,6 +39,12 @@ fs::path executable() {
     return fs::path(w);
 }
 fs::path dataRoot() {
+#ifdef STREAMSHELF_UI_PREVIEW
+    // Preview builds keep all mutable application data beside their executable.
+    auto preview = executable().parent_path() / L"preview-data";
+    fs::create_directories(preview);
+    return preview;
+#endif
     PWSTR p = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &p)))
         throw std::runtime_error("Нет LocalAppData");
@@ -299,7 +305,7 @@ static void fetch(const std::string &url, size_t limit,
     if (parts.dwExtraInfoLength)
         path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
     Internet session(
-        WinHttpOpen(L"StreamShelfNative/2.2", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0));
+        WinHttpOpen(L"StreamShelfNative/2.5", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0));
     if (!session.h)
         throw std::runtime_error("WinHTTP init");
     WinHttpSetTimeouts(session, 15000, 15000, 20000, 30000);

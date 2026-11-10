@@ -5,7 +5,7 @@ namespace ss {
 void App::openConstructor(bool completed) {
     ++constructorGeneration;constructorPending=0;
     sourcePool.clear(); draft.clear(); draftSelection=-1; singleExportMode=false;constructorModeManual=false;constructorFormatManual=false;
-    assemblyName = title.empty() ? "Мой контейнер" : title; assemblyMetadataTitle.clear(); assemblyArtist.clear(); assemblyDescription.clear(); globalTags.clear(); originalGlobalTags.clear(); globalTagName.clear(); globalTagsLoaded=false;
+    assemblyName = title.empty() ? (interfaceLanguage == "ru" ? "Мой контейнер" : "My container") : title; assemblyMetadataTitle.clear(); assemblyArtist.clear(); assemblyDescription.clear(); globalTags.clear(); originalGlobalTags.clear(); globalTagName.clear(); globalTagsLoaded=false;
     for(const char *key:{"album","album_artist","composer","genre","date","copyright","publisher"})globalTags[key]="";
     if(completed) for(const auto &job:jobs) if(job->id==selectedJob&&job->assembly){
         singleExportMode=job->singleExport;
@@ -17,7 +17,7 @@ void App::openConstructor(bool completed) {
         }
         const size_t initialCount=sourcePool.size();
         for(size_t i=0;i<initialCount;++i)if(sourcePool[i].role==0&&sourcePool[i].includeAudio){
-            auto audio=sourcePool[i];audio.role=1;audio.stream=-1;audio.includeAudio=false;audio.derivedAudio=true;audio.name+=" · звук";sourcePool.push_back(audio);
+            auto audio=sourcePool[i];audio.role=1;audio.stream=-1;audio.includeAudio=false;audio.derivedAudio=true;setGeneratedAssemblyName(audio,"audio",audio.name,interfaceLanguage);sourcePool.push_back(audio);
         }
         constructorOpen=true;downloadChoice=false;requestedPage=0;
         return;
@@ -35,7 +35,7 @@ void App::openConstructor(bool completed) {
             auto source=assemblySource(m); sourcePool.push_back(source);
             if(source.role==0 && !m.videoOnly && m.acodec!="none") {
                 auto audio=source; audio.role=1; audio.derivedAudio=true; audio.optionalAudio=m.acodec.empty();
-                audio.name=m.title+(audio.optionalAudio?" · звук (если есть)":" · звук"); sourcePool.push_back(audio);
+                setGeneratedAssemblyName(audio,audio.optionalAudio?"optional_audio":"audio",m.title,interfaceLanguage); sourcePool.push_back(audio);
             }
         }
     }
@@ -76,7 +76,8 @@ void App::autoConstruct() {
 }
 void App::queueConstructorProbe(const Media &media,const std::string &path,uint64_t generation) {
     ++constructorPending;
-    work([this,media,path,generation] {
+    const auto language=interfaceLanguage;
+    work([this,media,path,generation,language] {
         Json probe;std::atomic_bool cancel{false},finished{false};
         std::thread watchdog([&]{for(int n=0;n<150&&!finished&&!stopping;++n)Sleep(100);if(!finished)cancel=true;});
         try {std::shared_lock lock(toolsMutex);auto result=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-show_programs",L"-show_stream_groups",L"-show_chapters",L"-show_format",L"-of",L"json",wide(path)},nullptr,cancel,true);
@@ -84,7 +85,7 @@ void App::queueConstructorProbe(const Media &media,const std::string &path,uint6
             if(!result.code)probe=Json::parse(result.output,nullptr,false);}catch(...){}
         finished=true;watchdog.join();
         std::vector<AssemblySource> sources;
-        try {if(probe.is_object())sources=assemblySourcesFromProbe(media,path,probe);}catch(...) {}
+        try {if(probe.is_object())sources=assemblySourcesFromProbe(media,path,probe,language);}catch(...) {}
         post([this,generation,sources=std::move(sources)] {
             if(!constructorOpen || generation!=constructorGeneration)return;
             constructorPending=std::max(0,constructorPending-1);
@@ -95,7 +96,8 @@ void App::queueConstructorProbe(const Media &media,const std::string &path,uint6
 }
 void App::importAssemblyFile() {
     auto generation=constructorGeneration;++constructorPending;
-    work([this,generation] {
+    const auto language=interfaceLanguage;
+    work([this,generation,language] {
         struct Finish { App *app;uint64_t generation;~Finish(){app->post([app=app,generation=generation]{if(app->constructorOpen && app->constructorGeneration==generation)app->constructorPending=std::max(0,app->constructorPending-1);});} } finish{this,generation};
         auto path=pickFile(hwnd); if(path.empty())return;
         Media m; m.title=utf8(fs::path(wide(path)).filename().wstring());
@@ -120,9 +122,9 @@ void App::importAssemblyFile() {
         finished=true;watchdog.join();
         auto probe=Json::parse(r.output,nullptr,false);
         if(r.code||!probe.is_object())throw std::runtime_error("Не удалось прочитать дорожки локального файла");
-        auto imported=assemblySourcesFromProbe(m,path,probe);
+        auto imported=assemblySourcesFromProbe(m,path,probe,language);
         if(imported.empty())throw std::runtime_error("В файле не найдены поддерживаемые дорожки");
-        post([this,imported,generation]{if(constructorOpen && generation==constructorGeneration)sourcePool.insert(sourcePool.end(),imported.begin(),imported.end());});
+        post([this,imported=std::move(imported),generation] {if(constructorOpen && generation==constructorGeneration)sourcePool.insert(sourcePool.end(),imported.begin(),imported.end());});
     });
 }
 static std::string metadataTag(const Json &tags, std::initializer_list<const char *> keys) {
@@ -493,7 +495,9 @@ void App::updateAssemblies() {
         if(!modalTitle.empty())continue;
         parent->decisionNeeded=true;parent->state="Нужен выбор";parent->detail="Не все источники доступны. Сохранённые файлы оставлены отдельно.";
         modalTitle="Не все медиа удалось скачать";
-        modalBody="Не скачаны или недоступны:\n"+failed+"\nПодтверждено файлов: "+std::to_string(saved)+"\n"+paths+"\nФайлы, скачанные до ошибки, могут оставаться в папках задач. Повторная попытка проверит их снова. Можно также собрать контейнер без отсутствующих медиа. Сохранённые файлы не удаляются.";
+        modalBody=(interfaceLanguage == "en" ? "Not downloaded or unavailable:\n" : "Не скачаны или недоступны:\n")+failed+
+            (interfaceLanguage == "en" ? "\nConfirmed files: " : "\nПодтверждено файлов: ")+std::to_string(saved)+"\n"+paths+
+            (interfaceLanguage == "en" ? "\nFiles downloaded before the error may remain in task folders. A retry will check them again. You can also build a container without the missing media. Saved files are not deleted." : "\nФайлы, скачанные до ошибки, могут оставаться в папках задач. Повторная попытка проверит их снова. Можно также собрать контейнер без отсутствующих медиа. Сохранённые файлы не удаляются.");
         modalConfirmLabel="Собрать доступное";
         bool playable=false;for(const auto &s:parent->sources)if(s.role<2){for(const auto &child:jobs)if(child->id==s.dependency&&child->done&&child->state=="Готово"&&!child->output.empty())playable=true;if(s.dependency.empty()&&!s.path.empty()&&fs::is_regular_file(wide(s.path)))playable=true;}
         modalConfirm=playable?std::function<void()>([this,parent]{try{resolveAssembly(parent,true);}catch(const std::exception &e){error(e.what());}}):nullptr;

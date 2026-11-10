@@ -12,6 +12,11 @@ inline const std::vector<std::pair<std::string,std::string>> &trackLanguages(){
         return result;
     }();return values;
 }
+inline std::string trackLanguageLabel(const std::string &code, const std::string &fallback, bool english) {
+    if (!english) return fallback;
+    for (const auto &entry : isoLanguages) if (code == entry.bibliographic) return entry.name;
+    return fallback;
+}
 inline std::string normalizedLanguage(std::string language){
     if(!language.empty()) {
         try {

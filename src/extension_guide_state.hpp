@@ -15,6 +15,10 @@ inline bool extensionsTabTitle(const std::wstring &name, bool firefox = false) {
     }
     return false;
 }
+inline bool connectorPopupButton(const std::wstring &name) {
+    return name == L"connect extension" || name == L"подключить расширение" ||
+           name == L"подключить текущую вкладку" || name == L"подключить выбранную вкладку";
+}
 inline bool connectorSetupReady(bool currentRevision, bool hasSiteAccess) {
     return currentRevision && hasSiteAccess;
 }

@@ -3,7 +3,7 @@ let count=0;
 for(const family of ['chromium','firefox']) {
  const manifest=JSON.parse(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/manifest.json`));
  if(family==='chromium') {
-  assert.equal(manifest.version,'1.0.3');count++;
+  assert.equal(manifest.version,'1.0.4');count++;
   const digest=crypto.createHash('sha256').update(Buffer.from(manifest.key,'base64')).digest('hex').slice(0,32);
   const id=[...digest].map(x=>String.fromCharCode(97+parseInt(x,16))).join('');
   assert.equal(id,'cjhiagnpgpmaagnoinjnkipimjlplcpe');count++;
@@ -20,7 +20,7 @@ for(const family of ['chromium','firefox']) {
   assert(Number(gecko.strict_min_version.split('.')[0])>=140);
   for(const required of ['browsingActivity','websiteContent','authenticationInfo']) assert(gecko.data_collection_permissions.required.includes(required));
   assert(manifest.permissions.includes('alarms'));
-  assert.equal(manifest.version,'1.0.3');
+  assert.equal(manifest.version,'1.0.4');
   assert(manifest.description.length>20);
   for(const size of [16,32,48,96,256]) {
    const path=manifest.icons[size];const image=fs.readFileSync(`extension/firefox-development/${path}`);
@@ -35,7 +35,7 @@ for(const family of ['chromium','firefox']) {
  const api={runtime:{getManifest:()=>manifest,onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),connectNative:()=>port,lastError:null},storage:{local:{get:async key=>({[key]:stored[key]}),set:async values=>Object.assign(stored,values)}},tabs:{get:async id=>({id,url:id===99?'chrome://extensions/':'https://example.com/watch',title:'Test',...(family==='firefox'?{cookieStoreId:'firefox-container-1'}:{incognito:true})}),query:async()=>[{id:99}],reload:async()=>{},sendMessage:async()=>{},onActivated:event('activated'),onUpdated:event('updated'),onRemoved:event('removed')},windows:{WINDOW_ID_NONE:-1,get:async()=>({focused:true}),onFocusChanged:event('focus')},alarms:{create:()=>{},onAlarm:event('alarm')},permissions:{contains:async()=>siteAccess,onAdded:event('permissionAdded'),onRemoved:event('permissionRemoved')},scripting:{executeScript:async()=>{}},cookies:{getAllCookieStores:async()=>[{id:'private-store',tabIds:[7,8,9]}],getAll:async options=>{assert.equal(options.storeId,family==='firefox'?'firefox-container-1':'private-store');return [{domain:'example.com',name:'session',value:'SECRET',path:'/',secure:true,httpOnly:true,partitionKey:{topLevelSite:'https://example.com'}}];}},webRequest:{onBeforeSendHeaders:event('request'),onHeadersReceived:event('response'),onErrorOccurred:event('error')}};
  const context=vm.createContext({chrome:api,browser:family==='firefox'?api:undefined,URL,crypto:crypto.webcrypto,navigator:{userAgent:'Firefox/Test'},Map,Set,setTimeout,clearTimeout,console});
  vm.runInContext(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/background.js`,'utf8'),context);
- if(['chromium','firefox'].includes(family)){listeners.installed();await new Promise(resolve=>setTimeout(resolve,0));assert(sent.some(m=>m.type==='hello'&&m.allowLaunch===false));count++;}
+ if(['chromium','firefox'].includes(family)){listeners.installed();await new Promise(resolve=>setTimeout(resolve,0));assert(sent.some(m=>m.type==='hello'&&m.allowLaunch===false&&m.capabilities.includes('language')));count++;}
  assert.equal(vm.runInContext("classify('https://e.com/file','video/mp4')",context),'Видео');count++;
  assert.equal(vm.runInContext('VERSION',context),manifest.version);count++;
  assert.equal(vm.runInContext("classify('https://e.com/segment.ts','video/mp2t')",context),'Сегмент');count++;
@@ -44,6 +44,14 @@ for(const family of ['chromium','firefox']) {
  if(['chromium','firefox'].includes(family)){assert.equal(vm.runInContext("classify('https://e.com/error.mp4','text/html')",context),null);count++;}
  if(['chromium','firefox'].includes(family)){siteAccess=false;const denied=await new Promise(resolve=>listeners.message({type:'connectExtension'},{},resolve));assert(denied.error);await vm.runInContext("handleCommand({type:'ping',requestId:'no-access'})",context);assert(sent.some(m=>m.type==='pong'&&m.requestId==='no-access'&&!m.hasSiteAccess&&!m.setupConfirmed));assert(!sent.some(m=>m.type==='setupChanged'));siteAccess=true;count+=3;}
  if(['chromium','firefox'].includes(family)){const result=await new Promise(resolve=>listeners.message({type:'connectExtension'},{},resolve));assert.equal(result.ok,true);assert.equal(vm.runInContext('tabId',context),null);listeners.activated({tabId:7});await new Promise(resolve=>setTimeout(resolve,0));count+=2;}else await new Promise(resolve=>listeners.message({type:'connectTab',tabId:7},{},resolve));
+ await vm.runInContext("handleCommand({type:'language',language:'en'})",context);
+ assert.equal((await new Promise(resolve=>listeners.message({type:'status'},{},resolve))).language,'en');
+ await assert.rejects(vm.runInContext("handleCommand({type:'unknown'})",context), /Unsupported command/);
+ await vm.runInContext("handleCommand({type:'language',language:'ru'})",context);
+ assert.equal((await new Promise(resolve=>listeners.message({type:'status'},{},resolve))).language,'ru');
+ await assert.rejects(vm.runInContext("handleCommand({type:'unknown'})",context), /Команда не поддерживается/);
+ await vm.runInContext("handleCommand({type:'language',language:'invalid'})",context);
+ assert.equal((await new Promise(resolve=>listeners.message({type:'status'},{},resolve))).language,null);count+=3;
  await vm.runInContext("handleCommand({type:'ping',requestId:'challenge'})",context);assert(sent.some(m=>m.type==='pong'&&m.requestId==='challenge'&&((m.hasSiteAccess&&m.setupConfirmed))));if(['chromium','firefox'].includes(family)){assert(sent.some(m=>m.type==='setupChanged'));assert.equal(stored.setupConfirmed,true);assert(sent.findIndex(m=>m.type==='setupChanged')<sent.findIndex(m=>m.type==='pong'&&m.requestId==='challenge'));count+=3;}count++;
  if(family==='firefox'){stored.setupConfirmed=false;listeners.permissionAdded();await new Promise(resolve=>setTimeout(resolve,0));assert.equal(stored.setupConfirmed,true);assert(sent.some(m=>m.type==='setupChanged'));count+=2;}
  if(['chromium','firefox'].includes(family)){const changes=sent.filter(m=>m.type==='setupChanged').length;siteAccess=false;listeners.permissionRemoved();assert.equal(sent.filter(m=>m.type==='setupChanged').length,changes+1);await vm.runInContext("handleCommand({type:'ping',requestId:'revoked'})",context);assert(sent.some(m=>m.type==='pong'&&m.requestId==='revoked'&&!m.hasSiteAccess&&m.setupConfirmed));siteAccess=true;count+=2;}
@@ -106,9 +114,10 @@ console.log(`${count} extension checks passed`);
  for(const preGranted of [false,true]) {
   let closed=0,requestCount=0,connectCount=0;
   const button={disabled:false,onclick:null},status={textContent:''},win={close(){closed++;}};
+  const elements={'#connect':button,'#status':status,'#description':{textContent:''},'#privacy':{textContent:''}};
   const api={permissions:{contains:async()=>preGranted,request:()=>{requestCount++;return Promise.resolve(true);}},
    extension:{getViews:()=>[win]},runtime:{getManifest:()=>({version:'1.0.3'}),sendMessage:async m=>{if(m.type==='connectExtension'){connectCount++;return {ok:true};}return {connected:false};}}};
-  const context=vm.createContext({browser:api,window:win,document:{querySelector:s=>s==='#connect'?button:status},Promise});
+  const context=vm.createContext({browser:api,window:win,document:{querySelector:s=>elements[s],documentElement:{}},Promise,setInterval:()=>0});
   vm.runInContext(popupCode,context);
   await new Promise(resolve=>setTimeout(resolve,0));
   await button.onclick();
@@ -118,3 +127,45 @@ console.log(`${count} extension checks passed`);
  }
  console.log('PASS Firefox popup requests permission before closing; existing permission connects without closing');
 }
+// The popup follows the connected application's language and falls back to the browser.
+for (const family of ['chromium','firefox']) {
+ const code=fs.readFileSync(`extension/${family}-development/popup.js`,'utf8');
+ for (const browserLocale of ['ru-RU','en-US','de-DE']) {
+  let nativeStatus={connected:false,language:null},tick;
+  const elements=Object.fromEntries(['connect','status','description','privacy'].map(id=>['#'+id,{textContent:'',disabled:false}]));
+  const api={i18n:{getUILanguage:()=>browserLocale},permissions:{contains:async()=>true,request:async()=>true},runtime:{getManifest:()=>({version:'1.0.3'}),sendMessage:async()=>nativeStatus}};
+  const document={querySelector:s=>elements[s],documentElement:{}};
+  const context=vm.createContext({chrome:api,document,window:{},Promise,setInterval:f=>{tick=f;}});
+  vm.runInContext(code,context);
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(document.documentElement.lang,browserLocale.startsWith('ru')?'ru':'en');
+  nativeStatus={connected:true,language:'ru'};await tick();assert.equal(document.documentElement.lang,'ru');
+  nativeStatus={connected:true,language:'en'};await tick();assert.equal(document.documentElement.lang,'en');
+  nativeStatus={connected:false,language:'en'};await tick();assert.equal(document.documentElement.lang,browserLocale.startsWith('ru')?'ru':'en');
+ }
+}
+console.log('PASS extension popup follows app language and falls back to browser locale');
+
+for (const family of ['chromium','firefox']) {
+ const code=fs.readFileSync(`extension/${family}-development/popup.js`,'utf8');
+ let access=false,now=10000,tick;
+ let nativeStatus={connected:true,language:'en'};
+ const elements=Object.fromEntries(['connect','status','description','privacy'].map(id=>['#'+id,{textContent:'',disabled:false}]));
+ const api={i18n:{getUILanguage:()=> 'en'},permissions:{contains:async()=>access,request:async()=>false},runtime:{getManifest:()=>({version:'1.0.4'}),sendMessage:async()=>nativeStatus}};
+ const document={querySelector:s=>elements[s],documentElement:{}};
+ const context=vm.createContext({chrome:api,document,window:{},Promise,Date:{now:()=>now},setInterval:f=>{tick=f;}});
+ vm.runInContext(code,context);
+ await new Promise(resolve=>setTimeout(resolve,0));
+ assert.match(elements['#status'].textContent,/website access is required/i);
+ await elements['#connect'].onclick();
+ assert.match(elements['#status'].textContent,/not granted/i);
+ await tick();
+ assert.match(elements['#status'].textContent,/not granted/i,'polling must not hide the permission denial');
+ now+=9000;await tick();
+ assert.match(elements['#status'].textContent,/website access is required/i);
+ access=true;await tick();
+ assert.match(elements['#status'].textContent,/Connected to StreamShelf · 1\.0\.4/);
+ nativeStatus={connected:false,language:null,lastError:'Native host not found'};await tick();
+ assert.equal(elements['#status'].textContent,'Native host not found');
+}
+console.log('PASS connection status preserves permission errors and reports missing website access');

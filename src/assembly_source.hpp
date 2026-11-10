@@ -62,7 +62,7 @@ struct MetadataTreeItem {std::string path, value; bool editable=false;};
 struct AssemblySource {
     Media media;
     std::string path, dependency, name, language, description, artist, date, bitrate, maxrate, bufsize, sampleRate, frameRate, width;
-    std::string embeddedKind;
+    std::string embeddedKind, generatedNameKind, generatedNameBase;
     std::string summary, synopsis, handlerName, probedCodec;
     std::string metadataEditTitle, metadataEditArtist, metadataEditDescription, metadataFieldKey, metadataFieldValue;
     std::string ocrExecutable, ocrLanguage = "eng";
@@ -84,6 +84,20 @@ struct AssemblySource {
     int metadataStream = -1;
     bool primary = false, forced = false, includeAudio = false, enabled = true, optionalAudio = false, derivedAudio = false;
 };
+inline std::string generatedAssemblyName(const std::string &kind,const std::string &base,const std::string &language) {
+    const bool russian=language=="ru";
+    if(kind=="programs")return russian?"Программы контейнера":"Container programs";
+    if(kind=="stream_groups")return russian?"Группы потоков":"Stream groups";
+    if(kind=="chapters")return (russian?"Главы · ":"Chapters · ")+base;
+    if(kind=="metadata")return (russian?"Метаданные · ":"Metadata · ")+base;
+    if(kind=="audio")return base+(russian?" · звук":" · audio");
+    if(kind=="optional_audio")return base+(russian?" · звук (если есть)":" · audio (if available)");
+    return {};
+}
+inline void setGeneratedAssemblyName(AssemblySource &source,const std::string &kind,const std::string &base,const std::string &language) {
+    source.generatedNameKind=kind;source.generatedNameBase=base;
+    source.name=generatedAssemblyName(kind,base,language);
+}
 inline Json editedChapters(const AssemblySource &source) {
     Json result=Json::array();
     for(const auto &c:source.chapterEdits) {
@@ -259,7 +273,7 @@ inline AssemblySource assemblySource(const Media &m, const std::string &path = "
 }
 // Split a local container into individually selectable sources while retaining
 // the original path and absolute stream index for lossless remapping.
-inline std::vector<AssemblySource> assemblySourcesFromProbe(const Media &media,const std::string &path,const Json &probe) {
+inline std::vector<AssemblySource> assemblySourcesFromProbe(const Media &media,const std::string &path,const Json &probe,const std::string &language="ru") {
     std::vector<AssemblySource> result;
     auto streams=probe.value("streams",Json::array());
     if(!streams.is_array())return result;
@@ -295,26 +309,26 @@ inline std::vector<AssemblySource> assemblySourcesFromProbe(const Media &media,c
         auto entries=probe.value(key,Json::array());
         if(entries.is_array() && !entries.empty()) {
             auto source=assemblySource(media,path);source.role=6;source.stream=std::string(key)=="programs"?-2:-3;
-            source.embeddedKind=key;source.name=std::string(key)=="programs"?"Программы контейнера":"Группы потоков";source.language.clear();result.push_back(std::move(source));
+            source.embeddedKind=key;setGeneratedAssemblyName(source,key,"",language);source.language.clear();result.push_back(std::move(source));
         }
     }
     auto chapters=probe.value("chapters",Json::array());
     if(chapters.is_array() && !chapters.empty()) {
-        auto source=assemblySource(media,path);source.role=4;source.stream=-1;source.embeddedKind="chapters";source.name="Главы · "+media.title;source.language.clear();result.push_back(std::move(source));
+        auto source=assemblySource(media,path);source.role=4;source.stream=-1;source.embeddedKind="chapters";setGeneratedAssemblyName(source,"chapters",media.title,language);source.language.clear();result.push_back(std::move(source));
     }
     auto tags=probe.value("format",Json::object()).value("tags",Json::object());
     if(tags.is_object() && !tags.empty()) {
-        auto source=assemblySource(media,path);source.role=5;source.stream=-1;source.embeddedKind="metadata";source.name="Метаданные · "+media.title;source.language.clear();result.push_back(std::move(source));
+        auto source=assemblySource(media,path);source.role=5;source.stream=-1;source.embeddedKind="metadata";setGeneratedAssemblyName(source,"metadata",media.title,language);source.language.clear();result.push_back(std::move(source));
     }
     return result;
 }
 inline Json assemblyJson(const AssemblySource &s) {
     Json chapters=Json::array();for(const auto &c:s.chapterEdits)chapters.push_back({{"start",c.start},{"end",c.end},{"title",c.title},{"tags",c.tags}});
-    return {{"path",s.path},{"embeddedKind",s.embeddedKind},{"dependency",s.dependency},{"name",s.name},{"language",s.language},{"description",s.description},{"summary",s.summary},{"synopsis",s.synopsis},{"handlerName",s.handlerName},{"artist",s.artist},{"date",s.date},{"bitrate",s.bitrate},{"maxrate",s.maxrate},{"bufsize",s.bufsize},{"sampleRate",s.sampleRate},{"frameRate",s.frameRate},{"width",s.width},{"role",s.role},{"stream",s.stream},{"metadataStream",s.metadataStream},
+    return {{"path",s.path},{"embeddedKind",s.embeddedKind},{"generatedNameKind",s.generatedNameKind},{"generatedNameBase",s.generatedNameBase},{"dependency",s.dependency},{"name",s.name},{"language",s.language},{"description",s.description},{"summary",s.summary},{"synopsis",s.synopsis},{"handlerName",s.handlerName},{"artist",s.artist},{"date",s.date},{"bitrate",s.bitrate},{"maxrate",s.maxrate},{"bufsize",s.bufsize},{"sampleRate",s.sampleRate},{"frameRate",s.frameRate},{"width",s.width},{"role",s.role},{"stream",s.stream},{"metadataStream",s.metadataStream},
             {"chapterEdits",chapters},{"chaptersReady",s.chaptersReady},{"originalDisposition",s.originalDisposition},{"originalCoverTags",s.originalCoverTags},{"originalStreamTags",s.originalStreamTags},{"originalStreamInfo",s.originalStreamInfo},{"extraTags",s.extraTags},{"originalExtraTags",s.originalExtraTags},{"originalKnownTags",s.originalKnownTags},{"ocrExecutable",s.ocrExecutable},{"ocrLanguage",s.ocrLanguage},{"metadataOverrides",s.metadataOverrides},{"metadataRemoved",s.metadataRemoved},{"metadataPathEdits",s.metadataPathEdits},{"metadataEdit",s.metadataEdit},{"metadataEditTitle",s.metadataEditTitle},{"metadataEditArtist",s.metadataEditArtist},{"metadataEditDescription",s.metadataEditDescription},{"probedCodec",s.probedCodec},{"codec",s.codec},{"quality",s.quality},{"coverFormat",s.coverFormat},{"exportFormat",s.exportFormat},{"exportQuality",s.exportQuality},{"primary",s.primary},{"forced",s.forced},{"includeAudio",s.includeAudio},{"enabled",s.enabled},{"optionalAudio",s.optionalAudio},{"derivedAudio",s.derivedAudio}};
 }
 inline AssemblySource assemblyFrom(const Json &v) {
-    AssemblySource s; s.path = str(v,"path"); s.embeddedKind=str(v,"embeddedKind"); s.dependency = str(v,"dependency"); s.name = str(v,"name"); s.language = str(v,"language");
+    AssemblySource s; s.path = str(v,"path"); s.embeddedKind=str(v,"embeddedKind"); s.generatedNameKind=str(v,"generatedNameKind"); s.generatedNameBase=str(v,"generatedNameBase"); s.dependency = str(v,"dependency"); s.name = str(v,"name"); s.language = str(v,"language");
     if(v.contains("metadataPathEdits") && v["metadataPathEdits"].is_array())s.metadataPathEdits=v["metadataPathEdits"];
     if(v.contains("metadataOverrides") && v["metadataOverrides"].is_object())s.metadataOverrides=v["metadataOverrides"].get<std::map<std::string,Json>>();
     if(v.contains("metadataRemoved") && v["metadataRemoved"].is_array())s.metadataRemoved=v["metadataRemoved"].get<std::vector<std::string>>();

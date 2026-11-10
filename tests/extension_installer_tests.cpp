@@ -19,6 +19,7 @@ int main() {
         check(extensionsTabTitle(L"управление дополнениями", true) && extensionsTabTitle(L"add-ons manager", true), "Firefox add-on manager tabs are candidates");
         check(!extensionsTabTitle(L"управление дополнениями", false), "Firefox title is scoped to Firefox");
         check(!extensionsTabTitle(L"расширения для файлов") && !extensionsTabTitle(L"my extensions"), "Unrelated tab titles are not accepted");
+        check(connectorPopupButton(L"connect extension") && connectorPopupButton(L"подключить расширение") && !connectorPopupButton(L"unrelated"), "Connector button is recognized in both interface languages");
         check(connectorSetupReady(true, true) && !connectorSetupReady(false, true) && !connectorSetupReady(true, false), "Previously granted access and current protocol establish readiness");
         check(!browserToolbarButton(420, 73, 1300, 115, 0, 0, 1920, 1080, 96, true), "search/address bar labelled Extensions is never selected as toolbar button");
         check(!browserToolbarButton(180, 220, 220, 260, 0, 0, 1920, 1080, 96, true), "page toolbar is not a browser extensions button");

@@ -181,6 +181,11 @@ int main() {
     test("Video filter includes silent and uncertain video without mixing audio", [] {
         Media m; m.category = "Видео без звука"; m.videoOnly = true;
         check(matchesMediaCategory(m, "Видео") && videoSoundLabel(m) == "Без звука", "silent video is visible and labelled");
+        Media generated; generated.id="metadata"; generated.title="Метаданные JSON";
+        check(displayMediaTitle("en", generated)=="JSON metadata" && displayMediaTitle("ru", generated)==generated.title, "generated media titles follow interface language");
+        Media cover; cover.id="thumb:1"; cover.title="Обложка";
+        check(mediaSearchText("en",cover).find("Cover")!=std::string::npos && mediaSearchText("en",cover).find("Обложка")!=std::string::npos, "search includes displayed and original titles");
+        generated.id="user-file"; check(displayMediaTitle("en", generated)==generated.title, "user titles are preserved");
         m.category = "Видео · звук не проверен"; m.videoOnly = false;
         check(matchesMediaCategory(m, "Видео") && videoSoundLabel(m) == "Звук не проверен", "uncertain audio stays uncertain");
         m.category = "Видео"; m.acodec = "aac";

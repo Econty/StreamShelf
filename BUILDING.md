@@ -30,7 +30,7 @@ cmake --install build/release --prefix release/StreamShelf-Native
 
 Для отключения тестов используйте отдельную папку сборки, например `cmake -S . -B build/app -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF`. По умолчанию среда C++ связывается статически; `-DSTREAMSHELF_STATIC_RUNTIME=OFF` выбирает динамическую среду. Для распространения динамической сборки потребуются совместимые runtime DLL или соответствующий Microsoft Visual C++ Redistributable. Убедитесь в работоспособности комплекта на чистой машине.
 
-Интерактивный тест мастера установки требует доступного рабочего стола и включается параметром `-DSTREAMSHELF_NATIVE_GUIDE_TESTS=ON` при настройке. Он не входит в обычный CI. Старые `Build-Local.ps1`, `Build-App.ps1` и `build-cross.sh` сохранены для прежних сценариев и используют отдельные правила и кэши; основной поддерживаемый путь — CMake presets.
+Интерактивный тест мастера установки требует доступного рабочего стола и включается параметром `-DSTREAMSHELF_NATIVE_GUIDE_TESTS=ON` при настройке. Он не входит в обычный CI. Поддерживаемый способ сборки использует CMake presets и скрипт `scripts/Build.ps1`.
 
 ## Инструменты и расширения для выпуска
 

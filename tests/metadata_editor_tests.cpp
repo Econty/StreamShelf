@@ -1,4 +1,5 @@
 #include "assembly_source.hpp"
+#include "language_options.hpp"
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
@@ -6,6 +7,9 @@
 #include <iostream>
 using namespace ss;
 int main() {
+    assert(trackLanguageLabel("eng", "Английский", true) == "English");
+    assert(trackLanguageLabel("eng", "Английский", false) == "Английский");
+    assert(normalizedLanguage("English") == "eng");
     assert(metadataKeyAllowed("ALBUM_ARTIST"));
     assert(metadataKeyAllowed("Автор музыки"));
     assert(!metadataKeyAllowed("title"));
@@ -56,6 +60,18 @@ int main() {
     assert(sources[4].role==6 && sources[4].embeddedKind=="attachment");
     assert(sources[5].role==4 && sources[5].embeddedKind=="chapters");
     assert(sources[6].role==5 && sources[6].embeddedKind=="metadata");
+    auto generated=assemblyFrom(assemblyJson(sources[5]));
+    assert(generated.name=="Главы · Sample");
+    auto englishSources=assemblySourcesFromProbe(media,"sample.mkv",probe,"en");
+    assert(englishSources[5].name=="Chapters · Sample");
+    assert(generated.name=="Главы · Sample"); // Creating an English view does not change saved content.
+    generated.name="My own chapters";
+    assert(assemblyFrom(assemblyJson(generated)).name=="My own chapters");
+    AssemblySource audio;setGeneratedAssemblyName(audio,"optional_audio","Sample","en");
+    assert(audio.name=="Sample · audio (if available)");
+    assert(assemblyFrom(assemblyJson(audio)).name=="Sample · audio (if available)");
+    auto legacy=assemblyFrom(Json{{"name","Моё название"}});
+    assert(legacy.name=="Моё название");
     auto coverCopy=assemblyFrom(assemblyJson(sources[3]));
     assert(coverCopy.embeddedKind=="cover" && coverCopy.originalCoverTags["comment"]=="cover comment");
     probe["programs"]=Json::array({Json{{"program_id",1}}});

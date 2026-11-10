@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "interface_text.hpp"
 #include <windowsx.h>
 #include <shellapi.h>
 #include <chrono>
@@ -228,6 +229,7 @@ static LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     using namespace ss;
+    std::string startupLanguage = defaultInterfaceLanguage(GetUserDefaultUILanguage());
     int smokeExit = 0;
     GuidedBrowser smokeBrowser = GuidedBrowser::None;
     fs::path smokeReport;
@@ -248,9 +250,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
         auto filename = executable().filename().wstring();
         if (filename == L"StreamShelf.Host.exe")
             return nativeHostMain();
+        try {
+            const auto settings = dataRoot() / L"settings.dpapi";
+            if (fs::exists(settings)) {
+                const auto saved = str(Json::parse(unprotectFile(settings)), "interfaceLanguage");
+                if (saved == "en" || saved == "ru") startupLanguage = saved;
+            }
+        } catch (...) {}
         Handle mutex(CreateMutexW(nullptr, TRUE, (L"Local\\" + pipeName().substr(9)).c_str()));
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            MessageBoxW(nullptr, L"StreamShelf уже открыт.", L"StreamShelf", MB_OK);
+            MessageBoxW(nullptr, startupLanguage == "ru" ? L"StreamShelf уже открыт." : L"StreamShelf is already running.", L"StreamShelf", MB_OK);
             return 0;
         }
         auto setDpi = (BOOL(WINAPI *)(DPI_AWARENESS_CONTEXT))GetProcAddress(GetModuleHandleW(L"user32.dll"),
@@ -342,6 +351,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
         {
             App model;
             app = &model;
+            startupLanguage = model.interfaceLanguage;
             model.hwnd = h;
             UI screen(model);
             ui = &screen;
@@ -478,9 +488,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     } catch (const std::exception &e) {
         std::wstring s;
         try {
-            s = ss::wide(ss::redact(e.what()));
+            s = ss::wide(ss::interfaceText(startupLanguage, ss::redact(e.what())));
         } catch (...) {
-            s = L"Ошибка запуска приложения";
+            s = startupLanguage == "ru" ? L"Ошибка запуска приложения" : L"Could not start the application";
         }
         MessageBoxW(nullptr, s.c_str(), L"StreamShelf · C++", MB_ICONERROR | MB_OK);
         return 1;

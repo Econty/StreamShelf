@@ -112,9 +112,12 @@ void cancelRead() {
 }
 #ifndef STREAMSHELF_BASELINE
 void identityAndRetry() {
-    check("current Firefox accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.3"}}));
+    check("current Firefox accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.4"}}));
+    check("Firefox guide selects the current signed package", std::wstring(SignedFirefoxConnectorFilename) == L"StreamShelf-Connector-" + wide(ConnectorVersion) + L".xpi");
+    check("legacy signed Firefox accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.3"}}));
     check("old Firefox rejected", !compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.0"}}) && !compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.2"}}));
-    check("current Chromium accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.3"}}));
+    check("current Chromium accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.4"}}));
+    check("legacy Chromium accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.3"}}));
     check("old Chromium rejected", !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.0"}}) && !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.1"}}) && !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.2"}}));
     check("missing version rejected", !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}}));
     std::map<DWORD, DWORD> parents{{10, 20}, {20, 30}, {30, 30}};
