@@ -5,16 +5,24 @@
 #include "assembly_source.hpp"
 #include "component_manager.hpp"
 #include "log_text.hpp"
+#include "accessibility.hpp"
 #include <deque>
 #include <array>
 #include <shared_mutex>
 #include <set>
 namespace ss {
-struct Preview {PreviewImage image;std::string message="Загрузка превью…";bool done=false;};
+struct Preview {
+    PreviewImage image;
+    std::string message="Загрузка превью…";
+    bool done=false;
+    uint64_t id=0, lastSeenFrame=0;
+};
 struct Job {
     std::string id, title, state = "Ожидание", detail, metrics, folder, page, pair, local, output;
     Media item;
     std::shared_ptr<Session> session;
+    BrowserSource browserSource;
+    bool browserSourceRequired = false;
     bool mux = false;
     bool assemblyInput = false, localFile = false, conversionSource = false;
     bool singleExport = false;
@@ -44,6 +52,9 @@ class App {
     ULONGLONG subtitleResumeAt=0;
     unsigned subtitleBackoff=60;
     int active = 0;
+    // Do not overwrite a history that was only partially restored until a
+    // durable copy of the original has been made.
+    bool historyRecoveryRequired = false;
     std::atomic_int parallel{2};
     std::atomic_bool stopping{false};
     std::shared_ptr<std::atomic_bool> terminalCancel;
@@ -58,7 +69,9 @@ class App {
     bool ready = false;
     uint64_t jobSerial = 0;
     int previewActive=0;
-    struct ProbeTask { Media item; std::shared_ptr<Session> session; std::shared_ptr<std::atomic_bool> cancelled; uint64_t generation = 0; int tab = -1; int priority = 0; };
+    uint64_t previewSerial=0;
+    std::string previewCacheKey(const Media &);
+    struct ProbeTask { Media item; std::shared_ptr<Session> session; BrowserSource source; std::shared_ptr<std::atomic_bool> cancelled; uint64_t generation = 0; int tab = -1; int priority = 0; };
     std::mutex probeMutex;
     std::condition_variable probeCv;
     std::deque<ProbeTask> probes;
@@ -72,7 +85,7 @@ class App {
     void downloadLoop();
     void download(const std::shared_ptr<Job> &);
     void saveHistory();
-    void updateAssemblies();
+    bool updateAssemblies();
     void resolveAssembly(const std::shared_ptr<Job> &, bool);
     void downloadAssembly(const std::shared_ptr<Job> &);
     ProcessResult runFfmpegWithProgress(const std::shared_ptr<Job> &, const std::vector<std::wstring> &, double);
@@ -97,12 +110,15 @@ class App {
     std::array<bool,5> audioEncoders{true,false,false,false,false};
     std::array<bool,5> subtitleEncoders{true,false,false,false,false};
     std::array<bool,4> imageEncoders{true,false,false,false};
+    std::atomic_uint64_t encoderRevision{0};
     bool videoEncodersReady = false;
     void detectVideoEncoders();
     void addLocalFiles(const std::vector<std::string> &);
     std::map<std::string, std::shared_ptr<Session>> mediaSessions;
+    std::map<std::string, BrowserSource> mediaSources;
     std::map<std::string,std::shared_ptr<Preview>> previews;
-    uint64_t previewGeneration = 0;
+    uint64_t previewGeneration = 0, previewFrame = 0;
+    void beginPreviewFrame() { ++previewFrame; }
     std::vector<std::shared_ptr<Job>> jobs;
     std::vector<LogEntry> logs;
     Analysis analysis;
@@ -111,17 +127,18 @@ class App {
                      status = "Подготовка инструментов…", connection = "Браузер не подключён", toast,
                      modalTitle, modalBody, modalConfirmLabel = "Продолжить";
     std::function<void()> modalConfirm;
-    int browserIndex = 0, profileIndex = 0, sessionIndex = -1, category = 1, audioIndex = -1;
+    int browserIndex = 0, profileIndex = 0, sessionIndex = -1, category = 0, audioIndex = -1;
     std::atomic_int fragments{4};
     std::string interfaceLanguage = "en";
     std::mutex languageDispatchMutex;
     std::atomic_uint64_t languageRevision{0};
     void setInterfaceLanguage(const std::string &);
+    void bindJobSource(Job &, const Media &);
     void saveSettings();
     bool scanCommandPending = false;
     bool splashEnabled = true;
     int splashSeconds = 3;
-    bool busy = false, autoUpdate = true, light = false, reduced = false, scanning = false, keepResults = false,
+    bool busy = false, autoUpdate = true, light = false, reduced = false, scanning = false, keepResults = false, manualAnalysis = false,
          exitRequested = false;
     std::string selectedJob, selectedMedia;
     std::set<std::string> selectedJobs;
@@ -133,7 +150,7 @@ class App {
     std::vector<AssemblySource> sourcePool, draft;
     int draftSelection = -1;
     bool singleExportMode = false, constructorModeManual = false, constructorFormatManual = false;
-    std::string assemblyName = "Мой контейнер", assemblyMetadataTitle, assemblyArtist, assemblyDescription;
+    std::string assemblyName = "Мой контейнер", constructorInitialName, assemblyMetadataTitle, assemblyArtist, assemblyDescription;
     std::map<std::string,std::string> globalTags, originalGlobalTags;
     std::string globalTagName;
     bool globalTagsLoaded = false;
@@ -149,7 +166,8 @@ class App {
     ~App();
     void start();
     void post(std::function<void()>);
-    void drain();
+    // Returns true when queued background callbacks changed the UI model.
+    bool drain();
     void work(std::function<void()>);
     void log(const std::string &, bool localizable = true);
     void notify(const std::string &);
@@ -158,7 +176,7 @@ class App {
     std::shared_ptr<Session> session();
     fs::path tool(const wchar_t *);
     std::pair<std::string, Json> credentials(std::shared_ptr<Session>, const std::string &,
-                                             std::atomic_bool &);
+                                             std::atomic_bool &, const BrowserSource *source = nullptr);
     void analyze(const std::string &, bool deep = false);
     std::shared_ptr<Preview> requestPreview(const Media &);
     void enqueue();
@@ -174,6 +192,9 @@ struct Hit {
     Rect rect;
     std::function<void()> action;
     bool edit = false;
+    std::string name, value;
+    LONG accessibleRole = ROLE_SYSTEM_PUSHBUTTON;
+    bool checked = false, enabled = true;
 };
 class UI {
     App &app;
@@ -187,8 +208,22 @@ class UI {
     std::map<std::string, LabelState> labels;
     std::vector<Hit> hits;
     std::optional<Hit> capture;
+    bool snapshotFresh = false;
+    std::string keyboardFocus;
+    bool focusControl(const std::string &);
+    void focusNext(bool backwards);
+    bool keyboardFocusable(const Hit &) const;
+    bool accessibilityVisible(const Hit &) const;
+    void syncAccessibility();
+    std::shared_ptr<AccessibilityState> accessibility=std::make_shared<AccessibilityState>();
+    std::map<std::string,LONG> accessibilityIds;
+    std::map<LONG,std::string> accessibilityNames;
+    LONG nextAccessibilityId=0;
     std::string focus;
+    std::string editingContext;
     std::string *editing = nullptr;
+    std::string inputContext() const;
+    std::string accessibilityKey(const Hit &) const;
     std::string suggestionField;
     std::optional<std::string> suggestionDismissedValue;
     std::vector<std::string> terminalHistory;
@@ -226,18 +261,21 @@ class UI {
     float collectionRowY(const std::string &, float);
     void selectionHeading(const std::string &, Rect, bool &);
     int jobSortColumn=0;
-    std::map<std::string,unsigned> previewTextures;
+    struct PreviewTexture { unsigned texture=0; uint64_t lastSeenFrame=0; };
+    std::map<std::string,PreviewTexture> previewTextures;
     std::map<uint64_t,std::string> metadataPreviews;
     void previewTile(const Media &,Rect);
     Ink bg, panel, edge, text, muted, accent;
     float to(const std::string &, float, float initial = 0, float freq = 5, float damping = .9f);
-    void hit(const std::string &, Rect, std::function<void()>, bool edit = false);
+    void hit(const std::string &, Rect, std::function<void()>, bool edit = false,
+             const std::string &name = {}, LONG role = ROLE_SYSTEM_PUSHBUTTON,
+             bool checked = false, bool enabled = true, const std::string &value = {});
     float hover(const std::string &, Rect);
     void label(const std::string &, const std::string &, float, float, float, Ink, float max = 1e8f);
     void button(const std::string &, Rect, const std::string &, std::function<void()>, bool primary = false,
                 bool enabled = true);
-    void check(const std::string &, Rect, bool, std::function<void()>);
-    void toggle(const std::string &, Rect, bool, std::function<void()>);
+    void check(const std::string &, Rect, bool, std::function<void()>, const std::string &name = {});
+    void toggle(const std::string &, Rect, bool, std::function<void()>, const std::string &name = {});
     void input(const std::string &, Rect, std::string &, const std::string &);
     void choice(const std::string &, Rect, const std::vector<std::string> &, int, std::function<void(int)>);
     void card(Rect);
@@ -277,11 +315,16 @@ class UI {
   public:
     UI(App &a) : app(a) {}
     void init();
+    void invalidateModelSnapshot();
+    bool interactionInProgress() const { return down; }
     void frame(int, int, float, float dpi = 1, bool resizing = false);
     void destroy() {
-        for(auto &[key,texture]:previewTextures)c.deleteImage(texture);
+        { std::lock_guard lock(accessibility->mutex); accessibility->window=nullptr; accessibility->nodes.clear(); accessibility->pending.clear(); accessibility->focused=0; }
+        for(auto &[key,texture]:previewTextures)c.deleteImage(texture.texture);
         c.destroy();
     }
+    LRESULT accessibilityObject(WPARAM wparam) { return accessibilityObjectResult(wparam,accessibility); }
+    LRESULT accessibilityCommand(uint64_t request);
     void navigate(int);
     bool acceptsFileDrop() const { return page == 2; }
     void mouse(float, float);

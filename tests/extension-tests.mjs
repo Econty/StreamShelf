@@ -3,7 +3,7 @@ let count=0;
 for(const family of ['chromium','firefox']) {
  const manifest=JSON.parse(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/manifest.json`));
  if(family==='chromium') {
-  assert.equal(manifest.version,'1.0.4');count++;
+  assert.equal(manifest.version,'1.0.5');count++;
   const digest=crypto.createHash('sha256').update(Buffer.from(manifest.key,'base64')).digest('hex').slice(0,32);
   const id=[...digest].map(x=>String.fromCharCode(97+parseInt(x,16))).join('');
   assert.equal(id,'cjhiagnpgpmaagnoinjnkipimjlplcpe');count++;
@@ -20,7 +20,7 @@ for(const family of ['chromium','firefox']) {
   assert(Number(gecko.strict_min_version.split('.')[0])>=140);
   for(const required of ['browsingActivity','websiteContent','authenticationInfo']) assert(gecko.data_collection_permissions.required.includes(required));
   assert(manifest.permissions.includes('alarms'));
-  assert.equal(manifest.version,'1.0.4');
+  assert.equal(manifest.version,'1.0.5');
   assert(manifest.description.length>20);
   for(const size of [16,32,48,96,256]) {
    const path=manifest.icons[size];const image=fs.readFileSync(`extension/firefox-development/${path}`);
@@ -30,16 +30,22 @@ for(const family of ['chromium','firefox']) {
   assert.equal(manifest.action.default_icon['32'],manifest.icons['32']);
   count+=24;
  }
- let siteAccess=true;const stored={instanceId:'test'};const sent=[],listeners={};const event=key=>({addListener:f=>listeners[key]=f});
+ let siteAccess=true;const stored={instanceId:'test'};const sent=[],listeners={},stopMessages=[];const event=key=>({addListener:f=>listeners[key]=f});
  const port={postMessage:m=>sent.push(m),onDisconnect:event('disconnect'),onMessage:event('native')};
- const api={runtime:{getManifest:()=>manifest,onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),connectNative:()=>port,lastError:null},storage:{local:{get:async key=>({[key]:stored[key]}),set:async values=>Object.assign(stored,values)}},tabs:{get:async id=>({id,url:id===99?'chrome://extensions/':'https://example.com/watch',title:'Test',...(family==='firefox'?{cookieStoreId:'firefox-container-1'}:{incognito:true})}),query:async()=>[{id:99}],reload:async()=>{},sendMessage:async()=>{},onActivated:event('activated'),onUpdated:event('updated'),onRemoved:event('removed')},windows:{WINDOW_ID_NONE:-1,get:async()=>({focused:true}),onFocusChanged:event('focus')},alarms:{create:()=>{},onAlarm:event('alarm')},permissions:{contains:async()=>siteAccess,onAdded:event('permissionAdded'),onRemoved:event('permissionRemoved')},scripting:{executeScript:async()=>{}},cookies:{getAllCookieStores:async()=>[{id:'private-store',tabIds:[7,8,9]}],getAll:async options=>{assert.equal(options.storeId,family==='firefox'?'firefox-container-1':'private-store');return [{domain:'example.com',name:'session',value:'SECRET',path:'/',secure:true,httpOnly:true,partitionKey:{topLevelSite:'https://example.com'}}];}},webRequest:{onBeforeSendHeaders:event('request'),onHeadersReceived:event('response'),onErrorOccurred:event('error')}};
+ const api={runtime:{getManifest:()=>manifest,onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),connectNative:()=>port,lastError:null},storage:{local:{get:async key=>({[key]:stored[key]}),set:async values=>Object.assign(stored,values)}},tabs:{get:async id=>({id,url:id===99?'chrome://extensions/':'https://example.com/watch',title:'Test',...(family==='firefox'?{cookieStoreId:'firefox-container-1'}:{incognito:true})}),query:async()=>[{id:99}],reload:async()=>{},sendMessage:async(id,message)=>{stopMessages.push({id,message});},onActivated:event('activated'),onUpdated:event('updated'),onRemoved:event('removed')},windows:{WINDOW_ID_NONE:-1,get:async()=>({focused:true}),onFocusChanged:event('focus')},alarms:{create:()=>{},onAlarm:event('alarm')},permissions:{contains:async()=>siteAccess,onAdded:event('permissionAdded'),onRemoved:event('permissionRemoved')},scripting:{executeScript:async()=>{}},cookies:{getAllCookieStores:async()=>[{id:'private-store',tabIds:[7,8,9]}],getAll:async options=>{assert.equal(options.storeId,family==='firefox'?'firefox-container-1':'private-store');return [{domain:'example.com',name:'session',value:'SECRET',path:'/',secure:true,httpOnly:true,partitionKey:{topLevelSite:'https://example.com'}}];}},webRequest:{onBeforeSendHeaders:event('request'),onHeadersReceived:event('response'),onErrorOccurred:event('error')}};
  const context=vm.createContext({chrome:api,browser:family==='firefox'?api:undefined,URL,crypto:crypto.webcrypto,navigator:{userAgent:'Firefox/Test'},Map,Set,setTimeout,clearTimeout,console});
  vm.runInContext(fs.readFileSync(`extension/${family==='firefox'?'firefox-development':'chromium-development'}/background.js`,'utf8'),context);
+ await new Promise(resolve=>setTimeout(resolve,0));
+ assert(sent.some(m=>m.type==='hello'&&m.allowLaunch===false&&m.capabilities.includes('scopedCredentials')),'background load reconnects with scoped credential capability');count++;
  if(['chromium','firefox'].includes(family)){listeners.installed();await new Promise(resolve=>setTimeout(resolve,0));assert(sent.some(m=>m.type==='hello'&&m.allowLaunch===false&&m.capabilities.includes('language')));count++;}
  assert.equal(vm.runInContext("classify('https://e.com/file','video/mp4')",context),'Видео');count++;
  assert.equal(vm.runInContext('VERSION',context),manifest.version);count++;
  assert.equal(vm.runInContext("classify('https://e.com/segment.ts','video/mp2t')",context),'Сегмент');count++;
  assert.equal(vm.runInContext("classify('https://e.com/file','application/vnd.apple.mpegurl')",context),'HLS');count++;
+ assert.equal(vm.runInContext("classify('https://e.com/stream.mpd','application/xml')",context),'DASH');count++;
+ assert.equal(vm.runInContext("classify('https://e.com/stream.mpd','text/xml; charset=utf-8')",context),'DASH');count++;
+ assert.equal(vm.runInContext("classify('https://e.com/document.xml','application/xml')",context),null);count++;
+ assert.equal(vm.runInContext("classify('https://e.com/error.mpd','text/html')",context),null);count++;
  assert.equal(vm.runInContext("cleanUrl('file:///etc/passwd')",context),null);count++;
  if(['chromium','firefox'].includes(family)){assert.equal(vm.runInContext("classify('https://e.com/error.mp4','text/html')",context),null);count++;}
  if(['chromium','firefox'].includes(family)){siteAccess=false;const denied=await new Promise(resolve=>listeners.message({type:'connectExtension'},{},resolve));assert(denied.error);await vm.runInContext("handleCommand({type:'ping',requestId:'no-access'})",context);assert(sent.some(m=>m.type==='pong'&&m.requestId==='no-access'&&!m.hasSiteAccess&&!m.setupConfirmed));assert(!sent.some(m=>m.type==='setupChanged'));siteAccess=true;count+=3;}
@@ -70,6 +76,24 @@ for(const family of ['chromium','firefox']) {
  assert.equal(vm.runInContext("classify('https://e.com/license.mp4','video/mp4')",context),'Видео');count++;
  listeners.request({tabId:7,url:'https://example.com/favicon.ico',requestId:'favicon',requestHeaders:[]});const notices=sent.filter(m=>m.type==='notice').length;listeners.response({tabId:7,url:'https://example.com/favicon.ico',requestId:'favicon',statusCode:404,responseHeaders:[]});assert.equal(sent.filter(m=>m.type==='notice').length,notices);count++;
  await assert.rejects(vm.runInContext("handleCommand({type:'credentials',requestId:'bad',tabId:7,url:'https://not-observed.example/'})",context));count++;
+ {
+  const savedGet=api.tabs.get, source=vm.runInContext('sourceId',context);
+  let resolveOld;
+  api.tabs.get=id=>id===7?new Promise(resolve=>{resolveOld=resolve;}):savedGet(id);
+  const pending=vm.runInContext('announce()',context);
+  await vm.runInContext('selectActiveTab(8)',context);
+  resolveOld(await savedGet(7));await pending;
+  assert.equal(sent.filter(m=>m.type==='tabSelected').at(-1).tabId,8,'delayed announce does not publish the old tab');
+  api.tabs.get=savedGet;
+  await vm.runInContext('selectActiveTab(7)',context);
+  await assert.rejects(vm.runInContext(`handleCommand({type:'credentials',requestId:'stale',tabId:7,sourceId:${source},url:'https://example.com/watch'})`,context),/измени|changed/i);
+  await vm.runInContext("handleCommand({type:'scanStart',tabId:7,scanId:1})",context);
+  const beforeStops=stopMessages.length;
+  listeners.updated(7,{url:'https://example.com/next'},{id:7,active:true});
+  assert(stopMessages.slice(beforeStops).some(entry=>entry.id===7&&entry.message.type==='stopDom'),'SPA navigation stops content observers');
+  await new Promise(resolve=>setTimeout(resolve,0));
+  count+=3;
+ }
  await vm.runInContext("handleCommand({type:'scanStop'})",context);
  const before=sent.filter(m=>m.type==='resource').length;
  listeners.response({tabId:7,url:'https://example.com/new.mp4',requestId:'no',responseHeaders:[{name:'Content-Type',value:'video/mp4'}]});

@@ -1,8 +1,17 @@
 #include "component_manager.hpp"
+#include <array>
 #include <iostream>
 using namespace ss;
 int main(int argc,char **argv) {
-    if (argc == 2 && std::string(argv[1]) == "--version") { std::cout << "2026.10.26\n"; return 0; }
+    if (argc == 2 && (std::string(argv[1]) == "--version" || std::string(argv[1]) == "-version")) {
+        if (GetEnvironmentVariableW(L"STREAMSHELF_TEST_UNKNOWN_VERSION", nullptr, 0)) std::cout << "nightly-development\n";
+        else {
+            wchar_t path[32768]{};
+            GetModuleFileNameW(nullptr,path,DWORD(std::size(path)));
+            std::cout << (fs::path(path).parent_path().filename()==L"rejected" ? "2025.1.1\n" : "2026.10.26\n");
+        }
+        return 0;
+    }
     if (argc == 5 && std::string(argv[1]) == "--progress") {
         try {
             std::atomic_bool stop{false};
@@ -60,11 +69,22 @@ int main(int argc,char **argv) {
        componentVersion("2026.10.26")!=std::vector<int>({2026,10,26}) ||
        !componentVersion("not installed").empty() ||
        !componentNewer("2.9.8", "2.9.7") || componentNewer("2.9.8","2.9.8") ||
-       componentNewer("2.9.8","3.0.0") || !componentNewer("9.0.2", "")) return 1;
+       componentNewer("2.9.8","3.0.0") || !componentNewer("9.0.2", "") ||
+       componentNewer("9.0.2", "nightly-development")) return 1;
     std::atomic_bool stop{false};
     const auto root = fs::temp_directory_path() / (L"StreamShelf-component-regression-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
     fs::create_directory(root);
-    auto clean = [&] { std::error_code ec; fs::remove(root/L"yt-dlp.exe",ec); fs::remove(root,ec); };
+    const std::array<const wchar_t *,4> files={L"yt-dlp.exe",L"ffmpeg.exe",L"ffprobe.exe",L"deno.exe"};
+    auto clean = [&] {
+        std::error_code ec;
+        fs::remove(root/L"yt-dlp.exe",ec);
+        for(auto directory:{root/L"bundle",root/L"import",root/L"rejected"}) {
+            for(auto name:files)fs::remove(directory/name,ec);
+            fs::remove(directory/L"checksums.json",ec);
+            fs::remove(directory,ec);
+        }
+        fs::remove(root,ec);
+    };
     try {
         auto before = componentFingerprint(root);
         fs::copy_file(executable(), root/L"yt-dlp.exe");
@@ -75,12 +95,44 @@ int main(int argc,char **argv) {
         std::vector<Component> c={{"yt-dlp"},{"FFmpeg"},{"FFprobe"},{"Deno"}}; c[0].latest="2026.10.26";
         c = refreshInstalledComponents(root,c,stop);
         if (c[0].installed != "2026.10.26" || c[0].update) throw std::runtime_error("installed version not detected");
+        SetEnvironmentVariableW(L"STREAMSHELF_TEST_UNKNOWN_VERSION", L"1");
+        c[0].latest = "2026.11.1";
+        c = refreshInstalledComponents(root,c,stop);
+        SetEnvironmentVariableW(L"STREAMSHELF_TEST_UNKNOWN_VERSION", nullptr);
+        if (c[0].installed != "unknown" || c[0].update || c[0].status.find("автоматическое обновление отключено") == std::string::npos)
+            throw std::runtime_error("unparseable working version was treated as outdated");
+        c[0].latest = "2026.10.26";
         fs::remove(root/L"yt-dlp.exe");
         if (componentFingerprint(root) == after) throw std::runtime_error("file removal not detected");
         bool rejected=false; try { terminalComponentCommand(L"yt-dlp --version",root); } catch (const std::exception &) { rejected=true; }
         if (!rejected) throw std::runtime_error("missing component could fall back to PATH");
         c = refreshInstalledComponents(root,c,stop);
         if (!c[0].installed.empty() || !c[0].update || c[0].latest!="2026.10.26") throw std::runtime_error("removed file left stale installed status");
+        const auto bundle=root/L"bundle", imported=root/L"import", rejectedRoot=root/L"rejected";
+        fs::create_directory(bundle);
+        Json sums=Json::object();
+        for(auto name:files) {
+            fs::copy_file(executable(),bundle/name);
+            sums[utf8(name)]=sha256(bundle/name);
+        }
+        writeFile(bundle/L"checksums.json",sums.dump());
+        if(installBundledComponents(imported,bundle,stop)!=4)throw std::runtime_error("verified bundle did not install all missing tools");
+        for(auto name:files)if(sha256(imported/name)!=sha256(bundle/name))throw std::runtime_error("installed tool differs from verified bundle");
+        writeFile(imported/L"yt-dlp.exe","existing user tool");
+        if(installBundledComponents(imported,bundle,stop)!=0 || readFile(imported/L"yt-dlp.exe")!="existing user tool")
+            throw std::runtime_error("existing tool was overwritten");
+        writeFile(bundle/L"deno.exe","tampered bundle");
+        bool badHash=false;
+        try { installBundledComponents(rejectedRoot,bundle,stop); } catch(const std::exception &) { badHash=true; }
+        if(!badHash || fs::exists(rejectedRoot/L"yt-dlp.exe"))throw std::runtime_error("tampered bundle partially installed");
+        fs::remove(bundle/L"deno.exe");
+        fs::copy_file(executable(),bundle/L"deno.exe");
+        fs::copy_file(executable(),rejectedRoot/L"ffmpeg.exe");
+        const auto previousHash=sha256(rejectedRoot/L"ffmpeg.exe");
+        bool badPair=false;
+        try { installBundledComponents(rejectedRoot,bundle,stop); } catch(const std::exception &) { badPair=true; }
+        if(!badPair || fs::exists(rejectedRoot/L"ffprobe.exe") || sha256(rejectedRoot/L"ffmpeg.exe")!=previousHash)
+            throw std::runtime_error("incompatible FFmpeg pair was modified");
         clean();
     } catch (const std::exception &e) { clean(); std::cerr<<e.what()<<"\n"; return 2; }
     std::cout<<"Version, installation, and removal cases passed\n"; return 0;

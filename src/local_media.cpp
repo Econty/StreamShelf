@@ -1,9 +1,15 @@
 #include "app.hpp"
 namespace ss {
 void App::detectVideoEncoders() {
-    work([this] {
+    const auto revision = ++encoderRevision;
+    videoEncoders = {true,false,false,false,false,false,false,false,false,false,false};
+    audioEncoders = {true,false,false,false,false};
+    subtitleEncoders = {true,false,false,false,false};
+    imageEncoders = {true,false,false,false};
+    videoEncodersReady = false;
+    work([this, revision] {
         {std::unique_lock lock(readyMutex);readyCv.wait(lock,[this]{return ready||stopping;});}
-        if(stopping)return;
+        if(stopping || revision != encoderRevision)return;
         static const wchar_t *names[]={L"h264_nvenc",L"hevc_nvenc",L"h264_qsv",L"hevc_qsv",L"h264_amf",L"hevc_amf"};
         static const std::string gpuNames[]={"h264_nvenc","hevc_nvenc","h264_qsv","hevc_qsv","h264_amf","hevc_amf"};
         const std::string videoNames[]={"","libx264","libx265","libvpx-vp9","libaom-av1"};
@@ -11,7 +17,7 @@ void App::detectVideoEncoders() {
         const std::string subNames[]={"","srt","mov_text","webvtt","ass"};
         std::set<std::string> available;
         std::atomic_bool listCancel{false},listFinished{false};
-        std::thread listWatchdog([&]{for(int n=0;n<80&&!listFinished&&!stopping;++n)Sleep(100);if(!listFinished)listCancel=true;});
+        std::thread listWatchdog([&]{for(int n=0;n<80&&!listFinished&&!stopping&&revision==encoderRevision;++n)Sleep(100);if(!listFinished)listCancel=true;});
         try {
             std::shared_lock lock(toolsMutex);
             auto result=runProcess(tool(L"ffmpeg.exe"),{L"-hide_banner",L"-encoders"},nullptr,listCancel,true);
@@ -24,11 +30,11 @@ void App::detectVideoEncoders() {
         std::array<bool,5> video{true,false,false,false,false},audio{true,false,false,false,false},subs{true,false,false,false,false};
         for(int i=1;i<5;++i){video[i]=available.count(videoNames[i])!=0;audio[i]=available.count(audioNames[i])!=0;subs[i]=available.count(subNames[i])!=0;}
         std::array<bool,4> images{true,available.count("png")!=0,available.count("mjpeg")!=0,available.count("libwebp")!=0};
-        if(!stopping)post([this,video,audio,subs,images]{for(int i=1;i<5;++i)videoEncoders[i]=video[i];audioEncoders=audio;subtitleEncoders=subs;imageEncoders=images;});
-        for(int i=0;i<6&&!stopping;++i) {
+        if(!stopping)post([this,revision,video,audio,subs,images]{if(revision!=encoderRevision)return;for(int i=1;i<5;++i)videoEncoders[i]=video[i];audioEncoders=audio;subtitleEncoders=subs;imageEncoders=images;});
+        for(int i=0;i<6&&!stopping&&revision==encoderRevision;++i) {
             if(!available.count(gpuNames[i]))continue;
             std::atomic_bool cancelled{false},finished{false};
-            std::thread watchdog([&]{for(int n=0;n<80&&!finished&&!stopping;++n)Sleep(100);if(!finished)cancelled=true;});
+            std::thread watchdog([&]{for(int n=0;n<80&&!finished&&!stopping&&revision==encoderRevision;++n)Sleep(100);if(!finished)cancelled=true;});
             bool available=false;
             try {
                 std::shared_lock lock(toolsMutex);
@@ -36,9 +42,9 @@ void App::detectVideoEncoders() {
                 available=!r.code&&!cancelled&&!stopping;
             } catch(...) {}
             finished=true;watchdog.join();
-            if(available)post([this,i]{videoEncoders[i+5]=true;});
+            if(available)post([this,revision,i]{if(revision==encoderRevision)videoEncoders[i+5]=true;});
         }
-        if(!stopping)post([this]{videoEncodersReady=true;});
+        if(!stopping)post([this,revision]{if(revision==encoderRevision)videoEncodersReady=true;});
     });
 }
 void App::addLocalFiles(const std::vector<std::string> &paths) {

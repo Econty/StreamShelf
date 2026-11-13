@@ -20,6 +20,8 @@ class ExtensionInstaller {
     ExtensionInstaller &operator=(const ExtensionInstaller &) = delete;
     void start(HWND owner, const Browser &, const Profile *, const fs::path &extension, bool reduced, bool light = false);
     bool active() const;
+    // Browser executable paths alone cannot distinguish sessions in different profiles.
+    bool hasExplicitProfile() const;
     bool translate(MSG &);
     void connectionEstablished();
     void setExtensionReloadRequired(bool required);

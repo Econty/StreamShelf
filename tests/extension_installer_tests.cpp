@@ -1,5 +1,6 @@
 #include "extension_installer.hpp"
 #include "extension_guide_state.hpp"
+#include "firefox_guide_state.hpp"
 #include "extension_presence.hpp"
 #include "uia_result.hpp"
 #include <iostream>
@@ -13,6 +14,25 @@ int main() {
     };
     try {
         check(!verifiedExtensionPage(4, true, true), "Typed address before Enter is never verified as a loaded page");
+        check(!guideCanReuseBrowserWindow(true, false), "Explicit profile cannot reuse a window identified only by executable");
+        check(guideCanReuseBrowserWindow(true, true), "Explicit profile may retry in its own launched window");
+        check(guideCanReuseBrowserWindow(false, false), "Unspecified profile can reuse a browser window");
+        const std::map<uint32_t,uint32_t> parents{{42, 10}, {43, 42}, {80, 10}, {81, 81}};
+        check(guideProcessDescendsFrom(42, 42, parents), "Window process may be the launched process itself");
+        check(guideProcessDescendsFrom(43, 42, parents), "Firefox browser may be a child of its launcher");
+        check(!guideProcessDescendsFrom(80, 42, parents), "Unrelated Firefox process is not the launched profile");
+        check(!guideProcessDescendsFrom(81, 42, parents), "Cyclic process ancestry is rejected");
+        FirefoxPickerGuard pickerGuard;
+        check(!pickerGuard.observePicker(true, true, 100), "Unsolicited Firefox file picker is ignored");
+        pickerGuard.observeMenu(true, true, 200);
+        check(!pickerGuard.observePicker(true, false, 250), "Picker from another browser window is ignored");
+        pickerGuard.observeMenu(true, true, 300);
+        check(pickerGuard.observePicker(true, true, 400), "Firefox picker after the installation menu belongs to the guide");
+        check(pickerGuard.observePicker(true, true, 9000), "Accepted picker remains active while open");
+        pickerGuard.observePicker(false, true, 9010);
+        check(!pickerGuard.observePicker(true, true, 9020), "Closing picker clears pending installation");
+        pickerGuard.observeMenu(true, true, 10000);
+        check(!pickerGuard.observePicker(true, true, 16000), "Unrelated later picker cannot reuse a stale menu observation");
         check(!verifiedExtensionPage(5, true, false), "After Enter, URL without extensions-page controls is still unverified");
         check(verifiedExtensionPage(5, true, true), "Only submitted URL and actual extensions controls verify navigation");
         check(extensionsTabTitle(L"расширения") && extensionsTabTitle(L"расширения - google chrome") && extensionsTabTitle(L"extensions — яндекс браузер"), "Existing browser extension tabs are candidates");
@@ -100,6 +120,10 @@ int main() {
         check(guidedBrowserProduct(L"Firefox", L"firefox.exe") == GuidedBrowser::Firefox, "Firefox product recognized");
         check(extensionPageUrl(GuidedBrowser::Firefox) == L"about:addons", "Firefox opens add-ons manager");
         check(extensionLaunchArguments(GuidedBrowser::Firefox, nullptr).front() == L"-new-window", "Firefox uses its own launch arguments");
+        Profile firefoxProfile{"Selected", "C:\\Firefox Profiles\\Selected", ""};
+        auto firefoxArgs = extensionLaunchArguments(GuidedBrowser::Firefox, &firefoxProfile);
+        check(firefoxArgs.front() == L"--new-instance" && firefoxArgs[1] == L"-profile" && firefoxArgs[2] == L"C:\\Firefox Profiles\\Selected",
+              "Firefox launches a selected profile without forwarding to an unrelated instance");
         check(guidedBrowserProduct(L"ЯНДЕКС", L"BROWSER.EXE") == GuidedBrowser::Yandex, "Cyrillic labels normalize independently of C locale");
         for (const auto &product : {L"Chromium", L"Microsoft Edge", L"Brave", L"Opera", L"Vivaldi", L"Firefox", L""})
             check(guidedBrowserProduct(product, L"chrome.exe") == GuidedBrowser::None, "Other browsers manual only");
@@ -122,11 +146,16 @@ int main() {
         bool rejected = false;
         try { extensionLaunchArguments(GuidedBrowser::None, nullptr); } catch (...) { rejected = true; }
         check(rejected, "Unsupported browser cannot launch wizard");
-        for (auto path : {"C:\\User Data\\Bad Profile", "C:\\User Data\\Profile 2 --load-extension=x", "C:\\Other\\Default"}) {
+        for (auto path : {"C:relative\\Default", "C:\\User Data\\..", "C:\\User Data\\bad|profile"}) {
             Profile custom{"custom", path, ""}; rejected = false;
             try { extensionLaunchArguments(GuidedBrowser::Chrome, &custom); } catch (...) { rejected = true; }
-            check(rejected, "Nonstandard profile refused before launch");
+            check(rejected, "Invalid profile path refused before launch");
         }
+        Profile custom{"custom", "C:\\Other browser data\\Custom Profile", ""};
+        auto customArgs = extensionLaunchArguments(GuidedBrowser::Chrome, &custom);
+        check(std::find(customArgs.begin(), customArgs.end(), L"--profile-directory=Custom Profile") != customArgs.end() &&
+              std::find(customArgs.begin(), customArgs.end(), L"--user-data-dir=C:\\Other browser data") != customArgs.end(),
+              "Custom profile and user-data directory are kept as separate arguments");
         Browser installed{"Chrome", "chromium", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"};
         if (fs::exists(wide(installed.exe)))
             check(guidedBrowser(installed) == GuidedBrowser::Chrome, "Installed Chrome product metadata recognized");

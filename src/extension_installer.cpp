@@ -9,6 +9,7 @@
 #include <windowsx.h>
 #include <winver.h>
 #include <shlobj.h>
+#include <tlhelp32.h>
 #include <chrono>
 #include <cwctype>
 #include <array>
@@ -518,8 +519,16 @@ bool enterText(HWND window, const std::wstring &exe, const std::wstring &text, W
 void showIfChanged(HWND window, bool show) {
     if (window && bool(IsWindowVisible(window)) != show) ShowWindow(window, show ? SW_SHOWNOACTIVATE : SW_HIDE);
 }
-HWND findBrowserWindow(const std::wstring &exe, const std::set<HWND> &old, bool requireNew) {
-    struct Search { const std::wstring &exe; const std::set<HWND> &old; bool fresh; HWND found{}; long long score = -1; } search{exe, old, requireNew};
+HWND findBrowserWindow(const std::wstring &exe, const std::set<HWND> &old, bool requireNew, DWORD expectedPid = 0) {
+    std::map<uint32_t,uint32_t> parents;
+    if (expectedPid) {
+        Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+        PROCESSENTRY32W process{sizeof(process)};
+        if (snapshot.h != INVALID_HANDLE_VALUE && Process32FirstW(snapshot, &process)) do {
+            parents[process.th32ProcessID] = process.th32ParentProcessID;
+        } while (Process32NextW(snapshot, &process));
+    }
+    struct Search { const std::wstring &exe; const std::set<HWND> &old; bool fresh; DWORD expectedPid; const std::map<uint32_t,uint32_t> &parents; HWND found{}; long long score = -1; } search{exe, old, requireNew, expectedPid, parents};
     EnumWindows([](HWND window, LPARAM context) -> BOOL {
         auto &s = *reinterpret_cast<Search *>(context);
         if (!IsWindowVisible(window) || (s.fresh && s.old.count(window))) return TRUE;
@@ -527,6 +536,8 @@ HWND findBrowserWindow(const std::wstring &exe, const std::set<HWND> &old, bool 
         const std::wstring windowClass = cls;
         if ((windowClass != L"Chrome_WidgetWin_1" && windowClass != L"Chrome_Yandex_WidgetWin_1" && windowClass != L"MozillaWindowClass") || GetWindow(window, GW_OWNER) ||
             lower(processPath(window)) != lower(s.exe)) return TRUE;
+        DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+        if (s.expectedPid && !guideProcessDescendsFrom(pid, s.expectedPid, s.parents)) return TRUE;
         RECT rect{}; GetWindowRect(window, &rect);
         long long area = (long long)(rect.right - rect.left) * (rect.bottom - rect.top);
         if (area < 40000 && !IsIconic(window)) return TRUE;
@@ -616,16 +627,23 @@ std::vector<std::wstring> extensionLaunchArguments(GuidedBrowser kind, const Pro
     if (kind == GuidedBrowser::None) throw std::runtime_error("Для этого браузера доступна ручная установка");
     if (kind == GuidedBrowser::Firefox) {
         std::vector<std::wstring> args;
-        if (profile && !profile->path.empty()) { args.push_back(L"-profile"); args.push_back(wide(profile->path)); }
+        if (profile && !profile->path.empty()) {
+            // Never forward a selected profile to an unrelated running instance.
+            // Firefox may refuse a profile that is already locked; in that case
+            // the guide waits rather than attaching to a different profile.
+            args.push_back(L"--new-instance");
+            args.push_back(L"-profile"); args.push_back(wide(profile->path));
+        }
         args.push_back(L"-new-window"); args.push_back(L"about:blank"); return args;
     }
     std::vector<std::wstring> args{L"--new-window", L"--force-renderer-accessibility"};
     if (profile) {
         fs::path path = wide(profile->path); auto name = path.filename().wstring();
-        bool standard = name == L"Default" || (name.rfind(L"Profile ", 0) == 0 && name.size() > 8 &&
-            std::all_of(name.begin() + 8, name.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; }));
-        if (!standard || lower(path.parent_path().filename().wstring()) != L"user data")
-            throw std::runtime_error("Для мастера выберите стандартный профиль браузера (Default / Profile N)");
+        if (!path.is_absolute() || path.parent_path().empty() || name.empty() || name == L"." || name == L".." ||
+            name.find_first_of(L"<>:\"|?*\r\n") != std::wstring::npos || path.lexically_normal() != path)
+            throw std::runtime_error("Для мастера выберите полный путь к папке профиля браузера");
+        // The profile path may be in a custom user-data directory. Both values
+        // are passed as individually quoted arguments, never as a shell command.
         args.push_back(L"--profile-directory=" + name); args.push_back(L"--user-data-dir=" + path.parent_path().wstring());
     }
     // Internal URLs are ignored by some running Chromium instances. First create a
@@ -640,6 +658,7 @@ std::wstring extensionPageUrl(GuidedBrowser kind) {
 struct ExtensionInstaller::Impl {
     bool firefox = false;
     bool firefoxSawPicker = false;
+    FirefoxPickerGuard firefoxPickerGuard;
     bool firefoxAcknowledgement = false;
     ULONGLONG firefoxPickerClosedAt = 0;
     HWND panel{}, marker{}, dimmer{}, owner{}, browserWindow{}, picker{};
@@ -659,11 +678,13 @@ struct ExtensionInstaller::Impl {
     ULONGLONG opened = GetTickCount64(), pickerAttemptAt = 0, connectionRetryAt = 0;
     bool navigationPending = true, markerPositioned = false;
     bool reuseBrowserWindow = false, newTabPending = false;
+    bool explicitProfile = false, profileWindowBound = false;
     std::vector<std::wstring> launchArguments;
     std::vector<HWND> searchWindows;
     size_t searchWindowIndex = 0;
     HWND initialBrowserWindow{};
     DWORD launchPid = 0, launchError = 0;
+    HANDLE launchHandle = nullptr;
     int navigationPhase = 0, navigationAttempts = 0;
     ULONGLONG navigationAt = 0, navigationStarted = 0;
     RECT stableBrowserRect{};
@@ -714,6 +735,7 @@ struct ExtensionInstaller::Impl {
         if (IsWindow(panel)) DestroyWindow(panel);
         if (IsWindow(marker)) DestroyWindow(marker);
         if (IsWindow(dimmer)) DestroyWindow(dimmer);
+        if (launchHandle) CloseHandle(launchHandle);
     }
     void setNotice(const std::wstring &value) {
         if (notice != value) { notice = value; if (panel) InvalidateRect(panel, nullptr, FALSE); }
@@ -723,6 +745,7 @@ struct ExtensionInstaller::Impl {
         static const std::map<std::wstring, std::wstring> translations = {
             {L"Открываю выбранный браузер и страницу расширений…", L"Opening the selected browser and its extensions page…"},
             {L"Страница не подтверждена. Нажмите «Открыть страницу» для повтора.", L"The page could not be verified. Click Open page to try again."},
+            {L"Не удалось открыть выбранный профиль. Если он уже открыт в Firefox, закройте его и повторите.", L"Could not open the selected profile. If it is already open in Firefox, close it and try again."},
             {L"Не удалось проверить открытые вкладки. Переключитесь на страницу расширений вручную.", L"Could not check open tabs. Switch to the extensions page manually."},
             {L"Вкладка расширений найдена. Переключитесь на неё, чтобы продолжить.", L"The extensions tab was found. Switch to it to continue."},
             {L"Переключитесь на открытую вкладку расширений, чтобы продолжить.", L"Switch to the open extensions tab to continue."},
@@ -736,6 +759,7 @@ struct ExtensionInstaller::Impl {
             {L"Файл указан. Нажмите кнопку «Открыть».", L"The file is selected. Click Open."},
             {L"Откройте папку с XPI вручную или вставьте путь в поле имени файла.", L"Open the XPI folder manually or paste its path into the file name field."},
             {L"Открываю папку с подписанным файлом расширения…", L"Opening the folder containing the signed extension…"},
+            {L"Выберите подписанный XPI вручную; путь можно скопировать кнопкой мастера.", L"Select the signed XPI manually; use the guide to copy its path."},
             {L"Ожидаю подтверждение Firefox. Если выбор отменён, откройте меню установки снова.", L"Waiting for Firefox confirmation. If you cancelled, open the installation menu again."},
             {L"Включите StreamShelf Connector в списке дополнений Firefox.", L"Enable StreamShelf Connector in the Firefox add-ons list."},
             {L"Страница расширений открыта и проверена.", L"The extensions page is open and verified."},
@@ -766,13 +790,16 @@ struct ExtensionInstaller::Impl {
             launchError = GetLastError();
             throw std::runtime_error("Не удалось запустить браузер. Код Windows: " + std::to_string(launchError));
         }
-        launchPid = process.dwProcessId; AllowSetForegroundWindow(launchPid);
-        CloseHandle(process.hThread); CloseHandle(process.hProcess);
+        if (launchHandle) CloseHandle(launchHandle);
+        launchPid = process.dwProcessId; launchHandle = process.hProcess;
+        AllowSetForegroundWindow(launchPid);
+        CloseHandle(process.hThread);
     }
     void openExtensionsPage(bool relaunch = false) {
-        if (!IsWindow(browserWindow) && !relaunch)
+        if (!IsWindow(browserWindow)) profileWindowBound = false;
+        if (!IsWindow(browserWindow) && !relaunch && guideCanReuseBrowserWindow(explicitProfile, profileWindowBound))
             browserWindow = findBrowserWindow(exe, existingWindows, false);
-        reuseBrowserWindow = !relaunch && IsWindow(browserWindow);
+        reuseBrowserWindow = !relaunch && IsWindow(browserWindow) && guideCanReuseBrowserWindow(explicitProfile, profileWindowBound);
         newTabPending = reuseBrowserWindow;
         tabSearchPending = reuseBrowserWindow;
         searchWindows.clear(); searchWindowIndex = 0; initialBrowserWindow = browserWindow;
@@ -784,7 +811,18 @@ struct ExtensionInstaller::Impl {
                     std::wstring(cls) == L"MozillaWindowClass" && lower(processPath(window)) == lower(exe)) searchWindows.push_back(window);
             }
         }
-        if (!reuseBrowserWindow) launchBrowser();
+        if (!reuseBrowserWindow) {
+            // Snapshot immediately before the profile-specific launch. Never
+            // fall back to a pre-existing window belonging to another profile.
+            existingWindows.clear();
+            EnumWindows([](HWND h, LPARAM context) -> BOOL {
+                auto self = reinterpret_cast<Impl *>(context);
+                if (lower(processPath(h)) == lower(self->exe)) self->existingWindows.insert(h);
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(this));
+            profileWindowBound = false;
+            launchBrowser();
+        }
         navigationPending = true; pageVerified = false; navigationPhase = 1;
         navigationAttempts = 0; navigationStarted = navigationAt = GetTickCount64();
         setNotice(L"Открываю выбранный браузер и страницу расширений…");
@@ -794,13 +832,15 @@ struct ExtensionInstaller::Impl {
         auto now = GetTickCount64();
         if (now - navigationStarted > 30000) {
             navigationPending = false;
-            setNotice(L"Страница не подтверждена. Нажмите «Открыть страницу» для повтора."); return;
+            setNotice(firefox && explicitProfile ? L"Не удалось открыть выбранный профиль. Если он уже открыт в Firefox, закройте его и повторите." : L"Страница не подтверждена. Нажмите «Открыть страницу» для повтора."); return;
         }
         if (navigationPhase == 1) {
-            auto found = reuseBrowserWindow && IsWindow(browserWindow) ? browserWindow :
-                findBrowserWindow(exe, existingWindows, !reuseBrowserWindow && now - navigationStarted < 1700);
+            auto found = (reuseBrowserWindow || (explicitProfile && profileWindowBound)) && IsWindow(browserWindow) ? browserWindow :
+                findBrowserWindow(exe, existingWindows, explicitProfile || (!reuseBrowserWindow && now - navigationStarted < 1700),
+                                  firefox && explicitProfile ? launchPid : 0);
             if (!found) return;
             browserWindow = found; scanWindow = found;
+            if (explicitProfile) profileWindowBound = true;
             wchar_t cls[100]{}; GetClassNameW(found, cls, 100); browserWindowClass = cls;
             DWORD pid = 0; GetWindowThreadProcessId(found, &pid); AllowSetForegroundWindow(pid);
             if (!IsZoomed(found)) { ShowWindowAsync(found, SW_MAXIMIZE); browserRectChangedAt = now; return; }
@@ -867,6 +907,7 @@ struct ExtensionInstaller::Impl {
             }
             INPUT enter[2]{}; enter[0].type = enter[1].type = INPUT_KEYBOARD;
             enter[0].ki.wVk = enter[1].ki.wVk = VK_RETURN; enter[1].ki.dwFlags = KEYEVENTF_KEYUP;
+            if (GetForegroundWindow() != browserWindow || !modifiersUp()) return;
             if (SendInput(2, enter, sizeof(INPUT)) != 2) return;
             navigationPhase = 5; navigationAt = now; return;
         }
@@ -921,6 +962,7 @@ struct ExtensionInstaller::Impl {
             if (!GetGUIThreadInfo(GetWindowThreadProcessId(window, nullptr), &info) || info.hwndFocus != folderEdit) { folderPhase = 0; return; }
             INPUT enter[2]{}; enter[0].type = enter[1].type = INPUT_KEYBOARD;
             enter[0].ki.wVk = enter[1].ki.wVk = VK_RETURN; enter[1].ki.dwFlags = KEYEVENTF_KEYUP;
+            if (GetForegroundWindow() != window || !modifiersUp()) { folderPhase = 0; return; }
             if (SendInput(2, enter, sizeof(INPUT)) == 2) { folderPhase = 3; folderPhaseAt = now; }
             else folderPhase = 0;
             return;
@@ -1022,7 +1064,7 @@ struct ExtensionInstaller::Impl {
             L"Откройте страницу about:addons и выберите раздел «Расширения».",
             L"Нажмите шестерёнку «Инструменты для всех дополнений» на странице расширений.",
             L"В открытом меню нажмите «Установить дополнение из файла».",
-            L"Мастер откроет папку расширения. Выберите подсвеченный файл XPI, затем нажмите подсвеченную кнопку «Открыть».",
+            L"Выберите подписанный XPI. Можно скопировать путь кнопкой ниже и вставить его в поле имени файла.",
             L"Прочитайте разрешения Firefox и нажмите «Добавить», если согласны.",
             L"Включите StreamShelf Connector на странице дополнений Firefox.",
             L"Окно расширения откроется автоматически. Нажмите «Подключить расширение», затем прочитайте запрос Firefox и подтвердите доступ к сайтам, если согласны.",
@@ -1044,7 +1086,7 @@ struct ExtensionInstaller::Impl {
             L"Open about:addons and select Extensions.",
             L"Click the Tools for all add-ons gear on the extensions page.",
             L"Choose Install Add-on From File in the menu.",
-            L"The guide will open the extension folder. Select the highlighted XPI file, then click the highlighted Open button.",
+            L"Select the signed XPI. You can copy its path below and paste it into the file name field.",
             L"Review Firefox permissions and click Add if you agree.",
             L"Enable StreamShelf Connector on the Firefox add-ons page.",
             L"The extension will open automatically. Click Connect extension, then review and allow website access if you agree.",
@@ -1064,7 +1106,12 @@ struct ExtensionInstaller::Impl {
         canvas.text(english ? "STREAMSHELF  /  EXTENSION SETUP" : "STREAMSHELF  /  УСТАНОВКА РАСШИРЕНИЯ", 24, 32, 11, accent, width - 48);
         canvas.text(utf8(browserName), 24, 57, 12, muted, width - 48);
         canvas.text(utf8(firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall) ? (english ? L"Extension added" : L"Расширение добавлено") : firefox ? (english ? firefoxTitlesEn[s] : firefoxTitles[s]) : (english ? titlesEn[s] : titles[s])), 24, 94 + (1 - t) * 4, 21, ink.alpha(t), width - 48);
-        wrapped(utf8(firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall) ? (english ? L"Click OK in the Firefox notification. Then enable the extension on its card if needed." : L"Нажмите «OK» в уведомлении Firefox. Затем при необходимости включите расширение переключателем в его карточке.") : firefox ? (english ? firefoxBodiesEn[s] : firefoxBodies[s]) : (english ? bodiesEn[s] : bodies[s])), 24, 128 + (1 - t) * 4, width - 48, 13, 4, ink.alpha(t));
+        const wchar_t *body = explicitProfile && s == int(GuideStage::Connect)
+            ? (english ? L"Connect the extension in the selected browser profile. Check the connection in StreamShelf, then click Close." : L"Подключите расширение в выбранном профиле. Проверьте связь в StreamShelf и нажмите «Закрыть».")
+            : firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall)
+                ? (english ? L"Click OK in the Firefox notification. Then enable the extension on its card if needed." : L"Нажмите «OK» в уведомлении Firefox. Затем при необходимости включите расширение переключателем в его карточке.")
+                : firefox ? (english ? firefoxBodiesEn[s] : firefoxBodies[s]) : (english ? bodiesEn[s] : bodies[s]);
+        wrapped(utf8(body), 24, 128 + (1 - t) * 4, width - 48, 13, 4, ink.alpha(t));
         canvas.border({20, 218, width - 40, 45}, 12, edge, bg.alpha(.7f));
         canvas.text(firefox ? (english ? "Signed extension file" : "Подписанный файл расширения") : (english ? "Extension folder" : "Папка расширения"), 32, 235, 10, muted, width - 64);
         canvas.text(utf8(extension.wstring()), 32, 253, 11, ink, width - 64);
@@ -1204,7 +1251,11 @@ struct ExtensionInstaller::Impl {
         if (current) {
             observation.manager = scene.facts.page;
             observation.menu = scene.firefoxMenu.found;
-            observation.picker = scene.facts.folderDialog;
+            const auto now = GetTickCount64();
+            if (browser) firefoxPickerGuard.observeMenu(observation.manager, observation.menu, now);
+            const bool sameOwner = scene.window && browserWindow &&
+                GetAncestor(scene.window, GA_ROOTOWNER) == GetAncestor(browserWindow, GA_ROOTOWNER);
+            observation.picker = browser && firefoxPickerGuard.observePicker(scene.facts.folderDialog, sameOwner, now);
             observation.installPrompt = scene.firefoxAdd.found;
             observation.addedNotice = scene.firefoxAddedNotice;
             observation.installedKnown = scene.facts.installedCard || scene.profileAbsenceKnown;
@@ -1225,8 +1276,8 @@ struct ExtensionInstaller::Impl {
         if (observation.picker && browser) {
             navigationPending = false;
             if (picker != scene.window) { picker = scene.window; pickerAttempts = 0; pickerAttemptAt = 0; folderPhase = 0; }
-            if (firefoxPickerAction(scene.facts.folderReady, scene.firefoxFile.found, scene.firefoxFileSelected,
-                                    scene.firefoxFileReady) == FirefoxPickerAction::Navigate) navigateFolder(scene.window);
+            // Do not send navigation input to a generic Open dialog. Even an
+            // owned picker is not proof that the user requested an XPI file.
         } else if (current && !observation.picker) { picker = nullptr; pickerAttempts = 0; folderPhase = 0; }
         auto stage = firefoxGuideStage(observation);
         auto previous = flow.stage;
@@ -1265,7 +1316,7 @@ struct ExtensionInstaller::Impl {
             else if (scene.popupConnect.found) control = scene.popupConnect;
             else if (current && browser && scene.toolbarAction.found) control = scene.toolbarAction;
         }
-        if (stage == FirefoxGuideStage::SelectFile) setNotice(scene.firefoxFile.found && !scene.firefoxFileSelected ? L"Выберите файл StreamShelf Connector в списке." : (scene.firefoxFileReady || scene.firefoxFileSelected) ? L"Файл указан. Нажмите кнопку «Открыть»." : pickerAttempts >= 2 ? L"Откройте папку с XPI вручную или вставьте путь в поле имени файла." : L"Открываю папку с подписанным файлом расширения…");
+        if (stage == FirefoxGuideStage::SelectFile) setNotice(scene.firefoxFile.found && !scene.firefoxFileSelected ? L"Выберите файл StreamShelf Connector в списке." : (scene.firefoxFileReady || scene.firefoxFileSelected) ? L"Файл указан. Нажмите кнопку «Открыть»." : L"Выберите подписанный XPI вручную; путь можно скопировать кнопкой мастера.");
         if (stage == FirefoxGuideStage::ConfirmInstall && !scene.firefoxAdd.found && !scene.firefoxAddedNotice) setNotice(L"Ожидаю подтверждение Firefox. Если выбор отменён, откройте меню установки снова.");
         if (stage == FirefoxGuideStage::Enable && !control.found) setNotice(L"Включите StreamShelf Connector в списке дополнений Firefox.");
         highlightTarget(scene, control);
@@ -1273,7 +1324,10 @@ struct ExtensionInstaller::Impl {
     void tick() {
         HWND beforeNavigation = GetForegroundWindow();
         wchar_t activeClass[100]{}; if (beforeNavigation) GetClassNameW(beforeNavigation, activeClass, 100);
-        bool firefoxPickerActive = firefox && std::wstring(activeClass) == L"#32770" && belongsToBrowser(beforeNavigation, exe);
+        bool pickerOwnedByTarget = browserWindow && beforeNavigation &&
+            GetAncestor(beforeNavigation, GA_ROOTOWNER) == GetAncestor(browserWindow, GA_ROOTOWNER);
+        bool firefoxPickerActive = firefox && std::wstring(activeClass) == L"#32770" &&
+            belongsToBrowser(beforeNavigation, exe) && (!explicitProfile || pickerOwnedByTarget);
         if (!firefoxPickerActive) navigateBrowser();
         HWND foreground = GetForegroundWindow();
         bool own = foreground == panel || (foreground && IsChild(panel, foreground));
@@ -1283,7 +1337,8 @@ struct ExtensionInstaller::Impl {
 #ifdef STREAMSHELF_INSTALLER_TESTING
         browserClass = browserClass || std::wstring(foregroundClass) == L"StreamShelfGuideFixture";
 #endif
-        bool browser = !own && browserClass && foreground && !IsIconic(foreground) && belongsToBrowser(foreground, exe);
+        bool browser = !own && browserClass && foreground && !IsIconic(foreground) && belongsToBrowser(foreground, exe) &&
+            (!explicitProfile || (profileWindowBound && (foreground == browserWindow || ownedBrowserPopup)));
         if (browser && foreground == browserWindow) {
             RECT current{}; auto now = GetTickCount64();
             if (GetWindowRect(foreground, &current)) {
@@ -1671,13 +1726,14 @@ Json ExtensionInstaller::diagnostics() const {
         {"navigation_phase", impl->navigationPhase}, {"navigation_pending", impl->navigationPending}, {"address_result", impl->addressResult.load()},
         {"stage", int(impl->flow.stage)}, {"notice", utf8(impl->notice)}};
 }
+bool ExtensionInstaller::hasExplicitProfile() const { return impl && impl->explicitProfile; }
 void ExtensionInstaller::start(HWND owner, const Browser &browser, const Profile *profile, const fs::path &extension, bool reduced, bool light) {
     if (active()) { showIfChanged(impl->panel, true); SetForegroundWindow(impl->panel); return; }
     auto kind = guidedBrowser(browser);
     auto arguments = extensionLaunchArguments(kind, profile);
     if (kind == GuidedBrowser::Firefox ? !fs::is_regular_file(extension) : !fs::is_regular_file(extension / L"manifest.json")) throw std::runtime_error("Сначала подготовьте расширение");
     auto next = std::make_unique<Impl>(); next->reducedMotion = reduced; next->lightTheme = light; next->english = english;
-    if (profile) next->profileDirectory = wide(profile->path);
+    if (profile) { next->profileDirectory = wide(profile->path); next->explicitProfile = !profile->path.empty(); }
     else if (kind != GuidedBrowser::Firefox) {
         PWSTR local = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local)) && local) {

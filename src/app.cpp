@@ -4,14 +4,21 @@
 #include "media_merge.hpp"
 #include "browser_identity.hpp"
 #include "download_validation.hpp"
+#include "http_resume.hpp"
+#include "media_display.hpp"
 #include <fstream>
 #include <shlobj.h>
+#include <sddl.h>
 #include <iomanip>
 namespace ss {
+// The same bound applies to encrypted history on both read and write.  Other
+// DPAPI files retain the smaller default read limit.
+static constexpr size_t QueueHistoryLimit = size_t(512) * 1024 * 1024;
 static Json mediaJson(const Media &m) {
     return {{"id", m.id},
             {"key", m.key},
             {"title", m.title},
+            {"sourceTitle", m.sourceTitle},
             {"thumbnail", m.thumbnail},
             {"category", m.category},
             {"ext", m.ext},
@@ -34,6 +41,7 @@ static Media mediaFrom(const Json &j) {
     m.id = str(j, "id");
     m.key = str(j, "key");
     m.title = str(j, "title");
+    m.sourceTitle = str(j, "sourceTitle");
     m.thumbnail = str(j,"thumbnail");
     m.category = str(j, "category");
     m.ext = str(j, "ext");
@@ -81,6 +89,9 @@ App::App() {
             keepResults = j.value("keepResults", false);
             splashEnabled = j.value("splashEnabled", true);
             splashSeconds = std::clamp(j.value("splashSeconds", 3), 1, 10);
+            parallel = std::clamp(j.value("parallel", 2), 1, 4);
+            auto savedFragments = j.value("fragments", 4);
+            fragments = savedFragments == 1 || savedFragments == 2 || savedFragments == 4 || savedFragments == 8 ? savedFragments : 4;
         }
     } catch (...) {
     }
@@ -89,8 +100,10 @@ App::App() {
     extensionInstaller.setLanguage(interfaceLanguage);
     try {
         if (fs::exists(root / L"queue.dpapi")) {
-            auto j = Json::parse(unprotectFile(root / L"queue.dpapi"));
+            auto j = Json::parse(unprotectFile(root / L"queue.dpapi", QueueHistoryLimit));
+            if (!j.is_array()) throw std::runtime_error("Invalid queue history");
             for (auto &v : j) {
+                try {
                 auto job = std::make_shared<Job>();
                 job->id = str(v, "id");
                 job->title = str(v, "title");
@@ -101,6 +114,9 @@ App::App() {
                 job->output = str(v, "output");
                 job->outputDirectory = str(v, "outputDirectory");
                 job->item = mediaFrom(v.at("item"));
+                // Old histories did not record their browser identity. They must
+                // not silently adopt whichever account happens to be selected now.
+                job->browserSourceRequired = v.value("browserSourceRequired", !v.value("localFile", false) && !v.value("assembly", false) && httpUrl(job->page));
                 job->assemblyInput = v.value("assemblyInput",false);
                 job->localFile=v.value("localFile",false);job->conversionSource=v.value("conversionSource",false);
                 job->assembly = v.value("assembly",false);
@@ -121,6 +137,11 @@ App::App() {
                 job->claimed = true;
                 job->done = true;
                 jobs.push_back(job);
+                } catch (const std::exception &) {
+                    // Restore subsequent valid entries, while retaining the
+                    // original encrypted file for recovery of the bad one.
+                    historyRecoveryRequired = true;
+                }
             }
             // Older histories predate the assembly-input flag; recover it from the saved parent links.
             for (const auto &parent : jobs) if (parent->assembly)
@@ -128,7 +149,15 @@ App::App() {
                     for (const auto &child : jobs) if (child->id == source.dependency) {child->assemblyInput = true;if(source.codec>0)child->conversionSource=true;}
         }
     } catch (...) {
+        historyRecoveryRequired = true;
+    }
+    if (historyRecoveryRequired) {
         logs.push_back({"Историю очереди не удалось восстановить", true});
+        // Surface partial recovery immediately, rather than hiding it in the
+        // journal until the user discovers missing tasks.
+        modalTitle = "Не удалось выполнить действие";
+        modalBody = "Историю очереди не удалось восстановить";
+        modalConfirm = nullptr;
     }
 }
 App::~App() {
@@ -163,7 +192,8 @@ void App::saveSettings() {
     protectFile(dataRoot() / L"settings.dpapi", Json{{"destination", destination},
         {"interfaceLanguage", interfaceLanguage}, {"autoUpdate", autoUpdate}, {"light", light},
         {"reduced", reduced}, {"keepResults", keepResults},
-        {"splashEnabled", splashEnabled}, {"splashSeconds", splashSeconds}}.dump());
+        {"splashEnabled", splashEnabled}, {"splashSeconds", splashSeconds},
+        {"parallel", parallel.load()}, {"fragments", fragments.load()}}.dump());
 }
 void App::setInterfaceLanguage(const std::string &language) {
     if ((language != "ru" && language != "en") || interfaceLanguage == language) return;
@@ -181,19 +211,21 @@ void App::post(std::function<void()> f) {
     std::lock_guard l(eventsMutex);
     events.push_back(std::move(f));
 }
-void App::drain() {
+bool App::drain() {
     std::deque<std::function<void()>> v;
     {
         std::lock_guard l(eventsMutex);
         v.swap(events);
     }
+    bool changed = !v.empty();
     for (auto &f : v)
         f();
-    updateAssemblies();
+    changed = updateAssemblies() || changed;
     for (auto it=workers.begin(); it!=workers.end();) {
         if (it->finished->load()) { if (it->thread.joinable()) it->thread.join(); it=workers.erase(it); }
         else ++it;
     }
+    return changed;
 }
 void App::work(std::function<void()> f) {
     auto finished = std::make_shared<std::atomic_bool>(false);
@@ -259,7 +291,7 @@ void App::start() {
             if (!s) return;
             if (type == "pong") {
                 std::string actual; { std::lock_guard lock(s->mutex); actual = s->browserExecutable; }
-                bool matching = sameBrowserExecutable(actual, installerBrowserExecutable);
+                bool matching = sameBrowserExecutable(actual, installerBrowserExecutable) && !extensionInstaller.hasExplicitProfile();
                 bool wasInstalling = extensionInstaller.active() && matching;
                 bool currentSetup = j.value("setupRevision", std::string()) == "2026-10-31-1";
                 s->setupReady = connectorSetupReady(currentSetup, j.value("hasSiteAccess", false));
@@ -297,7 +329,7 @@ void App::start() {
                     bool running = false;
                     for (auto &other : sessions) {
                         std::string actual; { std::lock_guard lock(other->mutex); actual = other->browserExecutable; }
-                        if (other->alive && other->verified && sameBrowserExecutable(actual, installerBrowserExecutable)) { running = true; break; }
+                        if (other->alive && other->verified && !extensionInstaller.hasExplicitProfile() && sameBrowserExecutable(actual, installerBrowserExecutable)) { running = true; break; }
                     }
                     extensionInstaller.setExtensionRunning(running);
                 }
@@ -330,6 +362,8 @@ void App::start() {
                 if (expectedStop) silentScanStop = 0;
                 else notify(str(j, "message", scanning ? "Поиск включён. Воспроизведите медиа." : "Поиск остановлен"));
             } else if (type == "resource" && scanning && j.contains("item")) {
+                const auto eventSource = s->source();
+                if (j.contains("sourceId") && (!eventSource.extensionSource || !j["sourceId"].is_number_unsigned() || j["sourceId"].get<uint64_t>() != *eventSource.extensionSource)) return;
                 auto &i = j["item"];
                 auto u = str(i, "url");
                 if (!httpUrl(u) || media.size() > 5000)
@@ -343,7 +377,8 @@ void App::start() {
                 discovery.title = str(i, "title");
                 auto existing = std::find_if(media.begin(), media.end(), [&](const auto &m) {
                     auto source = mediaSessions.find(m.key);
-                    return source != mediaSessions.end() && source->second == s && sameDiscoveredResource(m, discovery);
+                    auto identity = mediaSources.find(m.key);
+                    return source != mediaSessions.end() && source->second == s && identity != mediaSources.end() && identity->second == eventSource && sameDiscoveredResource(m, discovery);
                 });
                 if (existing != media.end()) {
                     mergeNetworkMetadata(*existing, discovery);
@@ -360,6 +395,7 @@ void App::start() {
                 }
                 m.url = u;
                 m.page = str(j, "pageUrl");
+                { std::lock_guard lock(s->mutex); m.sourceTitle = s->title; }
                 m.credentialUrl = u;
                 m.size = number(i, "size");
                 m.quality = str(i, "source");
@@ -380,6 +416,7 @@ void App::start() {
                     m.ext = "bin";
                 media.push_back(m);
                 mediaSessions[m.key] = s;
+                mediaSources[m.key] = eventSource;
                 if (needsProbe) enqueueProbe(m, s, scanGeneration, int(number(j, "tabId", -1)));
             } else if (type == "notice" || type == "error") {
                 log(str(j, "message"), false);
@@ -464,7 +501,7 @@ void App::start() {
                 });
             } catch (...) { /* Retry on the next refresh. */ }
             std::unique_lock lock(readyMutex);
-            readyCv.wait_for(lock, std::chrono::seconds(1), [this] { return stopping.load(); });
+            readyCv.wait_for(lock, std::chrono::seconds(3), [this] { return stopping.load(); });
         }
     });
 }
@@ -490,8 +527,13 @@ void App::seedAndUpdate(bool update) {
             if (downloadUrl.rfind("https://github.com/yt-dlp/yt-dlp/releases/", 0) != 0 ||
                 checksums.rfind("https://github.com/yt-dlp/yt-dlp/releases/", 0) != 0)
                 throw std::runtime_error("Неверный источник обновления");
-            if (!fs::exists(root / L"version.txt") || readFile(root / L"version.txt") != tag ||
-                !fs::exists(root / L"yt-dlp.exe")) {
+            const auto installed = componentInstalledVersion(root / L"yt-dlp.exe", stopping);
+            if (installed.empty() || componentVersion(installed).empty() || componentVersion(tag).empty()) {
+                log("Не удалось сравнить версии yt-dlp; автоматическое обновление пропущено");
+                post([this] { status = "yt-dlp · локальная версия готова"; });
+                return;
+            }
+            if (componentNewer(tag, installed)) {
                 auto sums = httpGet(checksums, 1024 * 1024);
                 std::istringstream in(sums);
                 std::string hash, name, expected;
@@ -508,7 +550,7 @@ void App::seedAndUpdate(bool update) {
                 }
                 std::atomic_bool cancel{false};
                 auto test = runProcess(temp, {L"--version"}, nullptr, cancel, true);
-                if (test.code != 0)
+                if (test.code != 0 || componentVersion(test.output) != componentVersion(tag))
                     throw std::runtime_error("Новая версия yt-dlp не запускается");
                 auto current = root / L"yt-dlp.exe", backup = root / L"yt-dlp.previous.exe";
                 if (fs::exists(current))
@@ -519,7 +561,7 @@ void App::seedAndUpdate(bool update) {
                 writeFile(root / L"version.txt", tag);
                 log("Обновлён yt-dlp " + tag);
             }
-            post([this, tag] { status = "yt-dlp " + tag + " · движок готов"; });
+            post([this, installed, tag] { status = "yt-dlp " + (componentNewer(tag, installed) ? tag : installed) + " · движок готов"; });
         } catch (const std::exception &e) {
             if (!fs::exists(root / L"yt-dlp.exe"))
                 throw;
@@ -576,6 +618,7 @@ void App::scanToolComponents(bool install) {
             componentsBusy = false;
             componentProgressVisible = false;
             if (!result.empty()) { components = result; componentsScanned = true; }
+            if (install) detectVideoEncoders();
             if (componentsDirty) { componentsDirty = false; if (componentsScanned) refreshToolFiles(); }
             if (!problem.empty()) { log("Компоненты: " + problem); error("Не удалось установить все выбранные компоненты: " + problem); }
             else { log(install ? "Установка и проверка компонентов завершены" : "Проверка компонентов завершена"); notify(install ? "Установка завершена. Версии компонентов проверены." : "Проверка компонентов завершена"); }
@@ -583,6 +626,7 @@ void App::scanToolComponents(bool install) {
     });
 }
 void App::refreshToolFiles() {
+    detectVideoEncoders();
     const auto revision = ++componentsRevision;
     const auto snapshot = components;
     work([this, revision, snapshot] {
@@ -614,17 +658,87 @@ std::shared_ptr<Session> App::session() {
     return sessionIndex >= 0 && sessionIndex < int(sessions.size()) ? sessions[sessionIndex] : nullptr;
 }
 std::pair<std::string, Json> App::credentials(std::shared_ptr<Session> s, const std::string &u,
-                                              std::atomic_bool &cancel) {
+                                              std::atomic_bool &cancel, const BrowserSource *source) {
     if (s) {
-        auto j = s->credentials(u, cancel);
-        return {cookies(j.value("cookies", Json::array())), j.value("headers", Json::object())};
+        try {
+            auto j = source ? s->credentials(u, *source, cancel) : s->credentials(u, cancel);
+            return {cookies(j.value("cookies", Json::array())), j.value("headers", Json::object())};
+        } catch (const BrowserSourceChanged &) {
+            throw;
+        } catch (...) {
+            if (cancel) throw;
+            // A rejected or unrepresentable browser cookie snapshot must not
+            // make the caller silently retry the request without credentials.
+            throw BrowserSourceChanged();
+        }
     }
     auto p = dataRoot() / L"cookies.dpapi";
     return {fs::exists(p) ? validateCookies(unprotectFile(p)) : "", Json::object()};
 }
+void App::bindJobSource(Job &job, const Media &item) {
+    auto it = mediaSessions.find(item.key);
+    if (it == mediaSessions.end()) {
+        if (item.id.rfind("network:", 0) == 0) throw BrowserSourceChanged();
+        return; // Explicitly analysed without a browser session.
+    }
+    job.session = it->second;
+    job.browserSourceRequired = bool(job.session);
+    if (job.session) {
+        auto source = mediaSources.find(item.key);
+        if (source == mediaSources.end() || !job.session->sourceMatches(source->second)) throw BrowserSourceChanged();
+        job.browserSource = source->second;
+    }
+}
+
+// Temporary plaintext credentials are needed by external tools, but must not
+// appear on their command lines or inherit a permissive directory ACL.
+static void writePrivateCredentialFile(const fs::path &path, const std::string &contents) {
+    HANDLE rawToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &rawToken)) throw std::runtime_error("Не удалось защитить временный файл cookies");
+    Handle token(rawToken);
+    DWORD needed = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    std::vector<BYTE> info(needed);
+    if (!needed || !GetTokenInformation(token, TokenUser, info.data(), needed, &needed)) throw std::runtime_error("Не удалось определить владельца cookies");
+    PWSTR sid = nullptr;
+    if (!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER *>(info.data())->User.Sid, &sid)) throw std::runtime_error("Не удалось определить владельца cookies");
+    std::wstring sddl = L"D:P(A;;FA;;;" + std::wstring(sid) + L")(A;;FA;;;SY)";
+    LocalFree(sid);
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) throw std::runtime_error("Не удалось защитить временный файл cookies");
+    SECURITY_ATTRIBUTES attributes{sizeof(attributes), descriptor, FALSE};
+    fs::create_directories(path.parent_path());
+    Handle file(CreateFileW(path.c_str(), GENERIC_WRITE, 0, &attributes, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY, nullptr));
+    LocalFree(descriptor);
+    if (file.h == INVALID_HANDLE_VALUE) throw std::runtime_error("Не удалось создать защищённый файл cookies");
+    size_t offset = 0;
+    while (offset < contents.size()) {
+        DWORD written = 0;
+        const auto chunk = DWORD(std::min<size_t>(contents.size() - offset, 1024 * 1024));
+        if (!WriteFile(file, contents.data() + offset, chunk, &written, nullptr) || !written) {
+            CloseHandle(file.release());
+            std::error_code ec; fs::remove(path, ec);
+            throw std::runtime_error("Не удалось записать защищённый файл cookies");
+        }
+        offset += written;
+    }
+}
+struct TempCookie {
+    fs::path path;
+    explicit TempCookie(const std::string &s) {
+        if (!s.empty()) {
+            static std::atomic_uint64_t id{0};
+            path = dataRoot() / L"temp" /
+                (L"cookies-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++id) + L".txt");
+            writePrivateCredentialFile(path, s);
+        }
+    }
+    ~TempCookie() { if (!path.empty()) { std::error_code ec; fs::remove(path, ec); } }
+};
 void App::enqueueProbe(const Media &item, const std::shared_ptr<Session> &source, uint64_t generation, int tab) {
     const auto kind = str(item.data, "kind");
-    ProbeTask task{item, source, probeCancel, generation, tab, kind == "HLS" || kind == "DASH" ? 3 : kind == "Видео" ? 2 : 1};
+    auto identity = mediaSources.find(item.key);
+    ProbeTask task{item, source, identity == mediaSources.end() ? BrowserSource{} : identity->second, probeCancel, generation, tab, kind == "HLS" || kind == "DASH" ? 3 : kind == "Видео" ? 2 : 1};
     {
         std::lock_guard lock(probeMutex);
         probes.erase(std::remove_if(probes.begin(), probes.end(), [](const ProbeTask &p) { return p.cancelled->load(); }), probes.end());
@@ -662,7 +776,8 @@ void App::probeLoop() {
         try {
             std::shared_lock lock(toolsMutex);
             std::pair<std::string, Json> cred;
-            try { cred = credentials(task.session, task.item.format ? task.item.page : task.item.url, cancel); }
+            try { cred = credentials(task.session, task.item.format ? task.item.page : task.item.url, cancel, task.session ? &task.source : nullptr); }
+            catch (const BrowserSourceChanged &) { throw; }
             catch (...) {
                 if (cancel || stopping || *task.cancelled) throw;
                 std::lock_guard guard(task.session->mutex);
@@ -676,15 +791,9 @@ void App::probeLoop() {
                 auto value = str(cred.second, name);
                 if (value.find_first_of("\r\n") == value.npos) { args.push_back(std::string(name) == "User-Agent" ? L"-user_agent" : L"-referer"); args.push_back(wide(value)); }
             }
-            std::istringstream lines(cred.first); std::string line, ffCookies;
-            while (std::getline(lines, line)) {
-                if (line.rfind("#HttpOnly_", 0) == 0) line.erase(0, 10);
-                if (line.empty() || line[0] == '#') continue;
-                std::istringstream fields(line); std::vector<std::string> values; std::string value;
-                while (std::getline(fields, value, '\t')) values.push_back(value);
-                if (values.size() == 7) ffCookies += values[5] + "=" + values[6] + "; path=" + values[2] + "; domain=" + values[0] + ";" + (values[3] == "TRUE" ? " secure;" : "") + "\n";
-            }
-            if (!ffCookies.empty()) { args.push_back(L"-cookies"); args.push_back(wide(ffCookies)); }
+            // FFprobe versions in use do not reliably keep host-only and
+            // Secure cookies scoped on redirects. Probe without cookies; the
+            // authenticated download path uses yt-dlp's scoped cookie jar.
             args.insert(args.end(), {L"-show_entries", L"stream=codec_name,codec_type,width,height:stream_disposition=attached_pic:format=duration,format_name", L"-of", L"json", wide(task.item.url)});
             auto process = runProcess(tool(L"ffprobe.exe"), args, nullptr, cancel, true);
             if (!process.code && !cancel) result = Json::parse(process.output, nullptr, false);
@@ -699,7 +808,7 @@ void App::probeLoop() {
             if (it == media.end()) return;
             if (!applyMediaProbe(*it, result)) { it->category = "Требуют проверки"; it->quality = "Не удалось уточнить параметры"; }
             else {
-                auto key = it->thumbnail.empty() ? it->key : it->thumbnail;
+                auto key = previewCacheKey(*it);
                 auto old = previews.find(key);
                 // An earlier request may have started while the item was still unclassified.
                 // Drop that entry even if its worker has not returned yet: it cannot produce
@@ -725,24 +834,6 @@ static std::vector<std::wstring> headersArgs(const Json &h) {
     }
     return args;
 }
-struct TempCookie {
-    fs::path path;
-    TempCookie(const std::string &s) {
-        if (!s.empty()) {
-            static std::atomic_uint64_t id{0};
-            path = dataRoot() / L"temp" /
-                   (L"cookies-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++id) +
-                    L".txt");
-            writeFile(path, s);
-        }
-    }
-    ~TempCookie() {
-        if (!path.empty()) {
-            std::error_code ec;
-            fs::remove(path, ec);
-        }
-    }
-};
 void App::resetCredentialSnapshots() {
     std::set<std::shared_ptr<Session>> sources(sessions.begin(), sessions.end());
     for (const auto &[key, source] : mediaSessions) if(source) sources.insert(source);
@@ -770,11 +861,13 @@ void App::analyze(const std::string &u, bool deep) {
     *analysisCancel = true;
     auto cancel = analysisCancel = std::make_shared<std::atomic_bool>(false);
     auto generation = ++analysisGeneration;
-    resetCredentialSnapshots();
-    if (!keepResults) { media.clear(); mediaSessions.clear(); previews.clear(); ++previewGeneration; analysis = {}; selectedMedia.clear(); }
+    // Session snapshots stay bound to the current source generation. Clearing
+    // them here would discard the authentication baseline of queued jobs.
+    if (!keepResults) { media.clear(); mediaSessions.clear(); mediaSources.clear(); previews.clear(); ++previewGeneration; analysis = {}; selectedMedia.clear(); }
     busy = true;
-    auto s = session();
-    work([this, u, s, cancel, generation, deep] {
+    auto s = manualAnalysis ? nullptr : session();
+    const auto source = s ? s->source() : BrowserSource{};
+    work([this, u, s, source, cancel, generation, deep] {
         try {
             {
                 std::unique_lock l(readyMutex);
@@ -783,7 +876,7 @@ void App::analyze(const std::string &u, bool deep) {
             if (stopping || *cancel)
                 return;
             std::shared_lock tools(toolsMutex);
-            auto cred = credentials(s, u, *cancel);
+            auto cred = credentials(s, u, *cancel, s ? &source : nullptr);
             TempCookie file(cred.first);
             auto args = headersArgs(cred.second);
             args.insert(args.end(),
@@ -820,21 +913,24 @@ void App::analyze(const std::string &u, bool deep) {
             if (!result.error.empty())
                 log(result.error, false);
             auto a = parseAnalysis(Json::parse(result.output), u);
-            post([this, a = std::move(a), s, cancel, generation]() mutable {
+            post([this, a = std::move(a), s, source, cancel, generation]() mutable {
                 if (*cancel || generation != analysisGeneration) return;
+                if (s && !s->sourceMatches(source)) { busy = false; error("Источник браузера изменился. Повторите анализ страницы."); return; }
                 analysis = std::move(a);
                 analysisSession = s;
                 for (auto item : analysis.items) {
                     // The same resource may be authorized differently in two browser profiles.
-                    item.key += "|session:" + (s ? s->id : std::string("manual"));
+                    item.key += "|session:" + (s ? s->id + ":" + std::to_string(source.generation) : std::string("manual"));
                     auto network = std::find_if(media.begin(), media.end(), [&](const Media &m) {
-                        auto source = mediaSessions.find(m.key);
-                        return source != mediaSessions.end() && source->second == s && m.id.rfind("network:", 0) == 0 && sameDiscoveredResource(m, item);
+                        auto owner = mediaSessions.find(m.key);
+                        auto identity = mediaSources.find(m.key);
+                        return owner != mediaSessions.end() && owner->second == s && (!s || (identity != mediaSources.end() && identity->second == source)) && m.id.rfind("network:", 0) == 0 && sameDiscoveredResource(m, item);
                     });
                     if (network != media.end()) {
                         auto old = *network;
                         bool wasSelected = selectedMedia == old.key;
                         mediaSessions.erase(old.key);
+                        mediaSources.erase(old.key);
                         *network = item;
                         mergeNetworkMetadata(*network, old);
                         network->selected = network->selected || old.selected;
@@ -850,6 +946,7 @@ void App::analyze(const std::string &u, bool deep) {
                         }
                     }
                     mediaSessions[item.key] = s;
+                    if (s) mediaSources[item.key] = source;
                     if (s && (item.category == "Требуют проверки" || item.category == "Видео · звук не проверен") && httpUrl(item.url)) {
                         int selectedTab = -1; std::string selectedUrl;
                         { std::lock_guard lock(s->mutex); selectedTab = s->tab; selectedUrl = s->url; }
@@ -870,18 +967,46 @@ void App::analyze(const std::string &u, bool deep) {
         }
     });
 }
+std::string App::previewCacheKey(const Media &item) {
+    const auto foundSession = mediaSessions.find(item.key);
+    const auto selectedSession = foundSession != mediaSessions.end() ? foundSession->second : (item.format ? analysisSession : session());
+    const auto foundSource = mediaSources.find(item.key);
+    const auto source = foundSource != mediaSources.end() ? foundSource->second : BrowserSource{};
+    // Equal image URLs may share work only within the same browser connection
+    // and document. A source without a thumbnail can produce an item-specific frame.
+    return Json::array({item.thumbnail.empty() ? "item" : "thumbnail",
+                        item.thumbnail.empty() ? item.key : item.thumbnail,
+                        selectedSession ? selectedSession->instanceSerial : uint64_t(0),
+                        source.tab, source.generation, source.page, source.store,
+                        source.extensionSource ? Json(*source.extensionSource) : Json()}).dump();
+}
 std::shared_ptr<Preview> App::requestPreview(const Media &item) {
-    auto key=item.thumbnail.empty()?item.key:item.thumbnail;
-    if(auto it=previews.find(key);it!=previews.end())return it->second;
-    if(previewActive>=2)return nullptr;
-    if(previews.size()>=32){
-        auto old=std::find_if(previews.begin(),previews.end(),[](auto &entry){return entry.second->done;});
-        if(old!=previews.end())previews.erase(old);else return nullptr;
+    auto key=previewCacheKey(item);
+    if(auto it=previews.find(key);it!=previews.end()){
+        it->second->lastSeenFrame=previewFrame;
+        return it->second;
     }
-    auto preview=std::make_shared<Preview>();previews[key]=preview;++previewActive;
+    if(previewActive>=2)return nullptr;
+    if(previews.size()>=64){
+        auto old=previews.end();
+        for(auto it=previews.begin();it!=previews.end();++it){
+            const auto &candidate=it->second;
+            if(!candidate->done || candidate->lastSeenFrame>=previewFrame || previewFrame-candidate->lastSeenFrame<=1)continue;
+            if(old==previews.end() || candidate->lastSeenFrame<old->second->lastSeenFrame)old=it;
+        }
+        if(old!=previews.end())previews.erase(old);
+        // A large display can show more than the soft limit at once. Keep
+        // visible entries pinned, while retaining a finite hard ceiling.
+        else if(previews.size()>=1024)return nullptr;
+    }
+    auto preview=std::make_shared<Preview>();
+    preview->id=++previewSerial;preview->lastSeenFrame=previewFrame;
+    previews[key]=preview;++previewActive;
     auto foundSession = mediaSessions.find(item.key);
     auto selectedSession = foundSession != mediaSessions.end() ? foundSession->second : (item.format ? analysisSession : session());
-    work([this,item,selectedSession,preview]{
+    auto foundSource = mediaSources.find(item.key);
+    const auto selectedSource = foundSource != mediaSources.end() ? foundSource->second : BrowserSource{};
+    work([this,item,selectedSession,selectedSource,preview]{
         PreviewImage image;
         std::string message="Превью недоступно";
         try {
@@ -925,11 +1050,12 @@ std::shared_ptr<Preview> App::requestPreview(const Media &item) {
                 image=decodePreview(readFile(wide(thumbnail),8*1024*1024));
             } else if(httpUrl(thumbnail)) {
                 Json headers=Json::object();std::string cookieText;
-                if(selectedSession){try{auto cred=credentials(selectedSession,thumbnail,stopping);cookieText=cred.first;headers=cred.second;}catch(...){}}
+                if(selectedSession){try{auto cred=credentials(selectedSession,thumbnail,stopping,&selectedSource);cookieText=cred.first;headers=cred.second;}catch(const BrowserSourceChanged &){throw;}catch(...){}}
                 image=decodePreview(httpPreview(thumbnail,stopping,headers,cookieText));
             } else if(!item.drm && (item.category.find("Видео")!=std::string::npos||item.category=="HLS"||item.category=="DASH") && httpUrl(item.url)) {
                 std::pair<std::string, Json> cred;
-                try { cred=credentials(selectedSession,item.format?item.page:item.url,stopping); }
+                try { cred=credentials(selectedSession,item.format?item.page:item.url,stopping,selectedSession?&selectedSource:nullptr); }
+                catch (const BrowserSourceChanged &) { throw; }
                 catch (...) { if(stopping) throw; cred={"",Json::object()}; }
                 if(cred.second.contains("Authorization"))throw std::runtime_error("Превью требует отдельной авторизации");
                 static std::atomic_uint64_t serial{0};
@@ -948,7 +1074,13 @@ std::shared_ptr<Preview> App::requestPreview(const Media &item) {
                     while(std::getline(fields,value,'\t'))values.push_back(value);
                     if(values.size()==7)ffCookies+=values[5]+"="+values[6]+"; path="+values[2]+"; domain="+values[0]+";"+(values[3]=="TRUE"?" secure;":"")+"\n";
                 }
-                if(!ffCookies.empty()){args.push_back(L"-cookies");args.push_back(wide(ffCookies));}
+                if(!ffCookies.empty()) {
+                    // FFmpeg does not support reading this AVOption from a file.
+                    // Do not expose the cookie jar to other local processes via
+                    // its command line. Image thumbnails still use WinHTTP.
+                    message="Превью защищённого видео недоступно";
+                    throw std::runtime_error(message);
+                }
                 args.insert(args.end(),{L"-i",wide(item.url),L"-frames:v",L"1",L"-an",L"-vf",L"scale=480:270:force_original_aspect_ratio=decrease",L"-y",path.wstring()});
                 std::atomic_bool cancel{false},finished{false};
                 std::thread watchdog([&]{for(int i=0;i<100&&!finished&&!stopping;i++)Sleep(100);if(!finished)cancel=true;});
@@ -977,10 +1109,36 @@ void App::saveHistory() {
                      {"output", j->output},
                      {"outputDirectory", j->outputDirectory},
                      {"assembly", j->assembly}, {"singleExport",j->singleExport}, {"exportFormat",j->exportFormat}, {"exportQuality",j->exportQuality}, {"assemblyInput",j->assemblyInput}, {"localFile",j->localFile}, {"conversionSource",j->conversionSource}, {"sources", sources}, {"assemblyMetadataTitle",j->assemblyMetadataTitle}, {"assemblyArtist",j->assemblyArtist}, {"assemblyDescription",j->assemblyDescription}, {"globalTags",j->globalTags}, {"originalGlobalTags",j->originalGlobalTags},
-                     {"item", mediaJson(j->item)}, {"mux", j->mux}, {"muxInputs", j->muxInputs}, {"muxChapters", j->muxChapters},
+                     {"item", mediaJson(j->item)}, {"browserSourceRequired", j->browserSourceRequired}, {"mux", j->mux}, {"muxInputs", j->muxInputs}, {"muxChapters", j->muxChapters},
                      {"muxOptions", {{"container", j->muxOptions.container}, {"video", j->muxOptions.video}, {"audio", j->muxOptions.audio}, {"subtitles", j->muxOptions.subtitles}}}});
     }
-    protectFile(dataRoot() / L"queue.dpapi", v.dump());
+    const auto serialized = v.dump();
+    if (serialized.size() > QueueHistoryLimit) throw std::runtime_error("Файл слишком большой");
+    const auto root = dataRoot();
+    const auto history = root / L"queue.dpapi";
+    if (historyRecoveryRequired) {
+        // Do not overwrite unreadable or partly incompatible history without
+        // first retaining a byte-for-byte copy.  On failure, keep the original
+        // untouched and let the caller report the save error.
+        if (fs::exists(history)) {
+            bool preserved = false;
+            for (unsigned attempt = 0; attempt < 100; ++attempt) {
+                const auto name = L"queue-unreadable-" + std::to_wstring(GetTickCount64()) +
+                    L"-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(attempt) + L".dpapi";
+                const auto backup = root / name;
+                std::error_code ec;
+                if (fs::copy_file(history, backup, fs::copy_options::none, ec)) {
+                    logs.push_back({"Исходная история очереди сохранена в резервной копии: " + utf8(backup.wstring()), true});
+                    preserved = true;
+                    break;
+                }
+                if (ec != std::errc::file_exists) break;
+            }
+            if (!preserved) throw std::runtime_error("Не удалось сохранить резервную копию истории очереди");
+        }
+        historyRecoveryRequired = false;
+    }
+    protectFile(history, serialized, QueueHistoryLimit);
 }
 void App::enqueue() {
     std::vector<Media> chosen;
@@ -1006,23 +1164,23 @@ void App::enqueue() {
             error("Защищённые потоки недоступны для скачивания");
             return;
         }
+    std::vector<std::shared_ptr<Job>> pending;
     for (auto &m : chosen) {
         auto j = std::make_shared<Job>();
         j->id = std::to_string(GetTickCount64()) + "-" + std::to_string(++jobSerial);
-        j->title = (m.format ? analysis.title : title) + " · " + m.title;
+        j->title = mediaJobTitle(m);
         j->item = m;
         j->page = m.page;
-        auto source = mediaSessions.find(m.key);
-        j->session = source != mediaSessions.end() ? source->second : (m.id.rfind("network:", 0) == 0 ? session() : analysisSession);
+        bindJobSource(*j, m);
         j->folder = utf8((dest / wide(j->id)).wstring());
         j->outputDirectory = utf8(dest.wstring());
         if (m.category == "Данные") {
             j->local = dataSourceContent(m);
         }
-        std::lock_guard l(jobsMutex);
-        jobs.push_back(j);
-        selectedJob = j->id;
+        pending.push_back(std::move(j));
     }
+    { std::lock_guard l(jobsMutex); jobs.insert(jobs.end(), pending.begin(), pending.end()); }
+    selectedJob = pending.back()->id;
     saveHistory();
     jobsCv.notify_all();
     requestedPage = 2;
@@ -1037,6 +1195,9 @@ static bool isSubtitleJob(const Job &job) {
 }
 struct SubtitleRateLimited : std::runtime_error {
     SubtitleRateLimited() : std::runtime_error("HTTP 429") {}
+};
+struct InvalidDownloadedMedia : std::runtime_error {
+    using std::runtime_error::runtime_error;
 };
 void App::downloadLoop() {
     while (!stopping) {
@@ -1074,7 +1235,9 @@ void App::downloadLoop() {
             if(next->cancel || stopping)throw std::runtime_error("Отменено");
             if (!next->outputDirectory.empty() && !next->workerOutput.empty()) {
                 fs::path source = wide(next->workerOutput), dest = wide(next->outputDirectory);
-                std::wstring base = wide(next->item.title.empty() ? "media" : next->item.title);
+                const auto &name = (!next->assembly && !next->assemblyInput && !next->title.empty())
+                    ? next->title : next->item.title;
+                std::wstring base = wide(name.empty() ? "media" : name);
                 for (auto &ch : base) if (ch < 32 || std::wstring(L"<>:\"/\\|?*").find(ch) != std::wstring::npos) ch = L'_';
                 while (!base.empty() && (base.back() == L'.' || base.back() == L' ')) base.pop_back();
                 if (base.empty()) base = L"media";
@@ -1171,7 +1334,7 @@ void App::download(const std::shared_ptr<Job> &j) {
         std::atomic_bool probeCancel{false}, finished{false}, timedOut{false};
         std::thread watchdog([&] { for (int i = 0; i < 100 && !finished && !j->cancel; ++i) Sleep(100); if (!finished) { timedOut = !j->cancel; probeCancel = true; } });
         ProcessResult probe{};
-        try { probe = runProcess(tool(L"ffprobe.exe"), {L"-v", L"error", L"-show_entries", L"stream=codec_type", L"-of", L"json", path.wstring()}, nullptr, probeCancel, true); }
+        try { probe = runProcess(tool(L"ffprobe.exe"), {L"-v", L"error", L"-show_entries", L"stream=codec_type:stream_disposition=attached_pic", L"-of", L"json", path.wstring()}, nullptr, probeCancel, true); }
         catch (...) { finished = true; watchdog.join(); throw; }
         finished = true; watchdog.join();
         if (j->cancel) throw std::runtime_error("Отменено");
@@ -1179,15 +1342,22 @@ void App::download(const std::shared_ptr<Job> &j) {
         if (timedOut) throw std::runtime_error("Не удалось проверить файл вовремя. Скачанный файл сохранён в папке задачи.");
         if (probe.code != 0 || !info.is_object() || !info.contains("streams") || !info["streams"].is_array()) {
             auto details=redact(probe.error); if(details.size()>350)details=details.substr(0,350);
-            throw std::runtime_error("Не удалось прочитать сведения о скачанном файле. Код FFprobe: " + std::to_string(probe.code) + ". Файл сохранён в папке задачи." + (details.empty()?std::string():" "+details));
+            throw InvalidDownloadedMedia("Не удалось прочитать сведения о скачанном файле. Код FFprobe: " + std::to_string(probe.code) + ". Файл сохранён в папке задачи." + (details.empty()?std::string():" "+details));
         }
         if (!probeMatches(probe.code, info, expected)) {
             bool video=false, audio=false;
-            for(const auto &stream:info["streams"]) { video |= str(stream,"codec_type")=="video"; audio |= str(stream,"codec_type")=="audio"; }
+            for(const auto &stream:info["streams"]) { video |= isPlayableVideoStream(stream); audio |= str(stream,"codec_type")=="audio"; }
             std::string wanted=expected==ExpectedStreams::Audio?"аудио":expected==ExpectedStreams::Video?"видео":expected==ExpectedStreams::VideoAndAudio?"видео и аудио":"аудио или видео";
             std::string found=video?(audio?"видео и аудио":"только видео"):(audio?"только аудио":"нет видео и аудио");
-            throw std::runtime_error("Ожидалось: "+wanted+"; обнаружено: "+found+". Скачанный файл сохранён в папке задачи.");
+            throw InvalidDownloadedMedia("Ожидалось: "+wanted+"; обнаружено: "+found+". Скачанный файл сохранён в папке задачи.");
         }
+    };
+    auto quarantine = [&](const fs::path &path) {
+        static std::atomic_uint64_t serial{0};
+        auto name = L"invalid-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++serial) + L"-" + path.filename().wstring();
+        auto backup = folder / name;
+        if (!MoveFileW(path.c_str(), backup.c_str())) throw std::runtime_error("Не удалось сохранить повреждённый файл отдельно перед повтором.");
+        j->workerOutput = utf8(backup.wstring());
     };
     // yt-dlp only gives its final filename after a completed download. If a later
     // verification failed, reuse that completed file on retry without downloading it again.
@@ -1200,8 +1370,14 @@ void App::download(const std::shared_ptr<Job> &j) {
         }
         if(candidates.size()==1){
             j->workerOutput=utf8(candidates[0].wstring());
-            validate(candidates[0],ExpectedStreams::AnyMedia);
-            return;
+            try {
+                validate(candidates[0],ExpectedStreams::AnyMedia);
+                return;
+            } catch (const InvalidDownloadedMedia &) {
+                quarantine(candidates[0]);
+                // Continue below and re-download; keep the failed file under
+                // its quarantine name for inspection or recovery.
+            }
         }
     }
     if (j->mux) {
@@ -1296,9 +1472,15 @@ void App::download(const std::shared_ptr<Job> &j) {
             if (j->item.category == "Видео" || j->item.category == "Видео без звука" ||
                 j->item.category == "Видео · звук не проверен" || j->item.category == "Аудио" || j->item.category == "Требуют проверки") {
                 auto expected = j->assemblyInput ? ExpectedStreams::AnyMedia : j->item.category == "Аудио" ? ExpectedStreams::Audio : j->item.category == "Требуют проверки" ? ExpectedStreams::AnyMedia : ExpectedStreams::Video;
-                validate(final, expected);
+                try { validate(final, expected); }
+                catch (const InvalidDownloadedMedia &) { quarantine(final); }
+                if (!fs::exists(final)) {
+                    // An explicitly retried invalid file was preserved in the
+                    // task directory; obtain a fresh copy below.
+                } else return;
+            } else {
+                return;
             }
-            return;
         }
     }
     const bool subtitle=isSubtitleJob(*j);
@@ -1308,16 +1490,21 @@ void App::download(const std::shared_ptr<Job> &j) {
     auto target = j->item.format                  ? j->page
                   : j->item.credentialUrl.empty() ? j->item.url
                                                   : j->item.credentialUrl;
+    if (j->browserSourceRequired && !j->session) throw BrowserSourceChanged();
+    if (j->session && (!j->browserSourceRequired || !j->session->sourceMatches(j->browserSource))) throw BrowserSourceChanged();
     std::pair<std::string, Json> cred{"", Json::object()};
     try {
-        cred = credentials(j->session, target, j->cancel);
+        cred = credentials(j->session, target, j->cancel, j->session ? &j->browserSource : nullptr);
+    } catch (const BrowserSourceChanged &) {
+        throw;
     } catch (const std::exception &) {
         if (j->cancel || stopping) throw;
         log("Снимок доступа не получен, пробуем скачать без cookies.");
     }
     std::pair<std::string,Json> pageCred{"",Json::object()};
     if(extractedSubtitle) {
-        try { pageCred=credentials(j->session,j->page,j->cancel); }
+        try { pageCred=credentials(j->session,j->page,j->cancel,j->session ? &j->browserSource : nullptr); }
+        catch(const BrowserSourceChanged &) { throw; }
         catch(const std::exception &) { if(j->cancel || stopping)throw; }
         // The HTTP client applies the original domain/path scope to each cookie.
         if(cred.first.empty())cred.first=pageCred.first;
@@ -1332,7 +1519,7 @@ void App::download(const std::shared_ptr<Job> &j) {
         path += L".part";
         auto lastTick=GetTickCount64();uint64_t lastCount=0;
         post([j]{j->state="Скачивание";j->percent=-1;j->detail="Соединяемся с сервером…";});
-        auto fetchFile=[&](const std::string &url){httpDownload(
+        auto fetchFile=[&](const std::string &url){httpDownloadResumable(
             url, path, j->cancel, [](double){}, cred.second, cred.first,
             [this,j,&lastTick,&lastCount](uint64_t count,uint64_t total){
                 auto now=GetTickCount64(),elapsed=now-lastTick;
@@ -1396,13 +1583,22 @@ void App::download(const std::shared_ptr<Job> &j) {
         }
         auto final = path;
         final.replace_extension();
-        fs::rename(path, final);
-        j->workerOutput = utf8(final.wstring());
+        j->workerOutput = utf8(path.wstring());
         if (j->item.category == "Видео" || j->item.category == "Видео без звука" ||
             j->item.category == "Видео · звук не проверен" || j->item.category == "Аудио" || j->item.category == "Требуют проверки") {
             auto expected = j->assemblyInput ? ExpectedStreams::AnyMedia : j->item.category == "Аудио" ? ExpectedStreams::Audio : j->item.category == "Требуют проверки" ? ExpectedStreams::AnyMedia : ExpectedStreams::Video;
-            validate(final, expected);
+            try { validate(path, expected); }
+            catch (const InvalidDownloadedMedia &) { quarantine(path); throw; }
+            catch (...) {
+                // A missing FFprobe or timeout says nothing about validity. Keep
+                // the completed file for validation on the next retry.
+                fs::rename(path, final);
+                j->workerOutput = utf8(final.wstring());
+                throw;
+            }
         }
+        fs::rename(path, final);
+        j->workerOutput = utf8(final.wstring());
         return;
     }
     auto args = headersArgs(cred.second);
@@ -1454,8 +1650,14 @@ void App::download(const std::shared_ptr<Job> &j) {
     auto final = fs::weakly_canonical(fs::path(wide(*resultPath)));
     if (final.parent_path() != fs::weakly_canonical(folder) || !fs::is_regular_file(final)) throw std::runtime_error("Итоговый файл не найден в папке загрузки.");
     j->workerOutput = utf8(final.wstring());
-    if (j->item.category == "Видео" || j->item.category == "Видео без звука" || j->item.category == "Видео · звук не проверен" || j->item.category == "Аудио" || j->item.category == "HLS" || j->item.category == "DASH" || j->item.category == "Требуют проверки")
-        validate(final, j->assemblyInput ? ExpectedStreams::AnyMedia : !j->pair.empty() ? ExpectedStreams::VideoAndAudio : j->item.category == "Аудио" ? ExpectedStreams::Audio : j->item.category == "HLS" || j->item.category == "DASH" || j->item.category == "Требуют проверки" ? ExpectedStreams::AnyMedia : ExpectedStreams::Video);
+    if (j->item.category == "Видео" || j->item.category == "Видео без звука" || j->item.category == "Видео · звук не проверен" || j->item.category == "Аудио" || j->item.category == "HLS" || j->item.category == "DASH" || j->item.category == "Требуют проверки") {
+        try {
+            validate(final, j->assemblyInput ? ExpectedStreams::AnyMedia : !j->pair.empty() ? ExpectedStreams::VideoAndAudio : j->item.category == "Аудио" ? ExpectedStreams::Audio : j->item.category == "HLS" || j->item.category == "DASH" || j->item.category == "Требуют проверки" ? ExpectedStreams::AnyMedia : ExpectedStreams::Video);
+        } catch (const InvalidDownloadedMedia &) {
+            quarantine(final);
+            throw;
+        }
+    }
     j->workerOutput = utf8(final.wstring());
 }
 void App::closeRequest() {
@@ -1467,7 +1669,7 @@ void App::closeRequest() {
     }
     if (activeJob) {
         modalTitle = "Остановить загрузки?";
-        modalBody = "Текущие загрузки будут отменены. Частичные файлы останутся для повторного запуска.";
+        modalBody = "Текущие загрузки будут отменены. Частичные файлы останутся на диске. При повторе загрузка продолжится, если сервер поддерживает проверенное возобновление; иначе начнётся заново.";
         modalConfirmLabel = "Остановить и выйти";
         modalConfirm = [this] {
             for (auto &j : jobs)
@@ -1491,7 +1693,12 @@ void App::action(const std::string &cmd) {
         };
         if (cmd == "analyze")
             analyze(url);
+        else if (cmd == "toggleManualAnalysis") {
+            manualAnalysis = !manualAnalysis;
+            notify(manualAnalysis ? "Режим без браузера включён" : "Режим без браузера выключен");
+        }
         else if (cmd == "deepAnalyze") {
+            if (manualAnalysis) throw std::runtime_error("Выключите режим без браузера для глубокого анализа");
             if (!httpUrl(url)) throw std::runtime_error("Выберите страницу для анализа");
             auto selected = session();
             if (!selected) throw std::runtime_error("Для глубокого анализа подключите расширение и откройте страницу с медиа в браузере");
@@ -1503,7 +1710,7 @@ void App::action(const std::string &cmd) {
             { *analysisCancel = true; ++analysisGeneration; busy = false; }
         else if (cmd == "clearMedia") {
             *analysisCancel = true; ++analysisGeneration; busy = false; scanning = false;
-            media.clear(); mediaSessions.clear(); previews.clear(); ++previewGeneration; analysis = {}; selectedMedia.clear(); audioIndex = -1;
+            media.clear(); mediaSessions.clear(); mediaSources.clear(); previews.clear(); ++previewGeneration; analysis = {}; selectedMedia.clear(); audioIndex = -1;
             auto id = nextScanGeneration();
             if (auto s = session()) work([s, id] { try { s->send({{"type", "scanStop"}, {"scanId", id}}); } catch (...) {} });
             notify("Список очищен");
@@ -1518,7 +1725,7 @@ void App::action(const std::string &cmd) {
                     std::lock_guard queueLock(jobsMutex);
                     for (const auto &s : j->sources) for (const auto &child : jobs)
                         if (child->id == s.dependency && child->done && child->state != "Готово") {
-                            if (!child->session) child->session = session();
+                            if (child->browserSourceRequired && !child->session) throw BrowserSourceChanged();
                             child->cancel=false; child->done=false; child->claimed=false; child->state="Ожидание";
                         }
                     for(auto &source:j->sources)source.enabled=true;
@@ -1586,14 +1793,14 @@ void App::action(const std::string &cmd) {
             Browser selected;
             if (browserIndex >= 0 && browserIndex < int(browsers.size())) selected = browsers[browserIndex];
             installerBrowserExecutable = selected.exe;
+            std::optional<Profile> profile;
+            if (profileIndex >= 0 && profileIndex < int(selected.profiles.size())) profile = selected.profiles[profileIndex];
             for (auto &existing : sessions) {
                 std::string actual; { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
-                if (existing->alive && existing->verified && existing->setupReady && existing->languageSupported && sameBrowserExecutable(actual, selected.exe)) {
+                if ((!profile || profile->path.empty()) && existing->alive && existing->verified && existing->setupReady && existing->languageSupported && sameBrowserExecutable(actual, selected.exe)) {
                     notify("Расширение установлено и подключено"); return;
                 }
             }
-            std::optional<Profile> profile;
-            if (profileIndex >= 0 && profileIndex < int(selected.profiles.size())) profile = selected.profiles[profileIndex];
             // Validate before replacing the native host or opening any browser.
             auto kind = guidedBrowser(selected);
             if (kind != GuidedBrowser::None) extensionLaunchArguments(kind, profile ? &*profile : nullptr);
@@ -1613,9 +1820,10 @@ void App::action(const std::string &cmd) {
                     if (guidedBrowser(selected) != GuidedBrowser::None) {
                         auto guideTarget = guidedBrowser(selected) == GuidedBrowser::Firefox
                             ? executable().parent_path() / L"extensions" / L"firefox-signed" / SignedFirefoxConnectorFilename : folder;
-                        if (guidedBrowser(selected) == GuidedBrowser::Firefox && !fs::is_regular_file(guideTarget)) throw std::runtime_error("Подписанный файл расширения Firefox версии 1.0.4 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.4.xpi рядом с программой.");
+                        if (guidedBrowser(selected) == GuidedBrowser::Firefox && !fs::is_regular_file(guideTarget)) throw std::runtime_error("Подписанный файл расширения Firefox версии 1.0.5 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.5.xpi рядом с программой.");
                         extensionInstaller.start(hwnd, selected, profile ? &*profile : nullptr, guideTarget, reduced, light);
                         auto checkConnection = [this, expected = selected.exe] {
+                            if (extensionInstaller.hasExplicitProfile()) return;
                             for (auto &existing : sessions) {
                                 std::string actual; { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
                                 if (existing->alive && sameBrowserExecutable(actual, expected)) {
@@ -1631,6 +1839,7 @@ void App::action(const std::string &cmd) {
                         };
                         extensionInstaller.setRetryConnection(checkConnection);
                         extensionInstaller.setOpenSetup([this, expected = selected.exe] {
+                            if (extensionInstaller.hasExplicitProfile()) return false;
                             for (auto &existing : sessions) {
                                 std::string actual; { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
                                 if (existing->alive && existing->verified && existing->setupApiSupported && !existing->setupReady && sameBrowserExecutable(actual, expected)) {
@@ -1680,7 +1889,6 @@ void App::action(const std::string &cmd) {
             }
             auto id = nextScanGeneration();
             if(cmd!="stopScan") {
-                resetCredentialSnapshots();
                 std::lock_guard lock(s->mutex);
                 s->credentialScanId=id;
             }
@@ -1727,6 +1935,7 @@ void App::action(const std::string &cmd) {
                         analysisSession = nullptr;
                         media.clear();
                         mediaSessions.clear();
+                        mediaSources.clear();
                         previews.clear(); ++previewGeneration;
                         notify("Cookies импортированы и защищены DPAPI");
                     });
@@ -1743,6 +1952,36 @@ void App::action(const std::string &cmd) {
             scanToolComponents(false);
         else if (cmd == "installComponents")
             scanToolComponents(true);
+        else if (cmd == "installBundledComponents") {
+            if (componentsBusy) return;
+            componentsBusy=true;
+            ++componentsRevision;
+            componentProgressVisible=false;
+            componentsActivity="Проверяем компоненты из комплекта…";
+            const auto pending=components;
+            work([this,pending] {
+                std::string problem;
+                size_t installed=0;
+                std::vector<Component> result;
+                try {
+                    std::unique_lock lock(toolsMutex);
+                    const auto root=dataRoot()/L"tools";
+                    installed=ss::installBundledComponents(root,executable().parent_path()/L"bundled-tools",stopping);
+                    result=refreshInstalledComponents(root,pending,stopping);
+                } catch(const std::exception &e) { problem=e.what(); }
+                post([this,result=std::move(result),problem,installed] {
+                    componentsBusy=false;
+                    if(!result.empty()) { components=result; componentsScanned=true; }
+                    detectVideoEncoders();
+                    if(componentsDirty) { componentsDirty=false; if(componentsScanned)refreshToolFiles(); }
+                    if(!problem.empty())error("Не удалось установить компоненты из комплекта: "+interfaceText(interfaceLanguage,problem));
+                    else {
+                        if(!components.empty() && !components[0].installed.empty())status="yt-dlp · локальная версия готова";
+                        notify(installed?"Компоненты из комплекта установлены":"Все компоненты из комплекта уже установлены");
+                    }
+                });
+            });
+        }
         else if (cmd == "dataFolder") {
             auto folder = dataRoot() / L"tools";
             fs::create_directories(folder);
@@ -1868,7 +2107,7 @@ void App::action(const std::string &cmd) {
                                (j->state == "Ошибка" || j->state == "Отменено" ||
                                 j->state == "Ожидание повтора")) {
                         std::lock_guard queueLock(jobsMutex);
-                        if (!j->session) j->session = session();
+                        if (j->browserSourceRequired && !j->session) throw BrowserSourceChanged();
                         j->cancel = false;
                         j->done = false;
                         j->claimed = false;

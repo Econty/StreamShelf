@@ -118,7 +118,17 @@ void UI::constructorPage(Rect r) {
     for(auto &tile:app.draft)if(!tile.uiId)tile.uiId=++nextTileId;
     if(settling && GetTickCount64()-settleStart>=300)settling=false;
     c.text(tr("Конструктор медиа", "Media builder"),r.x,r.y+28,22,text,r.w-430);
-    button("build:back",{r.x+r.w-416,r.y+4,108,36},tr("К обзору", "Back"),[this]{cancelInput();app.constructorOpen=false;});
+    button("build:back",{r.x+r.w-416,r.y+4,108,36},tr("К обзору", "Back"),[this]{
+        cancelInput();
+        const bool hasDraft=!app.draft.empty() || app.assemblyName!=app.constructorInitialName ||
+            !app.assemblyMetadataTitle.empty() || !app.assemblyArtist.empty() || !app.assemblyDescription.empty() ||
+            std::any_of(app.globalTags.begin(),app.globalTags.end(),[](const auto &entry){return !entry.second.empty();});
+        if(!hasDraft){app.constructorOpen=false;return;}
+        app.modalTitle=tr("Закрыть конструктор?", "Close the builder?");
+        app.modalBody=tr("Несохранённые дорожки и изменения будут потеряны.", "Unsaved tracks and changes will be lost.");
+        app.modalConfirmLabel=tr("Закрыть", "Close");
+        app.modalConfirm=[this]{app.constructorOpen=false;};
+    });
     button("build:auto",{r.x+r.w-298,r.y+4,146,36},tr("Автосборка", "Auto build"),[this]{
         cancelInput();
         app.autoConstruct();
@@ -163,8 +173,17 @@ void UI::constructorPage(Rect r) {
         if(settling&&settlePool&&settleIndex==i)settleTarget=row;
         float poolHover=hover("pool:hover:"+std::to_string(i),row);
         if(!moving && !(settling&&settlePool&&settleIndex==i)){c.border(row.scale(1+.004f*poolHover),10,color.alpha(.65f),mix(panel,color,.17f));c.text(s.name,row.x+10,row.y+22,12,text,row.w-20);
-        c.text(s.path.empty()?tr("Из браузера · перетащите →", "From browser · drag →"):tr("На компьютере · перетащите →", "Local file · drag →"),row.x+10,row.y+43,10,muted,row.w-20);}
-        hit("pool:"+std::to_string(i),row,[]{});
+        c.text(s.path.empty()?tr("Из браузера · нажмите или перетащите", "From browser · click or drag"):tr("На компьютере · нажмите или перетащите", "Local file · click or drag"),row.x+10,row.y+43,10,muted,row.w-20);}
+        hit("pool:"+std::to_string(i),row,[this,i]{
+            if(i<0 || i>=int(app.sourcePool.size()))return;
+            auto source=app.sourcePool[i];
+            source.uiId=++nextTileId;
+            source.metadataPending=!source.path.empty() && source.role<6;
+            if(source.role==0)source.includeAudio=false;
+            app.draft.push_back(source);app.draftSelection=int(app.draft.size())-1;draftCategory=source.role;
+            app.updateConstructorRecommendation();
+            if(source.metadataPending)app.readDroppedMetadata(source);
+        },false,std::string(tr("Добавить источник ", "Add source "))+s.name);
     }
     poolScroll.bounds(total,poolView.h);c.pop();scrollbar("scroll:pool",poolView,poolScroll);
     // The full container structure stays expanded in one scrolling tree.
@@ -192,7 +211,7 @@ void UI::constructorPage(Rect r) {
         bool compatible=dragging&&accepts(movingSource,role);
         c.rect(section.inset(2),10,color.alpha(over?.28f:compatible?.20f:.10f));
         c.text(((app.singleExportMode && role==3)?std::string(tr("Изображения", "Images")):interfaceText(app.interfaceLanguage, roles[role]))+" · "+std::to_string(items.size()),centerX+13,headingY+20,12,text,centerW-40);
-        hit("tree:role:"+std::to_string(role),{centerX+8,headingY,centerW-32,28},[this,role]{cancelInput();draftCategory=role;app.draftSelection=-1;propertyScroll.p.target=0;advancedTrack=false;});
+        hit("tree:role:"+std::to_string(role),{centerX+8,headingY,centerW-32,28},[this,role]{cancelInput();draftCategory=role;app.draftSelection=-1;propertyScroll.p.target=0;advancedTrack=false;},false,interfaceText(app.interfaceLanguage,roles[role]));
         for(int ordinal=0;ordinal<int(items.size());++ordinal){
             int i=items[ordinal];const auto &item=app.draft[i];auto key=std::to_string(item.uiId);
             float target=cursor+(ordinal+(over&&ordinal>=slot?1:0))*76;
@@ -214,7 +233,7 @@ void UI::constructorPage(Rect r) {
                 c.text(std::to_string(ordinal+1)+"  =  "+item.name,row.x+10,row.y+24,12,text,row.w-20);
                 c.text((item.primary?tr("По умолчанию · ", "Default · "):"")+item.language+(item.codec?tr(" · перекодирование", " · transcode"):tr(" · исходный кодек", " · original codec")),row.x+10,row.y+49,10,muted,row.w-20);
             }
-            hit("draft:"+std::to_string(i),row,[this,i,role]{cancelInput();draftCategory=role;app.draftSelection=i;propertyScroll.p.target=0;});
+            hit("draft:"+std::to_string(i),row,[this,i,role]{cancelInput();draftCategory=role;app.draftSelection=i;propertyScroll.p.target=0;},false,item.name);
             dropRows.push_back({row.intersect(draftView),i});
         }
         if(over){Rect gap{centerX+12,cursor+slot*76,centerW-40,66};c.border(gap,10,color.alpha(.85f),color.alpha(.23f));}
@@ -281,8 +300,8 @@ void UI::constructorPage(Rect r) {
                         if(!data.is_object())throw std::runtime_error(tr("Редактирование доступно для JSON-объекта", "Editing requires a JSON object"));
                         source.metadataEditTitle=str(data,"title");source.metadataEditArtist=str(data,"artist");source.metadataEditDescription=str(data,"description");source.metadataEdit=true;source.metadataTreeReady=false;
                     } catch(const std::exception &e){app.notify(e.what());}
-                },s.metadataEdit);
-                if(s.metadataEdit) {
+                },s.metadataEdit,!s.metadataPending);
+                if(s.metadataEdit && !s.metadataPending) {
                     c.text(tr("Название", "Title"),x,sy+257,10,muted,w);input("export:meta-title",{x,sy+265,w,34},s.metadataEditTitle,tr("Название", "Title"));
                     c.text(tr("Автор / исполнитель", "Author / artist"),x,sy+322,10,muted,w);input("export:meta-artist",{x,sy+330,w,34},s.metadataEditArtist,tr("Автор", "Author"));
                     c.text(tr("Описание", "Description"),x,sy+387,10,muted,w);input("export:meta-description",{x,sy+395,w,34},s.metadataEditDescription,tr("Описание", "Description"));
@@ -355,10 +374,10 @@ void UI::constructorPage(Rect r) {
                 if(!supportsExtendedTrackTags(app.muxOptions.container)) {
                     c.text(tr("Описание, автор и дата: MKV и WebM", "Description, author and date: MKV and WebM"),x,sy+y+12,10,muted,w);y+=24;
                 }
-                check("track:default",{x,sy+y,30,30},s.primary,[this,i]{auto role=app.draft[i].role;bool value=!app.draft[i].primary;for(auto &t:app.draft)if(t.role==role)t.primary=false;app.draft[i].primary=value;});
+                check("track:default",{x,sy+y,30,30},s.primary,[this,i]{auto role=app.draft[i].role;bool value=!app.draft[i].primary;for(auto &t:app.draft)if(t.role==role)t.primary=false;app.draft[i].primary=value;},tr("По умолчанию", "Default"));
                 c.text(tr("По умолчанию", "Default"),x+34,sy+y+20,11,text,w-34);y+=37;
                 if(s.role==2 && (s.forced || supportsForcedSubtitles(app.muxOptions.container))){
-                    check("track:forced",{x,sy+y,30,30},s.forced,[this,i]{app.draft[i].forced=!app.draft[i].forced;});
+                    check("track:forced",{x,sy+y,30,30},s.forced,[this,i]{app.draft[i].forced=!app.draft[i].forced;},tr("Принудительные субтитры", "Forced subtitles"));
                     c.text(tr("Принудительные", "Forced"),x+34,sy+y+20,11,text,w-34);y+=37;
                 }
                 if(s.role==2){
@@ -414,7 +433,7 @@ void UI::constructorPage(Rect r) {
         if(app.singleExportMode && s.role==5 && s.metadataEdit)removeY=std::max(removeY,780.f+float(s.metadataTree.size())*34.f);
         if(!app.singleExportMode && (!advancedTrack || s.role>=2)) {
             float y=metadataTailY+10;
-            if(s.role==5 && s.metadataEdit) {
+            if(s.role==5 && s.metadataEdit && !s.metadataPending) {
                 c.text(tr("Название", "Title"),x,sy+y+15,10,muted,w);input("source:title",{x,sy+y+22,w,34},s.metadataEditTitle,tr("Название", "Title"));y+=65;
                 c.text(tr("Автор / исполнитель", "Author / artist"),x,sy+y+15,10,muted,w);input("source:artist",{x,sy+y+22,w,34},s.metadataEditArtist,tr("Автор", "Author"));y+=65;
                 c.text(tr("Описание", "Description"),x,sy+y+15,10,muted,w);input("source:description",{x,sy+y+22,w,34},s.metadataEditDescription,tr("Описание", "Description"));y+=65;

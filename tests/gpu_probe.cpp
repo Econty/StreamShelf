@@ -62,6 +62,22 @@ int main() {
         Canvas c;
         c.init("Assets");
         std::cout << "GPU " << c.driver() << '\n';
+        // An evicted preview may already be referenced by this frame. It must
+        // remain alive until the queued draw completes, even if another image
+        // is created in the meantime.
+        PreviewImage red{1, 1, {255, 0, 0, 255}}, blue{1, 1, {0, 0, 255, 255}};
+        c.begin(1440, 920, 1440, 920);
+        auto redTexture = c.createImage(red);
+        c.image(redTexture, {0, 0, 100, 100}, 1, 1);
+        c.deleteImage(redTexture);
+        auto blueTexture = c.createImage(blue);
+        c.image(blueTexture, {100, 0, 100, 100}, 1, 1);
+        c.render();
+        unsigned char first[4]{};
+        glReadPixels(50, 869, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, first);
+        if (first[0] < 240 || first[2] > 15 || glIsTexture(redTexture))
+            throw std::runtime_error("An evicted preview was not retained until its frame was rendered");
+        c.deleteImage(blueTexture);
         Spring p;
         for (int frame = 0; frame < 120; frame++) {
             p.target = frame < 60 ? 1 : 0;

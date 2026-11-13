@@ -12,6 +12,11 @@ int main() {
         check(!probeMatches(0, video, ExpectedStreams::VideoAndAudio), "video-only output cannot claim a successful merge");
         check(probeMatches(0, both, ExpectedStreams::VideoAndAudio), "merged audio and video both required");
         check(probeMatches(0, audio, ExpectedStreams::Audio) && !probeMatches(0, audio, ExpectedStreams::Video), "audio does not pass a video check");
+        Json coverAudio = {{"streams", Json::array({{{"codec_type", "audio"}}, {{"codec_type", "video"}, {"disposition", {{"attached_pic", 1}}}}})}};
+        check(probeMatches(0, coverAudio, ExpectedStreams::Audio), "audio with embedded cover validates as audio");
+        check(!probeMatches(0, coverAudio, ExpectedStreams::Video) && !probeMatches(0, coverAudio, ExpectedStreams::VideoAndAudio), "attached cover is not playable video");
+        Json coverAndVideo = {{"streams", Json::array({{{"codec_type", "audio"}}, {{"codec_type", "video"}, {"disposition", {{"attached_pic", 1}}}}, {{"codec_type", "video"}, {"disposition", {{"attached_pic", 0}}}}})}};
+        check(probeMatches(0, coverAndVideo, ExpectedStreams::VideoAndAudio), "a real video stream still validates alongside an embedded cover");
         check(!probeMatches(1, both, ExpectedStreams::AnyMedia) && !probeMatches(0, Json::object(), ExpectedStreams::AnyMedia), "failed or empty ffprobe does not validate");
         check(finalDownloadedPath("progress\r\nSTREAMSHELF_FINAL:C:\\output\\media.mkv\r\n") == std::optional<std::string>("C:\\output\\media.mkv"), "extract only final moved path");
         check(!finalDownloadedPath("STREAMSHELF_FINAL:C:\\one\nSTREAMSHELF_FINAL:C:\\two\n"), "ambiguous final paths are rejected");

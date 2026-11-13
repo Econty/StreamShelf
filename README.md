@@ -8,7 +8,7 @@ StreamShelf is a native Windows application for working with media from your bro
 
 ### [Releases](https://github.com/Econty/StreamShelf/releases) | [Getting started](#get-started) ([Русский](README_RU.md#подключение-и-анализ)) | [Build guide](BUILDING.md) ([Русский](BUILDING_RU.md))
 
-**StreamShelf 2.5 Beta** is available on the [releases page](https://github.com/Econty/StreamShelf/releases). The installer is not digitally signed.
+**Current source version: StreamShelf v2026.11.1 Beta.** Downloadable releases are listed on the [releases page](https://github.com/Econty/StreamShelf/releases). The beta package does not include a signed Firefox connector; permanent Firefox installation requires Mozilla's signature for Connector 1.0.5. The application and installer are not digitally signed.
 
 ## Features
 
@@ -22,19 +22,19 @@ Availability depends on the site, file, codecs, and container. StreamShelf does 
 
 ## Languages
 
-StreamShelf 2.5 Beta supports English and Russian. On first launch, it selects Russian when the Windows display language is Russian and English otherwise. The language can be changed under **Settings → Language / Язык**.
+StreamShelf supports English and Russian. On first launch, it selects Russian when the Windows display language is Russian and English otherwise. The language can be changed under **Settings → Language / Язык**.
 
-StreamShelf Connector 1.0.4 follows the app's language. When disconnected, it uses the browser's interface language, falling back to English for languages other than Russian.
+The current StreamShelf Connector 1.0.5 source follows the app's language. When disconnected, it uses the browser's interface language, falling back to English for languages other than Russian. Permanent Firefox installation of version 1.0.5 requires Mozilla signing; see the [signing notes](FIREFOX-SIGNING.md).
 
 **Русскоязычным пользователям:** [открыть полную инструкцию на русском](README_RU.md).
 
 ## Get started
 
-The interface labels below apply to 2.5 Beta. See also the [Russian instructions](README_RU.md).
+See also the [Russian instructions](README_RU.md).
 
 1. Use Windows 10 or 11 x64 with an OpenGL 3.3-compatible graphics driver. If you downloaded an archive, extract it to a permanent folder and run `StreamShelf.exe`.
-2. Open **Settings → Components** to check and install the tools you need: yt-dlp, FFmpeg, FFprobe, and Deno. These tools are managed in `%LOCALAPPDATA%\StreamShelfNative\tools`.
-3. Open the connection page, select your browser, and start the extension setup. Follow the browser prompts to install and enable StreamShelf Connector. Firefox uses a signed XPI; Chrome and Yandex Browser load the unpacked Chromium extension.
+2. Open **Settings → Components** to check and install the tools you need: yt-dlp, FFmpeg, FFprobe, and Deno. These tools are managed in `%LOCALAPPDATA%\StreamShelfNative\tools`. If your package includes bundled tools, **Install bundled tools** explicitly imports missing files after checking their hashes and versions, without replacing installed tools.
+3. Open the connection page, select your browser, and start the extension setup. Follow the browser prompts to install and enable StreamShelf Connector. Chrome and Yandex Browser load the unpacked Chromium extension. Firefox requires a signed XPI, which is not included in this beta.
 4. Open StreamShelf Connector in the browser, select **Connect extension**, and review the requested website access. Open a page with media, return to StreamShelf, and select **Analyze**. Deep analysis can look for additional page resources; dynamic streams may require playback or a page reload.
 5. Select media and a destination, then download it or open the builder to arrange tracks and adjust supported settings.
 

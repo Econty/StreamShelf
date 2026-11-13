@@ -82,7 +82,7 @@ struct Scroll {
 };
 struct Media {
     std::string key, id, title, category, ext, quality, vcodec, acodec, language, protocol, url, page,
-          credentialUrl, thumbnail;
+          credentialUrl, thumbnail, sourceTitle;
     double size = 0, fps = 0, rate = 0;
     bool selected = false, drm = false, format = false, videoOnly = false, automatic = false, approx = false;
     Json data;

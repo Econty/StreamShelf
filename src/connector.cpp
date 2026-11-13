@@ -125,14 +125,42 @@ void Session::acceptCredentialReply(const Json &reply) {
         cv.notify_all();
     }
 }
+BrowserSource Session::source() {
+    std::lock_guard lock(mutex);
+    return {tab, sourceGeneration, url, store, extensionSource};
+}
+bool Session::sourceMatches(const BrowserSource &expected) {
+    std::lock_guard lock(mutex);
+    return alive && scopedCredentialsSupported && expected.valid() &&
+        expected == BrowserSource{tab, sourceGeneration, url, store, extensionSource};
+}
+void Session::updateTab(const Json &j) {
+    std::lock_guard lock(mutex);
+    auto newTab = int(number(j, "tabId", -1));
+    auto newUrl = str(j, "url"), newStore = str(j, "storeId");
+    std::optional<uint64_t> newSource;
+    if (j.contains("sourceId") && j["sourceId"].is_number_unsigned()) newSource = j["sourceId"].get<uint64_t>();
+    else if (j.contains("sourceId") && j["sourceId"].is_number_integer() && j["sourceId"].get<int64_t>() >= 0) newSource = uint64_t(j["sourceId"].get<int64_t>());
+    if (tab != newTab || url != newUrl || store != newStore || extensionSource != newSource) {
+        ++sourceGeneration; ++credentialEpoch; credentialSnapshots.clear(); cv.notify_all();
+    }
+    tab = newTab; url = std::move(newUrl); store = std::move(newStore); extensionSource = newSource;
+    title = str(j, "title");
+}
+void Session::closeTab() {
+    std::lock_guard lock(mutex);
+    ++sourceGeneration; ++credentialEpoch; credentialSnapshots.clear(); tab = -1; url.clear(); store.clear(); extensionSource.reset(); cv.notify_all();
+}
 Json Session::credentials(const std::string &url, std::atomic_bool &cancel) {
+    return credentials(url, source(), cancel);
+}
+Json Session::credentials(const std::string &url, const BrowserSource &expected, std::atomic_bool &cancel) {
     static std::atomic_uint64_t serial{0};
     std::string request = std::to_string(++serial);
-    int selected;
     uint64_t epoch;
     {
         std::lock_guard l(mutex);
-        selected = tab;
+        if (!alive || !scopedCredentialsSupported || !expected.valid() || expected != BrowserSource{tab, sourceGeneration, this->url, store, extensionSource}) throw BrowserSourceChanged();
         epoch = credentialEpoch;
     }
     if (cancel) throw std::runtime_error("Отменено");
@@ -141,39 +169,38 @@ Json Session::credentials(const std::string &url, std::atomic_bool &cancel) {
         Session &session; const std::string &request;
         ~PendingGuard() { std::lock_guard lock(session.mutex); session.pendingCredentials.erase(request); session.replies.erase(request); }
     } guard{*this, request};
-    try {
-        send({{"type", "credentials"}, {"requestId", request}, {"tabId", selected}, {"url", url}});
+    {
+        try {
+            send({{"type", "credentials"}, {"requestId", request}, {"tabId", expected.tab}, {"sourceId", *expected.extensionSource}, {"storeId", expected.store}, {"url", url}});
+        } catch (...) {
+            if (cancel) throw;
+            // Browser-bound tasks must not silently fall back to anonymous I/O
+            // when the channel fails before we receive an authoritative reply.
+            throw BrowserSourceChanged();
+        }
         std::unique_lock l(mutex);
         auto until = std::chrono::steady_clock::now() + std::chrono::seconds(25);
-        while (alive && !cancel && !replies.count(request)) {
+        while (alive && !cancel && !replies.count(request) && expected == BrowserSource{tab, sourceGeneration, this->url, store, extensionSource} && epoch == credentialEpoch) {
             if (cv.wait_for(l, std::chrono::milliseconds(100)) == std::cv_status::timeout &&
                 std::chrono::steady_clock::now() > until)
-                throw std::runtime_error("Расширение не ответило на запрос cookies");
+                throw BrowserSourceChanged();
         }
         if (cancel)
             throw std::runtime_error("Отменено");
+        if (!alive || !scopedCredentialsSupported || expected != BrowserSource{tab, sourceGeneration, this->url, store, extensionSource} || epoch != credentialEpoch) throw BrowserSourceChanged();
         if (!replies.count(request))
-            throw std::runtime_error("Браузерная сессия закрыта");
+            throw BrowserSourceChanged();
         auto result = replies[request];
         replies.erase(request);
-        if (str(result, "type") == "error")
-            throw std::runtime_error(str(result, "message", "Ошибка расширения"));
+        // A refusal can be caused by a changed account before the asynchronous
+        // tabSelected update reaches us. Never substitute a stale snapshot or
+        // let the caller retry anonymously in that window.
+        if (str(result, "type") != "credentialsResult" || !result.contains("cookies") || !result["cookies"].is_array() ||
+            !result.contains("headers") || !result["headers"].is_object()) throw BrowserSourceChanged();
         if (str(result, "url") != url)
-            throw std::runtime_error("Адрес снимка cookies не совпал");
-        if (epoch == credentialEpoch) {
-            if (credentialSnapshots.size() >= 128 && !credentialSnapshots.count(url)) {
-                auto oldest=std::min_element(credentialSnapshots.begin(),credentialSnapshots.end(),[](const auto &a,const auto &b){return a.second.captured<b.second.captured;});
-                credentialSnapshots.erase(oldest);
-            }
-            credentialSnapshots.insert_or_assign(url, CredentialSnapshot{result,GetTickCount64()});
-        }
+            throw BrowserSourceChanged();
+        if (int(number(result, "tabId", -1)) != expected.tab || !result.contains("sourceId") || !result["sourceId"].is_number_unsigned() || result["sourceId"].get<uint64_t>() != *expected.extensionSource || str(result, "storeId") != expected.store) throw BrowserSourceChanged();
         return result;
-    } catch (...) {
-        if (cancel) throw;
-        std::lock_guard lock(mutex);
-        auto cached = credentialSnapshots.find(url);
-        if (epoch == credentialEpoch && cached != credentialSnapshots.end() && GetTickCount64()-cached->second.captured <= 300000) return cached->second.data;
-        throw;
     }
 }
 void Connector::start() {
@@ -227,7 +254,10 @@ void Connector::start() {
                         }
                         if (j.contains("capabilities") && j["capabilities"].is_array())
                             for (const auto &capability : j["capabilities"])
-                                if (capability.is_string() && capability.get<std::string>() == "language") s->languageSupported = true;
+                                if (capability.is_string()) {
+                                    if (capability.get<std::string>() == "language") s->languageSupported = true;
+                                    if (capability.get<std::string>() == "scopedCredentials") s->scopedCredentialsSupported = true;
+                                }
                         s->send({{"type", "helloAck"}, {"protocol", 1}, {"version", ConnectorVersion}});
                         s->verifyConnection();
                         if (message)
@@ -241,17 +271,8 @@ void Connector::start() {
                             if (type == "credentialsResult" || (type == "error" && j.contains("requestId"))) {
                                 s->acceptCredentialReply(j);
                             } else {
-                                if (type == "tabSelected") {
-                                    std::lock_guard l(s->mutex);
-                                    s->tab = int(number(j, "tabId", -1));
-                                    s->url = str(j, "url");
-                                    s->title = str(j, "title");
-                                }
-                                if (type == "tabClosed") {
-                                    std::lock_guard l(s->mutex);
-                                    s->tab = -1;
-                                    s->url.clear();
-                                }
+                                if (type == "tabSelected") s->updateTab(j);
+                                if (type == "tabClosed") s->closeTab();
                                 if (message)
                                     message(s, j);
                             }
@@ -259,6 +280,7 @@ void Connector::start() {
                     } catch (...) {
                     }
                     s->alive = false;
+                    s->closeTab();
                     s->cv.notify_all();
                     {
                         std::lock_guard l(s->writeMutex);

@@ -9,6 +9,7 @@ backups/
 .env
 .env.*
 *.pem
+!scripts/mozilla-addons-public.pem
 *.key
 *.p12
 *.pfx

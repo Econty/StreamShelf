@@ -20,8 +20,8 @@ std::string utf8(const std::wstring &);
 fs::path executable(), dataRoot();
 std::string readFile(const fs::path &, size_t limit = 64 * 1024 * 1024);
 void writeFile(const fs::path &, const std::string &);
-void protectFile(const fs::path &, const std::string &);
-std::string unprotectFile(const fs::path &);
+void protectFile(const fs::path &, const std::string &, size_t limit = size_t(-1));
+std::string unprotectFile(const fs::path &, size_t limit = 64 * 1024 * 1024);
 std::string sha256(const fs::path &);
 struct Handle {
     HANDLE h = nullptr;
@@ -71,15 +71,31 @@ std::wstring pipeName();
 int nativeHostMain();
 void installConnector(const fs::path &);
 void updateConnectorExtensions(const fs::path &);
-// Keep existing 1.0.3 installations working while localized extensions are rolled out.
-inline constexpr const char *ConnectorVersion = "1.0.4";
-inline constexpr const wchar_t *SignedFirefoxConnectorFilename = L"StreamShelf-Connector-1.0.4.xpi";
+// Older extensions may connect for status and manual use, but scoped browser
+// credentials require the capability introduced in 1.0.5.
+inline constexpr const char *ConnectorVersion = "1.0.5";
+inline constexpr const wchar_t *SignedFirefoxConnectorFilename = L"StreamShelf-Connector-1.0.5.xpi";
 inline bool compatibleExtensionHello(const Json &hello) {
     const auto version = str(hello, "version");
-    return version == ConnectorVersion || version == "1.0.3";
+    return version == ConnectorVersion || version == "1.0.4" || version == "1.0.3";
 }
 void unregisterConnector();
+// A media item may only use credentials from the exact browser document that
+// discovered it. A new selection/navigation receives a new generation.
+struct BrowserSource {
+    int tab = -1;
+    uint64_t generation = 0;
+    std::string page, store;
+    std::optional<uint64_t> extensionSource;
+    bool valid() const { return tab >= 0 && extensionSource.has_value(); }
+    bool operator==(const BrowserSource &) const = default;
+};
+struct BrowserSourceChanged : std::runtime_error {
+    BrowserSourceChanged() : std::runtime_error("Источник браузера или учётная запись изменились либо расширение устарело. Обновите расширение и повторите анализ. Для общедоступной ссылки можно выбрать режим «Без браузера».") {}
+};
 struct Session {
+    inline static std::atomic_uint64_t nextInstanceSerial{0};
+    const uint64_t instanceSerial = ++nextInstanceSerial;
     HANDLE pipe = INVALID_HANDLE_VALUE;
     std::mutex writeMutex, mutex;
     std::condition_variable cv;
@@ -97,11 +113,20 @@ struct Session {
     std::atomic<ULONGLONG> lastPong{0};
     std::atomic<ULONGLONG> verificationSent{0};
     std::string id, url, title, browser, browserExecutable, verificationToken;
+    std::string store;
+    uint64_t sourceGeneration = 0;
+    std::optional<uint64_t> extensionSource;
+    std::atomic_bool scopedCredentialsSupported{false};
     int tab = -1;
+    BrowserSource source();
+    bool sourceMatches(const BrowserSource &);
+    void updateTab(const Json &);
+    void closeTab();
     void send(const Json &);
     void verifyConnection();
     bool acceptVerification(const std::string &);
     Json credentials(const std::string &, std::atomic_bool &);
+    Json credentials(const std::string &, const BrowserSource &, std::atomic_bool &);
 };
 class Connector {
     std::thread acceptThread;

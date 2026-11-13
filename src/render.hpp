@@ -31,6 +31,8 @@ class Canvas {
     std::vector<Vertex> vertices;
     std::vector<Batch> batches;
     std::vector<Rect> clips;
+    // A texture may still be referenced by a batch queued for this frame.
+    std::vector<unsigned> retiredImages;
     int batchStart = 0;
     unsigned batchImage=0;
     unsigned program = 0, vao = 0, vbo = 0, font = 0, history = 0, snapshot = 0, fbo = 0;

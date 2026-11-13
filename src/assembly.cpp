@@ -3,13 +3,22 @@
 #include <fstream>
 namespace ss {
 void App::openConstructor(bool completed) {
+    if (constructorOpen && (!draft.empty() || assemblyName!=constructorInitialName ||
+        !assemblyMetadataTitle.empty() || !assemblyArtist.empty() || !assemblyDescription.empty() ||
+        std::any_of(globalTags.begin(),globalTags.end(),[](const auto &entry){return !entry.second.empty();}))) {
+        modalTitle="Закрыть конструктор?";
+        modalBody="Несохранённые дорожки и изменения будут потеряны.";
+        modalConfirmLabel="Закрыть";
+        modalConfirm=[this,completed] { constructorOpen=false; openConstructor(completed); };
+        return;
+    }
     ++constructorGeneration;constructorPending=0;
     sourcePool.clear(); draft.clear(); draftSelection=-1; singleExportMode=false;constructorModeManual=false;constructorFormatManual=false;
-    assemblyName = title.empty() ? (interfaceLanguage == "ru" ? "Мой контейнер" : "My container") : title; assemblyMetadataTitle.clear(); assemblyArtist.clear(); assemblyDescription.clear(); globalTags.clear(); originalGlobalTags.clear(); globalTagName.clear(); globalTagsLoaded=false;
+    assemblyName = title.empty() ? (interfaceLanguage == "ru" ? "Мой контейнер" : "My container") : title; constructorInitialName=assemblyName; assemblyMetadataTitle.clear(); assemblyArtist.clear(); assemblyDescription.clear(); globalTags.clear(); originalGlobalTags.clear(); globalTagName.clear(); globalTagsLoaded=false;
     for(const char *key:{"album","album_artist","composer","genre","date","copyright","publisher"})globalTags[key]="";
-    if(completed) for(const auto &job:jobs) if(job->id==selectedJob&&job->assembly){
+    if(completed && (selectedJobs.empty() || (selectedJobs.size()==1 && selectedJobs.count(selectedJob)))) for(const auto &job:jobs) if(job->id==selectedJob&&job->assembly){
         singleExportMode=job->singleExport;
-        sourcePool=job->sources;assemblyName=job->title;assemblyMetadataTitle=job->assemblyMetadataTitle;assemblyArtist=job->assemblyArtist;assemblyDescription=job->assemblyDescription;globalTags=job->globalTags;originalGlobalTags=job->originalGlobalTags;globalTagsLoaded=true;muxOptions=job->muxOptions;
+        sourcePool=job->sources;assemblyName=job->title;constructorInitialName=assemblyName;assemblyMetadataTitle=job->assemblyMetadataTitle;assemblyArtist=job->assemblyArtist;assemblyDescription=job->assemblyDescription;globalTags=job->globalTags;originalGlobalTags=job->originalGlobalTags;globalTagsLoaded=true;muxOptions=job->muxOptions;
         for(auto &source:sourcePool){
             if(job->singleExport){source.exportFormat=job->exportFormat;source.exportQuality=job->exportQuality;}
             if(!source.dependency.empty())for(const auto &child:jobs)if(child->id==source.dependency&&child->done&&child->state=="Готово")source.path=child->output;
@@ -139,12 +148,13 @@ static std::string metadataTag(const Json &tags, std::initializer_list<const cha
 // never from the current working directory. The report describes the source.
 static std::vector<MediaInfoField> readMediaInfoReport(const std::string &path) {
     auto dll=executable().parent_path()/L"MediaInfo.dll";
-    HMODULE lib=LoadLibraryExW(dll.c_str(),nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
+    constexpr DWORD search = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
+    HMODULE lib=LoadLibraryExW(dll.c_str(),nullptr,search);
     if(!lib) {
         wchar_t programFiles[MAX_PATH]{};
         if (!GetEnvironmentVariableW(L"ProgramFiles",programFiles,MAX_PATH)) return {};
         dll=fs::path(programFiles)/L"MediaInfo"/L"MediaInfo.dll";
-        lib=LoadLibraryExW(dll.c_str(),nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
+        lib=LoadLibraryExW(dll.c_str(),nullptr,search);
     }
     if(!lib)return {};
     using New = void* (__stdcall*)();
@@ -219,10 +229,12 @@ void App::readDroppedMetadata(const AssemblySource &original) {
             if(original.role==6)return;
             if(original.role==5 && original.embeddedKind!="metadata") {
                 if(metadataSource.is_object()) {
-                    it->metadataEdit=true;it->metadataEditTitle=str(metadataSource,"title");it->metadataEditArtist=str(metadataSource,"artist");it->metadataEditDescription=str(metadataSource,"description");
-                    for(auto tag=metadataSource.begin();tag!=metadataSource.end();++tag)
-                        if(metadataKeyAllowed(tag.key()) && tag->is_string())it->extraTags[tag.key()]=tag->get<std::string>();
-                    it->originalExtraTags=it->extraTags;
+                    if(!it->metadataEdit) {
+                        it->metadataEdit=true;it->metadataEditTitle=str(metadataSource,"title");it->metadataEditArtist=str(metadataSource,"artist");it->metadataEditDescription=str(metadataSource,"description");
+                        for(auto tag=metadataSource.begin();tag!=metadataSource.end();++tag)
+                            if(metadataKeyAllowed(tag.key()) && tag->is_string())it->extraTags[tag.key()]=tag->get<std::string>();
+                        it->originalExtraTags=it->extraTags;
+                    }
                 }
                 return;
             }
@@ -359,7 +371,7 @@ void App::enqueueAssembly() {
                 child->item=source.media;child->title=source.name;child->page=source.media.page;child->assemblyInput=true;
                 child->folder=utf8((fs::path(wide(destination))/wide(parent->id+"-sources")/wide(child->id)).wstring());
                 child->outputDirectory=utf8((fs::path(wide(destination))/wide(parent->id+"-sources")).wstring());
-                auto it=mediaSessions.find(source.media.key);child->session=it==mediaSessions.end()?session():it->second;
+                bindJobSource(*child, source.media);
                 if(child->item.category=="Данные")child->local=dataSourceContent(child->item);
                 source.dependency=child->id;queued.push_back(child);
             }
@@ -449,7 +461,7 @@ void App::enqueueAssembly() {
             child->item=source.media;child->title=source.name;child->page=source.media.page;child->assemblyInput=true;child->conversionSource=source.codec>0;
             child->folder=utf8((fs::path(wide(destination))/wide(parent->id+"-sources")/wide(child->id)).wstring());
             child->outputDirectory=utf8((fs::path(wide(destination))/wide(parent->id+"-sources")).wstring());
-            auto it=mediaSessions.find(source.media.key);child->session=it==mediaSessions.end()?session():it->second;
+            bindJobSource(*child, source.media);
             if(child->item.category=="Данные")child->local=dataSourceContent(child->item);
             source.dependency=child->id;downloads[identity]=child->id;children.push_back(child);
         }
@@ -476,7 +488,8 @@ void App::resolveAssembly(const std::shared_ptr<Job> &parent,bool partial) {
     {std::lock_guard lock(jobsMutex);parent->sources=std::move(resolved);parent->decisionNeeded=false;parent->waitingSources=false;parent->state="Ожидание";}
     saveHistory();jobsCv.notify_all();
 }
-void App::updateAssemblies() {
+bool App::updateAssemblies() {
+    bool changed=false;
     for(const auto &parent:jobs) {
         if(!parent->assembly||!parent->waitingSources||parent->done||parent->cancel||parent->decisionNeeded)continue;
         bool waiting=false,missing=false;int saved=0;std::string failed,paths;
@@ -491,8 +504,9 @@ void App::updateAssemblies() {
             else {++saved;paths+=path+"\n";}
         }
         if(waiting)continue;
-        if(!missing) {try{resolveAssembly(parent,false);}catch(const std::exception &e){parent->decisionNeeded=true;parent->state="Нужен выбор";parent->detail=e.what();}continue;}
+        if(!missing) {changed=true;try{resolveAssembly(parent,false);}catch(const std::exception &e){parent->decisionNeeded=true;parent->state="Нужен выбор";parent->detail=e.what();}continue;}
         if(!modalTitle.empty())continue;
+        changed=true;
         parent->decisionNeeded=true;parent->state="Нужен выбор";parent->detail="Не все источники доступны. Сохранённые файлы оставлены отдельно.";
         modalTitle="Не все медиа удалось скачать";
         modalBody=(interfaceLanguage == "en" ? "Not downloaded or unavailable:\n" : "Не скачаны или недоступны:\n")+failed+
@@ -503,5 +517,6 @@ void App::updateAssemblies() {
         modalConfirm=playable?std::function<void()>([this,parent]{try{resolveAssembly(parent,true);}catch(const std::exception &e){error(e.what());}}):nullptr;
         selectedJob=parent->id;requestedPage=2;saveHistory();
     }
+    return changed;
 }
 }

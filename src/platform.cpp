@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <set>
 #include <ctime>
+#include "http_resume.hpp"
 namespace ss {
 std::wstring wide(const std::string &s) {
     if (s.empty())
@@ -76,11 +77,17 @@ void writeFile(const fs::path &p, const std::string &s) {
     f.close();
     if (!f) throw std::runtime_error("Ошибка завершения записи файла");
 }
-void protectFile(const fs::path &p, const std::string &s) {
+void protectFile(const fs::path &p, const std::string &s, size_t limit) {
+    if (s.size() > MAXDWORD || s.size() > limit)
+        throw std::runtime_error("Файл слишком большой");
     DATA_BLOB in{DWORD(s.size()), (BYTE *)s.data()}, out{};
     if (!CryptProtectData(&in, L"StreamShelfNative", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN,
                           &out))
         throw std::runtime_error("Ошибка DPAPI");
+    if (out.cbData > limit) {
+        LocalFree(out.pbData);
+        throw std::runtime_error("Файл слишком большой");
+    }
     std::string v((char *)out.pbData, out.cbData);
     LocalFree(out.pbData);
     static std::atomic_uint64_t serial{0};
@@ -94,8 +101,8 @@ void protectFile(const fs::path &p, const std::string &s) {
         std::error_code ec; fs::remove(temp, ec); throw;
     }
 }
-std::string unprotectFile(const fs::path &p) {
-    auto s = readFile(p);
+std::string unprotectFile(const fs::path &p, size_t limit) {
+    auto s = readFile(p, std::min(limit, size_t(MAXDWORD)));
     DATA_BLOB in{DWORD(s.size()), (BYTE *)s.data()}, out{};
     if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out))
         throw std::runtime_error("DPAPI: другой пользователь или повреждённый файл");
@@ -289,9 +296,16 @@ struct Internet {
         return h;
     }
 };
+struct ResumeRestart {};
+struct ResumeState {
+    uint64_t offset = 0;
+    std::string validator;
+    bool redirected = false;
+    std::function<void(DWORD, HINTERNET, uint64_t)> beginResponse;
+};
 static void fetch(const std::string &url, size_t limit,
                   const std::function<void(const char *, size_t, uint64_t)> &sink, std::atomic_bool *cancel,
-                  const Json &headers, const std::string &cookieText) {
+                  const Json &headers, const std::string &cookieText, ResumeState *resume = nullptr) {
     if (!httpUrl(url))
         throw std::runtime_error("Нужен HTTP/HTTPS URL без логина в адресе");
     auto u = wide(url.substr(0, url.find('#')));
@@ -305,7 +319,7 @@ static void fetch(const std::string &url, size_t limit,
     if (parts.dwExtraInfoLength)
         path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
     Internet session(
-        WinHttpOpen(L"StreamShelfNative/2.5", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0));
+        WinHttpOpen(L"StreamShelfNative/2026.11.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0));
     if (!session.h)
         throw std::runtime_error("WinHTTP init");
     WinHttpSetTimeouts(session, 15000, 15000, 20000, 30000);
@@ -318,6 +332,13 @@ static void fetch(const std::string &url, size_t limit,
     DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy));
     std::wstring extra = L"Accept: */*\r\n";
+    if (resume) {
+        extra += L"Accept-Encoding: identity\r\n";
+        if (resume->offset && !resume->redirected) {
+            extra += L"Range: bytes=" + std::to_wstring(resume->offset) + L"-\r\n";
+            extra += L"If-Range: " + wide(resume->validator) + L"\r\n";
+        }
+    }
     for (auto &[k, v] : headers.items()) {
         std::string l = k;
         std::transform(l.begin(), l.end(), l.begin(), ::tolower);
@@ -400,12 +421,30 @@ static void fetch(const std::string &url, size_t limit,
             combined.resize(length);
             next = utf8(combined);
         }
-        // Sensitive headers are never forwarded. Cookies are reselected for the destination.
+        // Browser headers are safe to retain only within the same origin.
+        // Cookies are independently reselected for the destination.
         if (parts.nScheme == INTERNET_SCHEME_HTTPS && next.rfind("http://", 0) == 0)
             throw std::runtime_error("Небезопасное перенаправление HTTPS → HTTP");
+        auto nextWide = wide(next.substr(0, next.find('#')));
+        URL_COMPONENTS dest{};
+        dest.dwStructSize = sizeof(dest);
+        dest.dwHostNameLength = DWORD(-1);
+        if (!WinHttpCrackUrl(nextWide.c_str(), 0, 0, &dest) || !dest.dwHostNameLength)
+            throw std::runtime_error("Некорректное перенаправление");
+        std::wstring nextHost(dest.lpszHostName, dest.dwHostNameLength);
+        bool sameOrigin = parts.nScheme == dest.nScheme && parts.nPort == dest.nPort &&
+                          _wcsicmp(host.c_str(), nextHost.c_str()) == 0;
+        Json redirectedHeaders = Json::object();
+        for (auto &[key, value] : headers.items()) {
+            auto name = key;
+            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+            if (name == "user-agent" || (sameOrigin && (name == "referer" || name == "authorization" || name == "origin")))
+                redirectedHeaders[key] = value;
+        }
         depth++;
+        if (resume) { resume->offset = 0; resume->validator.clear(); resume->redirected = true; }
         try {
-            fetch(next, limit, sink, cancel, Json::object(), cookieText);
+            fetch(next, limit, sink, cancel, redirectedHeaders, cookieText, resume);
         } catch (...) {
             depth--;
             throw;
@@ -413,6 +452,7 @@ static void fetch(const std::string &url, size_t limit,
         depth--;
         return;
     }
+    if (resume && status == 416 && resume->offset) throw ResumeRestart{};
     if (status < 200 || status >= 300)
         throw std::runtime_error("HTTP " + std::to_string(status));
     wchar_t length[64];
@@ -420,6 +460,7 @@ static void fetch(const std::string &url, size_t limit,
     uint64_t total = 0;
     if (WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH, nullptr, length, &n, nullptr))
         total = _wcstoui64(length, nullptr, 10);
+    if (resume) resume->beginResponse(status, request, total);
     size_t received = 0;
     char buffer[65536];
     for (;;) {
@@ -463,6 +504,100 @@ void httpDownload(const std::string &url, const fs::path &p, std::atomic_bool &c
             if (total) progress(100. * count / total);
         },
         &cancel, headers, cookieText);
+}
+static std::string responseHeader(HINTERNET request, DWORD name) {
+    DWORD bytes = 0;
+    if (!WinHttpQueryHeaders(request, name, WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &bytes, WINHTTP_NO_HEADER_INDEX) &&
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER) return {};
+    if (bytes < sizeof(wchar_t) || bytes > 8192 || bytes % sizeof(wchar_t)) return {};
+    std::vector<wchar_t> buffer(bytes / sizeof(wchar_t) + 1, L'\0');
+    if (!WinHttpQueryHeaders(request, name, WINHTTP_HEADER_NAME_BY_INDEX, buffer.data(), &bytes, WINHTTP_NO_HEADER_INDEX)) return {};
+    return utf8(buffer.data());
+}
+static bool strongEtag(const std::string &value) {
+    return value.size() >= 2 && value.size() <= 1024 && value.front() == '"' && value.back() == '"' &&
+        std::none_of(value.begin() + 1, value.end() - 1, [](unsigned char c) { return c < 0x21 || c == 0x7f || c == '"'; });
+}
+void httpDownloadResumable(const std::string &url, const fs::path &p, std::atomic_bool &cancel,
+                           std::function<void(double)> progress, const Json &headers, const std::string &cookieText,
+                           std::function<void(uint64_t,uint64_t)> onBytes) {
+    auto metadata = p; metadata += L".resume";
+    ResumeState state;
+    try {
+        if (fs::is_regular_file(p) && fs::is_regular_file(metadata)) {
+            auto saved = Json::parse(unprotectFile(metadata));
+            auto etag = str(saved, "etag");
+            if (str(saved, "url") == url && strongEtag(etag)) {
+                state.offset = fs::file_size(p);
+                state.validator = std::move(etag);
+            }
+        }
+    } catch (...) { state.offset = 0; state.validator.clear(); }
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::ofstream output;
+        uint64_t count = 0, expected = 0, actualTotal = 0;
+        state.beginResponse = [&](DWORD status, HINTERNET request, uint64_t length) {
+            const auto etag = responseHeader(request, WINHTTP_QUERY_ETAG);
+            bool append = false;
+            if (state.offset && status == 206) {
+                auto range = responseHeader(request, WINHTTP_QUERY_CONTENT_RANGE);
+                std::smatch match;
+                static const std::regex format(R"(^bytes ([0-9]+)-([0-9]+)/([0-9]+)$)");
+                try {
+                    if (!std::regex_match(range, match, format) || etag != state.validator || !strongEtag(etag)) throw ResumeRestart{};
+                    auto first = std::stoull(match.str(1)), last = std::stoull(match.str(2)), total = std::stoull(match.str(3));
+                    if (first != state.offset || last < first || last >= total || last != total - 1 ||
+                        (length && length != last - first + 1) || fs::file_size(p) != state.offset) throw ResumeRestart{};
+                    append = true; expected = last - first + 1; actualTotal = total;
+                } catch (const ResumeRestart &) { throw; }
+                  catch (...) { throw ResumeRestart{}; }
+            } else if (status == 206) {
+                throw ResumeRestart{}; // Never accept an unsolicited partial response.
+            } else if (status != 200) {
+                throw std::runtime_error("HTTP " + std::to_string(status));
+            }
+            if (!append) {
+                state.offset = 0;
+                std::error_code ec; fs::remove(metadata, ec);
+                if (ec) throw std::runtime_error("Не удалось очистить данные докачки");
+                output.open(p, std::ios::binary | std::ios::trunc);
+                if (!output) throw std::runtime_error("Не удалось записать файл");
+                if (!state.redirected && strongEtag(etag)) {
+                    // Resume is optional: downloading must still work on a
+                    // filesystem where the protected sidecar cannot be saved.
+                    try { protectFile(metadata, Json{{"url", url}, {"etag", etag}}.dump()); }
+                    catch (...) {
+                        std::error_code status; bool exists = fs::exists(metadata, status);
+                        if (status || exists) throw;
+                    }
+                }
+                expected = length; actualTotal = length;
+            } else {
+                output.open(p, std::ios::binary | std::ios::app);
+                if (!output) throw std::runtime_error("Не удалось записать файл");
+                count = state.offset;
+            }
+        };
+        try {
+            fetch(url, SIZE_MAX, [&](const char *data, size_t size, uint64_t) {
+                if (!output.write(data, size)) throw std::runtime_error("Не удалось записать файл");
+                count += size;
+                if (onBytes) onBytes(count, actualTotal);
+                if (actualTotal && progress) progress(100. * count / actualTotal);
+            }, &cancel, headers, cookieText, &state);
+            output.close();
+            if (!output) throw std::runtime_error("Ошибка завершения записи файла");
+            if (expected && count - state.offset != expected) throw std::runtime_error("Обрыв соединения");
+            std::error_code ec; fs::remove(metadata, ec);
+            return;
+        } catch (const ResumeRestart &) {
+            if (attempt || !state.offset) throw std::runtime_error("Сервер вернул некорректный диапазон файла");
+            output.close();
+            state.offset = 0; state.validator.clear(); state.redirected = false;
+            std::error_code ec; fs::remove(metadata, ec);
+        }
+    }
 }
 void openPath(const fs::path &p) {
     ShellExecuteW(nullptr, L"open", p.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -520,6 +655,44 @@ static std::wstring env(const wchar_t *k) {
     }
     return w;
 }
+// Browser preference files can be large. Cache only their small derived status,
+// and retry transient read/parse failures instead of caching an error.
+static std::optional<std::string> profileExtensionStatus(const fs::path &path, bool firefox) {
+    struct Entry {
+        fs::file_time_type modified;
+        uintmax_t size;
+        std::optional<std::string> status;
+    };
+    using Key = std::pair<fs::path, bool>;
+    static thread_local std::map<Key, Entry> cache;
+    const Key key{path, firefox};
+    std::error_code ec;
+    const auto modified = fs::last_write_time(path, ec);
+    if (ec) { cache.erase(key); return {}; }
+    const auto size = fs::file_size(path, ec);
+    if (ec) { cache.erase(key); return {}; }
+    auto found = cache.find(key);
+    if (found != cache.end() && found->second.modified == modified && found->second.size == size)
+        return found->second.status;
+    try {
+        const auto data = Json::parse(readFile(path, firefox ? 16 * 1024 * 1024 : 64 * 1024 * 1024));
+        std::optional<std::string> status;
+        if (firefox) {
+            for (const auto &addon : data.value("addons", Json::array()))
+                if (str(addon, "id") == FirefoxId) { status = "Расширение " + str(addon, "version"); break; }
+        } else {
+            const auto present = extensionPresence(data);
+            if (present.installed)
+                status = present.enabledKnown && !present.enabled ? "Расширение установлено · выключено" : "Расширение установлено";
+        }
+        if (cache.size() >= 512 && found == cache.end()) cache.clear();
+        cache.insert_or_assign(key, Entry{modified, size, status});
+        return status;
+    } catch (...) {
+        cache.erase(key);
+        return {};
+    }
+}
 std::vector<Browser> discoverBrowsers() {
     std::set<std::wstring> running;
     Handle processes(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
@@ -572,21 +745,10 @@ std::vector<Browser> discoverBrowsers() {
             auto inspect = [&](fs::path p) {
                 std::string status = "Расширение не найдено";
                 if (b.family == "firefox") {
-                    if (fs::exists(p / L"extensions.json")) {
-                        try {
-                            auto j = Json::parse(readFile(p / L"extensions.json", 16 * 1024 * 1024));
-                            for (auto &a : j.value("addons", Json::array()))
-                                if (str(a, "id") == FirefoxId)
-                                    status = "Расширение " + str(a, "version");
-                        } catch (...) {
-                        }
-                    }
+                    if (auto found = profileExtensionStatus(p / L"extensions.json", true)) status = *found;
                 } else {
                     for (auto filename : {L"Secure Preferences", L"Preferences"}) {
-                        try {
-                            auto present = extensionPresence(Json::parse(readFile(p / filename, 64 * 1024 * 1024)));
-                            if (present.installed) { status = present.enabledKnown && !present.enabled ? "Расширение установлено · выключено" : "Расширение установлено"; break; }
-                        } catch (...) { /* Profile may be temporarily locked or unavailable. */ }
+                        if (auto found = profileExtensionStatus(p / filename, false)) { status = *found; break; }
                     }
                     auto e = p / L"Extensions" / wide(ExtensionId);
                     if (fs::exists(e))

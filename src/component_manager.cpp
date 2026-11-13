@@ -1,14 +1,17 @@
 #include "component_manager.hpp"
+#include <array>
+#include <cctype>
 #include <iomanip>
 namespace ss {
 std::vector<int> componentVersion(const std::string &s) {
     std::smatch m;
-    if (!std::regex_search(s, m, std::regex(R"((\d{1,4})\.(\d{1,3})(?:\.(\d{1,3}))?)"))) return {};
+    static const std::regex pattern(R"((\d{1,4})\.(\d{1,3})(?:\.(\d{1,3}))?)");
+    if (!std::regex_search(s, m, pattern)) return {};
     return {std::stoi(m[1]), std::stoi(m[2]), m[3].matched ? std::stoi(m[3]) : 0};
 }
 bool componentNewer(const std::string &latest, const std::string &installed) {
     auto a=componentVersion(latest), b=componentVersion(installed);
-    return !a.empty() && (b.empty() || a>b);
+    return !a.empty() && (installed.empty() || (!b.empty() && a>b));
 }
 bool componentFilePresent(const fs::path &p) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -33,7 +36,7 @@ std::wstring terminalComponentCommand(const std::wstring &command, const fs::pat
     if (!componentFilePresent(path)) throw std::runtime_error("Компонент отсутствует в папке " + utf8(root.wstring()) + ": " + utf8(name));
     return command.substr(0,start) + quoteWide(path.wstring()) + command.substr(end);
 }
-static std::string readVersion(const fs::path &p, std::atomic_bool &stop) {
+std::string componentInstalledVersion(const fs::path &p, std::atomic_bool &stop) {
     if (!componentFilePresent(p)) return {};
     std::atomic_bool cancel{false}, done{false};
     std::thread watchdog([&] { for(int i=0;i<100 && !done && !stop;i++) Sleep(100); if(!done) cancel=true; });
@@ -44,7 +47,9 @@ static std::string readVersion(const fs::path &p, std::atomic_bool &stop) {
         done=true; watchdog.join();
         if (r.code || cancel || stop) return {};
         auto v=componentVersion(r.output);
-        if (v.empty()) return {};
+        // A tool may run successfully yet report an unparseable development
+        // version. Do not mistake it for a missing tool and overwrite it.
+        if (v.empty()) return "unknown";
         return std::to_string(v[0])+"."+std::to_string(v[1])+"."+std::to_string(v[2]);
     } catch (...) { done=true; watchdog.join(); return {}; }
 }
@@ -65,9 +70,10 @@ std::vector<uint64_t> componentFingerprint(const fs::path &root) {
 std::vector<Component> refreshInstalledComponents(const fs::path &root, std::vector<Component> v, std::atomic_bool &stop) {
     if (v.size() != 4) v = {{"yt-dlp"},{"FFmpeg"},{"FFprobe"},{"Deno"}};
     for (size_t i=0;i<v.size();i++) {
-        auto &c=v[i]; c.installed=readVersion(root/componentFiles[i],stop);
+        auto &c=v[i]; c.installed=componentInstalledVersion(root/componentFiles[i],stop);
         c.update=!c.latest.empty() && (c.installed.empty() || componentNewer(c.latest,c.installed));
-        if(c.latest.empty()) c.status=c.installed.empty()?"Не установлен · выпуск не проверен":"Установлен · выпуск не проверен";
+        if(!c.installed.empty() && componentVersion(c.installed).empty()) c.status="Версия неизвестна · автоматическое обновление отключено";
+        else if(c.latest.empty()) c.status=c.installed.empty()?"Не установлен · выпуск не проверен":"Установлен · выпуск не проверен";
         else c.status=c.installed.empty()?"Не установлен":c.update?"Доступно обновление":"Актуальная версия";
     }
     if (!v[1].latest.empty() && ((!v[1].installed.empty() && componentNewer(v[1].installed,v[1].latest)) ||
@@ -203,7 +209,7 @@ static void installGroup(const fs::path &root,const Component &c,const std::vect
             if(extracted!=stage/n) fs::rename(extracted,stage/n);
         }
     }
-    for(const auto &n:names) { auto version=readVersion(stage/n,stop); if(version.empty() || componentVersion(version)!=componentVersion(c.latest)) throw std::runtime_error("Скачанный компонент не запускается или его версия не совпадает: "+utf8(n)); }
+    for(const auto &n:names) { auto version=componentInstalledVersion(stage/n,stop); if(version.empty() || componentVersion(version)!=componentVersion(c.latest)) throw std::runtime_error("Скачанный компонент не запускается или его версия не совпадает: "+utf8(n)); }
     if (progress) progress({c.name, ComponentPhase::Installing, 0, 0});
     try { replaceTools(root,stage,names); }
     catch (const std::exception &e) {
@@ -229,5 +235,85 @@ void installComponents(const fs::path &root,const std::vector<Component> &items,
     if(items[1].update || items[2].update) attempt(items[1],{L"ffmpeg.exe",L"ffprobe.exe"});
     if(items[3].update) attempt(items[3],{L"deno.exe"});
     if (!errors.empty()) throw std::runtime_error(errors);
+}
+size_t installBundledComponents(const fs::path &root, const fs::path &bundle, std::atomic_bool &stop) {
+    const DWORD bundleAttributes=GetFileAttributesW(bundle.c_str());
+    if(bundleAttributes==INVALID_FILE_ATTRIBUTES || !(bundleAttributes&FILE_ATTRIBUTE_DIRECTORY) ||
+       (bundleAttributes&FILE_ATTRIBUTE_REPARSE_POINT) || !componentFilePresent(bundle/L"checksums.json"))
+        throw std::runtime_error("Комплект компонентов отсутствует или недоступен");
+    auto manifest=Json::parse(readFile(bundle/L"checksums.json",1024*1024));
+    if(manifest.is_object() && manifest.contains("files"))manifest=manifest["files"];
+    if(!manifest.is_object())throw std::runtime_error("Некорректный список контрольных сумм комплекта");
+    fs::create_directories(root);
+    const DWORD rootAttributes=GetFileAttributesW(root.c_str());
+    if(rootAttributes==INVALID_FILE_ATTRIBUTES || !(rootAttributes&FILE_ATTRIBUTE_DIRECTORY) || (rootAttributes&FILE_ATTRIBUTE_REPARSE_POINT))
+        throw std::runtime_error("Папка компонентов недоступна или является ссылкой");
+    static std::atomic_uint64_t serial{0};
+    const auto stage=root/(L"bundle-stage-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++serial));
+    if(!CreateDirectoryW(stage.c_str(),nullptr))throw std::runtime_error("Не удалось подготовить временную папку компонентов");
+    struct Cleanup {
+        fs::path dir;
+        ~Cleanup() {
+            std::error_code ec;
+            for(auto name:componentFiles) {
+                // Windows may briefly retain an executable after the version
+                // probe exits. Retry its deletion without touching other files.
+                for(int attempt=0;attempt<10;++attempt) {
+                    fs::remove(dir/name,ec);
+                    if(!ec)break;
+                    Sleep(20);
+                }
+            }
+            fs::remove(dir,ec);
+        }
+    } cleanup{stage};
+    std::array<std::string,4> versions;
+    std::array<bool,4> installed{};
+    for(size_t i=0;i<versions.size();++i) {
+        if(stop)throw std::runtime_error("Установка компонентов отменена");
+        const auto name=componentFiles[i];
+        const auto entry=manifest.find(utf8(name));
+        if(entry==manifest.end())throw std::runtime_error("В комплекте отсутствует контрольная сумма компонента: "+utf8(name));
+        const Json *value=&*entry;
+        if(value->is_object()) {
+            auto sum=value->find("sha256");
+            if(sum==value->end())throw std::runtime_error("В комплекте отсутствует контрольная сумма компонента: "+utf8(name));
+            value=&*sum;
+        }
+        if(!value->is_string())throw std::runtime_error("Некорректная контрольная сумма компонента: "+utf8(name));
+        auto expected=value->get<std::string>();
+        if(expected.size()!=64 || !std::all_of(expected.begin(),expected.end(),[](unsigned char c){return std::isxdigit(c)!=0;}))
+            throw std::runtime_error("Некорректная контрольная сумма компонента: "+utf8(name));
+        std::transform(expected.begin(),expected.end(),expected.begin(),[](unsigned char c){return char(std::tolower(c));});
+        const auto source=bundle/name, staged=stage/name, target=root/name;
+        if(!componentFilePresent(source) || !CopyFileW(source.c_str(),staged.c_str(),TRUE) || sha256(staged)!=expected)
+            throw std::runtime_error("Проверка компонента из комплекта не пройдена: "+utf8(name));
+        versions[i]=componentInstalledVersion(staged,stop);
+        if(stop || versions[i].empty())throw std::runtime_error("Компонент из комплекта не запускается: "+utf8(name));
+        const DWORD targetAttributes=GetFileAttributesW(target.c_str());
+        installed[i]=targetAttributes!=INVALID_FILE_ATTRIBUTES;
+        if(installed[i] && !componentFilePresent(target))
+            throw std::runtime_error("Существующий компонент недоступен или является ссылкой: "+utf8(name));
+    }
+    // FFmpeg and FFprobe come from one build. Never silently combine an
+    // existing executable with an incompatible bundled partner.
+    const auto bundledFfmpeg=componentVersion(versions[1]), bundledFfprobe=componentVersion(versions[2]);
+    if(bundledFfmpeg.empty() || bundledFfmpeg!=bundledFfprobe)
+        throw std::runtime_error("Версии FFmpeg и FFprobe в комплекте не совпадают");
+    if(installed[1]!=installed[2]) {
+        const size_t existing=installed[1]?1:2;
+        const auto current=componentVersion(componentInstalledVersion(root/componentFiles[existing],stop));
+        if(current.empty() || current!=bundledFfmpeg)
+            throw std::runtime_error("Установленный FFmpeg или FFprobe несовместим с комплектом");
+    }
+    size_t count=0;
+    for(size_t i=0;i<versions.size();++i) {
+        if(stop)throw std::runtime_error("Установка компонентов отменена");
+        if(installed[i])continue;
+        if(!MoveFileW((stage/componentFiles[i]).c_str(),(root/componentFiles[i]).c_str()))
+            throw std::runtime_error("Не удалось установить компонент из комплекта: "+utf8(componentFiles[i]));
+        ++count;
+    }
+    return count;
 }
 }

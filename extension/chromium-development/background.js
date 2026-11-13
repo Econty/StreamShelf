@@ -12,14 +12,16 @@ function scheduleReconnect(){
   api.alarms.create('streamshelf-reconnect',{delayInMinutes:Math.max(0.5,delay/60000)});
   reconnectTimer=setTimeout(()=>{reconnectTimer=null;if(!port)connect(false).catch(()=>scheduleReconnect());},delay);
 }
-let selectionSequence = 0, scanId = 0;
+let selectionSequence = 0, scanId = 0, sourceId = 0, baselineSource = -1, cookieBaseline = null, activeCookieStore = null;
 const resources = new Map(), requests = new Map(), segments = new Map();let pageHeaders={};
 function send(message) { if(port) { try { port.postMessage(message); } catch { lastError=tr('Связь с приложением потеряна','Connection to StreamShelf was lost'); } } }
 function cleanUrl(value) { try { const u=new URL(value); return ['http:','https:'].includes(u.protocol)&&!u.username&&!u.password?u.href:null; } catch {return null;} }
 function classify(url,mime='') {
   let path,u;try {u=new URL(url);path=u.pathname.toLowerCase();}catch{return null;}
   mime=String(mime).toLowerCase().split(';')[0].trim();
-  if(/^(text\/html|text\/css|(?:application|text)\/(?:json|javascript|xml)|font\/)/.test(mime))return null;
+  if(/^(text\/html|text\/css|(?:application|text)\/(?:json|javascript)|font\/)/.test(mime))return null;
+  // Generic XML is commonly used for DASH. Keep rejecting other XML pages.
+  if(/^(?:application|text)\/xml(?:$|\+)/.test(mime)&&!path.endsWith('.mpd'))return null;
   if(!mime||mime==='application/octet-stream'){
     const declared=u.searchParams.get('mime')||u.searchParams.get('type')||'';
     if(/^(video|audio)\/[a-z0-9.+-]+$/i.test(declared)||/^(application\/(vnd\.apple\.mpegurl|x-mpegurl|dash\+xml))$/i.test(declared))mime=declared.toLowerCase();
@@ -37,17 +39,54 @@ function classify(url,mime='') {
 function serializeCookies(cookies) {
   return cookies.map(c=>({domain:c.domain,path:c.path,name:c.name,value:c.value,secure:c.secure,httpOnly:c.httpOnly,expirationDate:c.expirationDate??null,partitioned:!!c.partitionKey||!!c.firstPartyDomain}));
 }
-async function cookiesForTab(target, tab) {
-  const options={url:target};
-  if(tab.cookieStoreId) options.storeId=tab.cookieStoreId;
-  else if(api.cookies.getAllCookieStores) {
+async function cookieStoreForTab(tab) {
+  if(tab.cookieStoreId)return tab.cookieStoreId;
+  if(api.cookies.getAllCookieStores) {
     const stores=await api.cookies.getAllCookieStores();
     const store=stores.find(entry=>entry.tabIds?.includes(tab.id));
     if(!store)throw new Error(tr('Не удалось определить хранилище cookies вкладки','Could not identify the tab cookie store'));
-    options.storeId=store.id;
+    return store.id;
   } else if(tab.incognito) throw new Error(tr('Не удалось определить хранилище cookies приватной вкладки','Could not identify the private tab cookie store'));
+  return null;
+}
+async function cookiesForTab(target, tab, knownStore) {
+  const options={url:target};
+  const store=knownStore===undefined?await cookieStoreForTab(tab):knownStore;
+  if(store)options.storeId=store;
   return api.cookies.getAll(options);
 }
+function cookieFingerprint(cookies) {
+  return JSON.stringify(cookies.map(c=>JSON.stringify([c.domain,c.path,c.name,c.value,!!c.secure,!!c.httpOnly,c.partitionKey||null,c.firstPartyDomain||null])).sort());
+}
+function relevantCookie(cookie) {
+  if(activeCookieStore && cookie?.storeId && activeCookieStore!==cookie.storeId)return false;
+  const domain=String(cookie?.domain||'').replace(/^\./,'').toLowerCase();
+  if(!domain)return true;
+  // Partition keys identify the top-level site, not the resource host. If the
+  // key cannot be interpreted, stay conservative and invalidate the snapshot.
+  const firstParty=cookie?.partitionKey?.topLevelSite||cookie?.firstPartyDomain;
+  if(firstParty&&pageUrl)try{
+    const top=new URL(pageUrl).hostname.toLowerCase();
+    const site=(String(firstParty).includes('://')?new URL(firstParty).hostname:String(firstParty)).replace(/^\./,'').toLowerCase();
+    if(site&&top!==site&&!top.endsWith('.'+site))return false;
+  }catch{}
+  const path=typeof cookie?.path==='string'&&cookie.path.startsWith('/')?cookie.path:'/';
+  return [pageUrl,...resources.keys()].some(url=>{try{
+    const parsed=new URL(url),host=parsed.hostname.toLowerCase(),requestPath=parsed.pathname||'/';
+    const domainMatches=host===domain||(!cookie.hostOnly&&host.endsWith('.'+domain));
+    const pathMatches=requestPath===path||(requestPath.startsWith(path)&&(path.endsWith('/')||requestPath[path.length]==='/'));
+    return domainMatches&&pathMatches&&(!cookie.secure||parsed.protocol==='https:');
+  }catch{return false;}});
+}
+function invalidateCookieSource() {
+  if(tabId===null)return;
+  ++sourceId;baselineSource=-1;cookieBaseline=null;
+  if(scanning)api.tabs.sendMessage(tabId,{type:'stopDom',scanId}).catch(()=>{});
+  scanning=false;resources.clear();requests.clear();segments.clear();pageHeaders={};
+  send({type:'scanState',scanId,scanning:false,tabId,message:tr('Доступ к сайту изменился. Запустите анализ заново.','Site credentials changed. Analyze the page again.')});
+  announce().catch(()=>{});
+}
+api.cookies?.onChanged?.addListener(change=>{if(relevantCookie(change?.cookie))invalidateCookieSource();});
 function found(url,mime='',size=null,source='Сеть',drm=false,thumbnail='',title='',requestHeaders=null) {
   url=cleanUrl(url);if(!url||url.length>16000)return;
   const kind=classify(url,mime);if(!kind)return;if(kind==='Сегмент'){const u=new URL(url);const group=u.origin+u.pathname.slice(0,u.pathname.lastIndexOf('/')+1);const n=(segments.get(group)||0)+1;segments.set(group,n);if(n===1||n%20===0)send({type:'notice',message:tr(`Обнаружены сегменты потока: ${n}. Ищите исходный HLS/DASH-манифест.`,`Detected ${n} stream segments. Look for the original HLS/DASH manifest.`)});return;}
@@ -58,7 +97,7 @@ function found(url,mime='',size=null,source='Сеть',drm=false,thumbnail='',ti
   }
   const old=resources.get(url);const item={url,mime:mime||old?.mime||'',kind,size:size??old?.size??null,source,drm:drm||old?.drm||kind.startsWith('DRM'),thumbnail:cleanUrl(thumbnail)||old?.thumbnail||'',title:title||old?.title||'',time:Date.now()};
   resources.set(url,{...old,...item,...(requestHeaders?{headers:requestHeaders}:{})});
-  if(!old||old.mime!==item.mime||old.size!==item.size||old.thumbnail!==item.thumbnail||old.title!==item.title)send({type:'resource',scanId,tabId,pageUrl,item});
+  if(!old||old.mime!==item.mime||old.size!==item.size||old.thumbnail!==item.thumbnail||old.title!==item.title)send({type:'resource',scanId,tabId,pageUrl,sourceId,item});
 }
 async function connect(allowLaunch=true) {
   if(port)return;
@@ -68,15 +107,25 @@ async function connect(allowLaunch=true) {
   const opened=api.runtime.connectNative('dev.streamshelf.connector');port=opened;
   opened.onDisconnect.addListener(()=>{if(port!==opened)return;if(scanning&&tabId!==null)api.tabs.sendMessage(tabId,{type:'stopDom',scanId}).catch(()=>{});lastError=opened.error?.message||api.runtime.lastError?.message||tr('Приложение отключено','StreamShelf disconnected');port=null;appLanguage=null;scanning=false;requests.clear();resources.clear();scheduleReconnect();});
   opened.onMessage.addListener(message=>{handleCommand(message).catch(e=>send({type:'error',requestId:message.requestId,message:e.message}));});
-  send({type:'hello',protocol:1,version:VERSION,instanceId,browser:navigator.userAgent,allowLaunch,capabilities:['network','dom','cookies','tabReload','language']});
+  send({type:'hello',protocol:1,version:VERSION,instanceId,browser:navigator.userAgent,allowLaunch,capabilities:['network','dom','cookies','tabReload','language','scopedCredentials']});
   if(tabId===null){const tabs=await api.tabs.query({active:true,lastFocusedWindow:true}).catch(()=>[]);if(tabs[0])await selectActiveTab(tabs[0].id);}
   if(tabId!==null)await announce();
   })();
   try { await connecting; } finally { connecting=null; }
 }
 async function announce() {
-  if(tabId===null)return;const t=await api.tabs.get(tabId);pageUrl=cleanUrl(t.url)||'';
-  send({type:'tabSelected',tabId,url:pageUrl,title:t.title||'',storeId:t.cookieStoreId||null});
+  if(tabId===null)return;
+  const selected=tabId, sequence=selectionSequence, source=sourceId;
+  const t=await api.tabs.get(selected);
+  if(tabId!==selected || selectionSequence!==sequence || sourceId!==source || !t || t.id!==selected)return;
+  pageUrl=cleanUrl(t.url)||'';
+  if((baselineSource!==source || cookieBaseline===null) && pageUrl) {
+    let snapshot=null,store=null;
+    try {store=await cookieStoreForTab(t);snapshot=cookieFingerprint(await cookiesForTab(pageUrl,t,store));} catch {}
+    if(tabId!==selected || selectionSequence!==sequence || sourceId!==source)return;
+    baselineSource=source;cookieBaseline=snapshot;activeCookieStore=store;
+  }
+  send({type:'tabSelected',tabId:selected,url:pageUrl,title:t.title||'',storeId:t.cookieStoreId||null,sourceId:source});
 }
 async function selectActiveTab(id) {
   const sequence=++selectionSequence;
@@ -87,10 +136,11 @@ async function selectActiveTab(id) {
     api.tabs.sendMessage(tabId,{type:'stopDom',scanId}).catch(()=>{});
   if(!cleanUrl(tab.url)) {
     if(scanning)send({type:'scanState',scanId,scanning:false,tabId,message:tr('Вкладка изменилась. Запустите анализ заново.','The tab changed. Start the analysis again.')});
-    tabId=null;pageUrl='';scanning=false;resources.clear();requests.clear();segments.clear();pageHeaders={};
+    tabId=null;pageUrl='';activeCookieStore=null;scanning=false;resources.clear();requests.clear();segments.clear();pageHeaders={};
     send({type:'tabClosed'});return;
   }
   if(tabId!==tab.id){
+    ++sourceId;activeCookieStore=null;
     if(scanning)send({type:'scanState',scanId,scanning:false,tabId,message:tr('Вкладка изменилась. Запустите анализ заново.','The tab changed. Start the analysis again.')});
     scanning=false;resources.clear();requests.clear();segments.clear();pageHeaders={};
   }
@@ -129,18 +179,36 @@ async function handleCommand(m) {
   if(m.type==='scanStart') {
     const id=Number(m.scanId)||0;if(id<scanId)return;scanId=id;
     if(tabId===null||m.tabId!==tabId)throw new Error(tr('Откройте страницу с медиа в браузере и вернитесь в StreamShelf','Open a media page in your browser and return to StreamShelf'));
-    await announce();if(scanId!==id)return;resources.clear();requests.clear();segments.clear();pageHeaders={};scanning=true;
-    send({type:'scanState',scanId,scanning:true,tabId});await inject();if(m.reload&&scanning&&scanId===id)await api.tabs.reload(tabId);return;
+    const selected=tabId, sequence=selectionSequence, source=sourceId;
+    await announce();if(scanId!==id || tabId!==selected || selectionSequence!==sequence || sourceId!==source)return;
+    resources.clear();requests.clear();segments.clear();pageHeaders={};scanning=true;
+    send({type:'scanState',scanId,scanning:true,tabId:selected});await inject();
+    if(m.reload&&scanning&&scanId===id&&tabId===selected&&sourceId===source)await api.tabs.reload(selected);return;
   }
   if(m.type==='scanStop') {const id=Number(m.scanId)||0;if(id<scanId)return;scanId=id;scanning=false;requests.clear();if(tabId!==null)await api.tabs.sendMessage(tabId,{type:'stopDom',scanId:id}).catch(()=>{});if(scanId===id)send({type:'scanState',scanId,scanning:false,tabId});return;}
   if(m.type==='credentials') {
     if(m.tabId!==tabId||tabId===null)throw new Error(tr('Вкладка изменилась','The tab changed'));
-    const t=await api.tabs.get(tabId),current=cleanUrl(t.url),target=cleanUrl(m.url);
+    const selected=tabId, sequence=selectionSequence, source=sourceId, sourcePage=pageUrl;
+    const unchanged=()=>tabId===selected && selectionSequence===sequence && sourceId===source && (m.sourceId===undefined || m.sourceId===source);
+    if(!unchanged())throw new Error(tr('Источник страницы изменился','The page source changed'));
+    const t=await api.tabs.get(selected);
+    if(!unchanged() || !t || t.id!==selected || (m.storeId && t.cookieStoreId!==m.storeId))throw new Error(tr('Вкладка изменилась','The tab changed'));
+    const current=cleanUrl(t.url),target=cleanUrl(m.url);
+    if(!current || current!==sourcePage)throw new Error(tr('Адрес вкладки изменился','The tab URL changed'));
     if(!target||!(target===current||resources.has(target)))throw new Error(tr('Ресурс не относится к выбранной вкладке','The resource does not belong to the selected tab'));
-    const cookies=await cookiesForTab(target,t);
+    const headers=resources.get(target)?.headers||(target===current?pageHeaders:{'User-Agent':navigator.userAgent,'Referer':current});
+    if(baselineSource!==source || cookieBaseline===null)throw new Error(tr('Снимок доступа недоступен. Повторите анализ.','The credential snapshot is unavailable. Analyze the page again.'));
+    const pageCookies=await cookiesForTab(sourcePage,t);
+    if(!unchanged())throw new Error(tr('Вкладка изменилась','The tab changed'));
+    if(cookieFingerprint(pageCookies)!==cookieBaseline){invalidateCookieSource();throw new Error(tr('Доступ к сайту изменился','Site credentials changed'));}
+    const cookies=target===sourcePage?pageCookies:await cookiesForTab(target,t);
+    const confirmed=await cookiesForTab(sourcePage,t);
+    if(!unchanged())throw new Error(tr('Вкладка изменилась','The tab changed'));
+    if(cookieFingerprint(confirmed)!==cookieBaseline){invalidateCookieSource();throw new Error(tr('Доступ к сайту изменился','Site credentials changed'));}
+    const after=await api.tabs.get(selected);
+    if(!unchanged() || !after || after.id!==selected || cleanUrl(after.url)!==sourcePage || (t.cookieStoreId||null)!==(after.cookieStoreId||null))throw new Error(tr('Вкладка изменилась','The tab changed'));
     // Preserve partition metadata; the application must reject loss-prone Netscape conversion.
-    send({type:'credentialsResult',requestId:m.requestId,url:m.url,cookies:serializeCookies(cookies),
-      headers:resources.get(target)?.headers||(target===current?pageHeaders:{'User-Agent':navigator.userAgent,'Referer':current})});return;
+    send({type:'credentialsResult',requestId:m.requestId,url:m.url,tabId:selected,sourceId:source,storeId:t.cookieStoreId||null,cookies:serializeCookies(cookies),headers});return;
   }
   throw new Error(tr('Команда не поддерживается','Unsupported command'));
 }
@@ -163,6 +231,8 @@ const captureRequestHeaders=d=>{
   if(!scanning||d.tabId!==tabId)return;
   if(requests.size>2000)requests.clear();
   const headers={};for(const h of d.requestHeaders||[]){const key={'user-agent':'User-Agent','referer':'Referer','authorization':'Authorization','origin':'Origin'}[h.name.toLowerCase()];if(key&&h.value)headers[key]=h.value;}
+  const previous=resources.get(cleanUrl(d.url))?.headers;
+  if(previous && (previous.Authorization||headers.Authorization) && previous.Authorization!==headers.Authorization){invalidateCookieSource();return;}
   requests.set(d.requestId,{url:d.url,headers,scanId});
 };
 try { api.webRequest.onBeforeSendHeaders.addListener(captureRequestHeaders,{urls:['http://*/*','https://*/*']},['requestHeaders','extraHeaders']); }
@@ -186,11 +256,12 @@ api.tabs.onUpdated.addListener((id,change,tab)=>{
   }
   if(id!==tabId)return;
   if(change.url && !cleanUrl(change.url)){selectActiveTab(id).catch(()=>{});return;}
-  if(change.url && pageUrl && cleanUrl(change.url) && cleanUrl(change.url).split('#')[0]===pageUrl.split('#')[0]){pageUrl=cleanUrl(change.url);announce().catch(()=>{});return;}
-  if(change.url){scanning=false;resources.clear();requests.clear();pageUrl=cleanUrl(change.url)||'';send({type:'scanState',scanId,scanning:false,tabId,message:tr('Адрес вкладки изменился. Запустите поиск заново.','The tab URL changed. Start the search again.')});announce().catch(()=>{});}
+  if(change.url && pageUrl && cleanUrl(change.url) && cleanUrl(change.url).split('#')[0]===pageUrl.split('#')[0]){if(cleanUrl(change.url)!==pageUrl)++sourceId;pageUrl=cleanUrl(change.url);announce().catch(()=>{});return;}
+  if(change.url){++sourceId;if(scanning)api.tabs.sendMessage(id,{type:'stopDom',scanId}).catch(()=>{});scanning=false;resources.clear();requests.clear();segments.clear();pageHeaders={};pageUrl=cleanUrl(change.url)||'';send({type:'scanState',scanId,scanning:false,tabId,message:tr('Адрес вкладки изменился. Запустите поиск заново.','The tab URL changed. Start the search again.')});announce().catch(()=>{});}
+  if(change.status==='loading'&&!change.url){++sourceId;announce().catch(()=>{});}
   if(change.status==='complete'&&scanning)inject();
 });
-api.tabs.onRemoved.addListener(id=>{if(id===tabId){tabId=null;scanning=false;resources.clear();requests.clear();send({type:'tabClosed'});}});
+api.tabs.onRemoved.addListener(id=>{if(id===tabId){++selectionSequence;++sourceId;tabId=null;activeCookieStore=null;scanning=false;resources.clear();requests.clear();send({type:'tabClosed'});}});
 // The browser may dismiss the action popup as the permission dialog closes.
 // Observe the grant in the service worker as well, so setup does not depend on
 // the popup's continuation surviving that transition.

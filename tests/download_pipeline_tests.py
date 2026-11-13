@@ -7,9 +7,14 @@ import pathlib
 import subprocess
 import tempfile
 import threading
+import sys
 
-tools = pathlib.Path(os.environ['LOCALAPPDATA']) / 'StreamShelfNative' / 'tools'
+tools = pathlib.Path(os.environ.get('STREAMSHELF_TEST_TOOLS',
+    str(pathlib.Path(os.environ.get('LOCALAPPDATA', '')) / 'StreamShelfNative' / 'tools')))
 ffmpeg, ffprobe, ytdlp = (tools / name for name in ('ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe'))
+if not all(path.is_file() for path in (ffmpeg, ffprobe, ytdlp)):
+    print(f'SKIP: yt-dlp, FFmpeg and FFprobe are required in {tools}')
+    sys.exit(77)
 
 def run(args, timeout=45):
     return subprocess.run([str(x) for x in args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,

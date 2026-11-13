@@ -32,12 +32,28 @@ cmake --install build/release --prefix release/StreamShelf-Native
 ./scripts/Build.ps1 -Preset release
 ```
 
+After a successful release staging, compile the Windows installer with Inno Setup:
+
+```powershell
+iscc .\scripts\StreamShelf-Setup.iss
+```
+
+The installer is written to `release/StreamShelf-Setup-v2026.11.1-Beta.exe`.
+
+To stage the explicitly limited beta without a signed Firefox connector, use:
+
+```powershell
+./scripts/Build.ps1 -Preset release -BetaWithoutFirefox
+```
+
+For a direct CMake build, configure with `-DSTREAMSHELF_BETA_WITHOUT_FIREFOX=ON` and install to a new, empty staging directory. This beta does not include a signed Firefox XPI; permanent Firefox installation is unavailable until Mozilla signs Connector 1.0.5. For a normal release, configure with `-DSTREAMSHELF_BETA_WITHOUT_FIREFOX=OFF` and provide the signed XPI.
+
 To disable tests, use a separate build directory, for example `cmake -S . -B build/app -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF`. The C++ runtime is linked statically by default; `-DSTREAMSHELF_STATIC_RUNTIME=OFF` selects the dynamic runtime. A distributed dynamic build requires compatible runtime DLLs or the appropriate Microsoft Visual C++ Redistributable. Check the package on a clean machine.
 
 The interactive extension setup guide test requires an available desktop and is enabled with the CMake option `-DSTREAMSHELF_NATIVE_GUIDE_TESTS=ON`. It is not part of the regular CI. CMake presets and `scripts/Build.ps1` are the supported build path.
 
 ## Tools and browser extensions
 
-StreamShelf installs yt-dlp, FFmpeg/FFprobe, and Deno through **Settings → Components** into `%LOCALAPPDATA%\StreamShelfNative\tools`. It does not use copies from `bundled-tools` as installed components. See the [README](README.md) and [third-party notices](THIRD_PARTY.md) (Russian).
+StreamShelf manages yt-dlp, FFmpeg/FFprobe, and Deno in `%LOCALAPPDATA%\StreamShelfNative\tools`. A package built with `scripts/Build.ps1 -IncludeTools` offers **Settings → Components → Install bundled tools**: the user can explicitly import missing files without network access. StreamShelf checks the bundled SHA-256 manifest and executable versions again and does not replace existing tools. Bundled copies are not used directly or restored automatically. See the [README](README.md) and [third-party notices](THIRD_PARTY.md) (Russian).
 
-The package includes the Chromium extension source and a signed Firefox XPI. Changing the Firefox source does not automatically update the signed XPI: a new signed version is required for release. See [Firefox signing](FIREFOX-SIGNING.md). Verify installation, tests, and media downloads on Windows for the actual build; [VERIFICATION.md](VERIFICATION.md) is not a substitute for checking the current commit.
+A normal release includes the Chromium extension source and a signed Firefox XPI matching the current connector source. The available 1.0.4 XPI is outdated: Mozilla must sign version 1.0.5, as described in [Firefox signing](FIREFOX-SIGNING.md). Normal Release `cmake --install` checks the source, file digests, cryptographic signature and certificate chain; this check requires Python 3 and Windows PowerShell and does not check revocation offline. The explicit beta option above stages without a signed Firefox XPI. Confirm installation in Firefox separately when a signed XPI becomes available. Debug installation remains available without the XPI. Verify installation, tests, and media downloads on Windows for the actual build; [VERIFICATION.md](VERIFICATION.md) is not a substitute for checking the current commit.

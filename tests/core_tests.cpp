@@ -52,6 +52,15 @@ int main() {
         }
         check(str(second.items[0].data, "description") == "second description", "second analysis has independent snapshot");
     });
+    test("Media names remain bound to their own page", [] {
+        const auto format = Json{{"format_id", "137"}, {"format_note", "1080p"}, {"url", "https://example.com/v.mp4"}, {"vcodec", "h264"}, {"acodec", "aac"}};
+        auto first = parseAnalysis(Json{{"title", "First video"}, {"formats", Json::array({format})}}, "https://example.com/first");
+        auto second = parseAnalysis(Json{{"title", "Second video"}, {"formats", Json::array({format})}}, "https://example.com/second");
+        check(first.items[0].sourceTitle == "First video" && second.items[0].sourceTitle == "Second video", "page title is stored per item");
+        check(mediaJobTitle(first.items[0]) == "First video · 1080p", "first page remains in output title");
+        check(mediaJobTitle(second.items[0]) == "Second video · 1080p", "second page has its own output title");
+        check(mediaSearchText("en", first.items[0]).find("First video") != std::string::npos, "page title is searchable");
+    });
     test("Firefox guide follows current evidence and requires a verified connection", [] {
         check(firefoxPickerAction(false, false, false, false) == FirefoxPickerAction::Navigate, "Firefox picker opens the XPI parent folder");
         check(firefoxPickerAction(false, true, false, false) == FirefoxPickerAction::SelectFile, "Firefox picker highlights the XPI without navigating again");
@@ -276,6 +285,14 @@ int main() {
          [] { check(quoteWide(L"a\"b") == L"\"a\\\"b\"", "Embedded quote"); });
     test("URLs accept HTTPS signed resources",
          [] { check(httpUrl("https://example.com/a.m3u8?token=x"), "Valid URL"); });
+    test("URLs accept @ outside authority but reject user information", [] {
+        check(httpUrl("https://www.tiktok.com/@user/video/123"), "TikTok path");
+        check(httpUrl("https://www.youtube.com/@channel"), "YouTube channel path");
+        check(httpUrl("https://example.com/?email=a@b#@fragment"), "query and fragment");
+        check(!httpUrl("https://user:pass@example.com/@channel"), "credentials in authority");
+        check(!httpUrl("https://example.com\\@evil.test/path"), "backslash in authority");
+        check(!httpUrl("https:///missing-host") && !httpUrl("https://?query"), "empty authority");
+    });
     test("URLs reject unsupported scheme and injected whitespace", [] {
         check(!httpUrl("file:///C:/x") && !httpUrl("https://a.com/\nx") &&
                   !httpUrl("https://user:pass@a.com/"),

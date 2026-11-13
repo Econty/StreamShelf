@@ -112,11 +112,12 @@ void cancelRead() {
 }
 #ifndef STREAMSHELF_BASELINE
 void identityAndRetry() {
-    check("current Firefox accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.4"}}));
+    check("current Firefox accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.5"}}));
+    check("previous Firefox accepted for manual use", compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.4"}}));
     check("Firefox guide selects the current signed package", std::wstring(SignedFirefoxConnectorFilename) == L"StreamShelf-Connector-" + wide(ConnectorVersion) + L".xpi");
     check("legacy signed Firefox accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.3"}}));
     check("old Firefox rejected", !compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.0"}}) && !compatibleExtensionHello({{"browser", "Mozilla/5.0 Firefox/140"}, {"version", "1.0.2"}}));
-    check("current Chromium accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.4"}}));
+    check("current Chromium accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.5"}}));
     check("legacy Chromium accepted", compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.3"}}));
     check("old Chromium rejected", !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.0"}}) && !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.1"}}) && !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}, {"version", "1.0.2"}}));
     check("missing version rejected", !compatibleExtensionHello({{"browser", "Mozilla/5.0 Chrome/140"}}));
@@ -145,19 +146,47 @@ void identityAndRetry() {
     check("matching pong records the time for connection expiry", session.lastPong > 0 && session.lastPong <= GetTickCount64());
     std::atomic_bool cancel{false};
     const std::string url="https://example.test/video?token=one";
+    session.scopedCredentialsSupported = true;
+    session.updateTab({{"tabId",7},{"url","https://example.test/watch"},{"storeId","store-A"},{"sourceId",uint64_t(1)}});
+    auto originalSource = session.source();
     auto request=[&](const std::string &target, Json reply) {
         auto pending=std::async(std::launch::async,[&]{return session.credentials(target,cancel);});
         auto frame=receive();
         reply["requestId"]=str(frame,"requestId");
+        if (!reply.contains("type")) reply["type"]="credentialsResult";
+        if (str(reply, "type") != "error") {
+            reply["tabId"]=7; reply["storeId"]="store-A"; reply["sourceId"]=uint64_t(1);
+            if (!reply.contains("cookies")) reply["cookies"]=Json::array();
+            if (!reply.contains("headers")) reply["headers"]=Json::object();
+        }
         session.acceptCredentialReply(reply);
         return pending.get();
     };
     auto firstSnapshot=request(url,{{"url",url},{"headers",{{"Referer","https://example.test/"}}}});
-    auto cached=request(url,{{"type","error"},{"message","tab changed"}});
-    check("exact resource snapshot survives a tab change",cached==firstSnapshot);
+    check("the initial credential snapshot is accepted",str(firstSnapshot,"url")==url);
     bool rejected=false;
+    try { request(url,{{"type","error"},{"message","tab changed"}}); }
+    catch(const BrowserSourceChanged &) { rejected=true; }
+    check("explicit extension refusal cannot reuse credentials or retry anonymously",rejected);
+    rejected=false;
+    try { request(url,{{"url","https://example.test/different"},{"headers",{{"Referer","wrong"}}}}); }
+    catch(const BrowserSourceChanged &) { rejected=true; }
+    check("mismatched credential response fails closed",rejected);
+    rejected=false;
+    try { request(url,{{"url",url},{"cookies",Json::object()}}); }
+    catch(const BrowserSourceChanged &) { rejected=true; }
+    check("malformed cookie response fails closed",rejected);
+    {
+        Session unavailable;
+        unavailable.scopedCredentialsSupported=true;
+        unavailable.updateTab({{"tabId",7},{"url","https://example.test/watch"},{"storeId","store-A"},{"sourceId",uint64_t(1)}});
+        rejected=false;
+        try { unavailable.credentials(url,cancel); } catch(const BrowserSourceChanged &) { rejected=true; }
+        check("failed credential channel cannot retry anonymously",rejected);
+    }
+    rejected=false;
     try { request("https://example.test/video?token=two",{{"type","error"},{"message","tab changed"}}); }
-    catch(const std::exception &) { rejected=true; }
+    catch(const BrowserSourceChanged &) { rejected=true; }
     check("different resource URL cannot reuse a snapshot",rejected);
     auto abandoned=std::async(std::launch::async,[&]{try { session.credentials(url,cancel); } catch (...) {} });
     auto oldRequest=receive();
@@ -166,6 +195,20 @@ void identityAndRetry() {
     { std::lock_guard lock(session.mutex); check("late cancelled replies are discarded",session.replies.empty() && session.pendingCredentials.empty()); }
     auto fresh=request(url,{{"url",url},{"headers",{{"Referer","fresh"}}}});
     check("new request succeeds after late replies",str(fresh["headers"],"Referer")=="fresh");
+
+    auto pending=std::async(std::launch::async,[&]{
+        try { session.credentials(url, originalSource, cancel); return false; }
+        catch (const BrowserSourceChanged &) { return true; }
+    });
+    auto pendingFrame=receive();
+    session.updateTab({{"tabId",8},{"url","https://example.test/watch"},{"storeId","store-B"},{"sourceId",uint64_t(2)}});
+    session.acceptCredentialReply({{"requestId",str(pendingFrame,"requestId")},{"url",url},{"tabId",7},{"storeId","store-A"},{"sourceId",uint64_t(1)}});
+    check("changing accounts while a credential request is pending fails closed",pending.get());
+    bool refused=false; try { session.credentials(url,originalSource,cancel); } catch(const BrowserSourceChanged &) { refused=true; }
+    check("old job cannot request credentials or cached data from a new account",refused);
+    session.updateTab({{"tabId",7},{"url","https://example.test/watch"},{"storeId","store-A"},{"sourceId",uint64_t(1)}});
+    refused=false; try { session.credentials(url,originalSource,cancel); } catch(const BrowserSourceChanged &) { refused=true; }
+    check("switching away and back does not revive a stale job identity",refused);
 
 }
 #endif

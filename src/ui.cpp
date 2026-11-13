@@ -17,10 +17,11 @@ float UI::to(const std::string &id, float target, float initial, float freq, flo
     s.step(dt, app.reduced ? 14 : freq, app.reduced ? 1 : damping);
     return s.value;
 }
-void UI::hit(const std::string &id, Rect r, std::function<void()> f, bool edit) {
+void UI::hit(const std::string &id, Rect r, std::function<void()> f, bool edit,
+             const std::string &name, LONG role, bool checked, bool enabled, const std::string &value) {
     r = r.move(c.offsetX, c.offsetY).intersect(c.clip());
     if (r.w > 0 && r.h > 0)
-        hits.push_back({id, r, std::move(f), edit});
+        hits.push_back({id, r, std::move(f), edit, name.empty()?id:name, value, role, checked, enabled});
 }
 float UI::hover(const std::string &id, Rect r) {
     bool enabled = overlayInput || (app.modalTitle.empty() && !menuOpen);
@@ -57,10 +58,13 @@ void UI::button(const std::string &id, Rect r, const std::string &s, std::functi
     float x = box.x + std::max(9.f, (box.w - c.measure(s, 12.5f)) / 2);
     label(id + ":label", s, x, box.y + box.h / 2 + 4.5f, 12.5f, (primary ? hex(0x102821) : text).alpha(a),
           box.w - 18);
-    if (enabled)
-        hit(id, r, std::move(f));
+    auto name=s;
+    if(id=="min")name=tr("Свернуть окно", "Minimize window");
+    else if(id=="max")name=tr("Развернуть или восстановить окно", "Maximize or restore window");
+    else if(id=="close")name=tr("Закрыть окно", "Close window");
+    hit(id,r,enabled?std::move(f):std::function<void()>{},false,name,ROLE_SYSTEM_PUSHBUTTON,false,enabled);
 }
-void UI::check(const std::string &id, Rect r, bool on, std::function<void()> f) {
+void UI::check(const std::string &id, Rect r, bool on, std::function<void()> f, const std::string &name) {
     float h = hover(id, r), p = to(id + ":press", down && capture && capture->id == id ? 1 : 0),
           v = to(id + ":check", on ? 1 : 0, on ? 1 : 0, 5, .8f);
     auto box = Rect{r.x + 4, r.y + (r.h - 19) / 2, 19, 19}.scale(1 - p * .1f + h * .06f);
@@ -73,15 +77,15 @@ void UI::check(const std::string &id, Rect r, bool on, std::function<void()> f) 
             c.line(box.x + 8, box.y + 14, box.x + 8 + 7 * t, box.y + 14 - 9 * t, 2, hex(0x112c25, v));
         }
     }
-    hit(id, r, std::move(f));
+    hit(id,r,std::move(f),false,name,ROLE_SYSTEM_CHECKBUTTON,on);
 }
-void UI::toggle(const std::string &id, Rect r, bool on, std::function<void()> f) {
+void UI::toggle(const std::string &id, Rect r, bool on, std::function<void()> f, const std::string &name) {
     float h = hover(id, r), v = to(id + ":toggle", on ? 1 : 0, on ? 1 : 0, 5, .8f),
           p = to(id + ":press", down && capture && capture->id == id ? 1 : 0);
     c.glow({r.x - 8, r.y - 8, r.w + 16, r.h + 16}, accent.alpha(h * .1f));
     c.rect(r, r.h / 2, mix(hex(0x334158), accent, v));
     c.circle(r.x + r.h / 2 + v * (r.w - r.h), r.y + r.h / 2, (r.h / 2 - 3) * (1 + p * .08f), hex(0xf4fffd));
-    hit(id, r, std::move(f));
+    hit(id,r,std::move(f),false,name,ROLE_SYSTEM_CHECKBUTTON,on);
 }
 static std::vector<std::pair<std::string,std::string>> terminalCompletions(const std::string &value) {
     static const std::vector<std::string> commands={
@@ -160,6 +164,15 @@ void UI::input(const std::string &id, Rect r, std::string &value, const std::str
         }
     }
     bool f = focus == id;
+    const auto context = inputContext();
+    if (f && editingContext != context) {
+        cancelInput();
+        f = false;
+    }
+    // Background callbacks can reallocate a constructor's source vector.
+    // Rebind the focused field from the current frame instead of retaining an
+    // address into the previous model snapshot.
+    if (f) editing = &value;
     if (f && app.constructorOpen && id.rfind("track:", 0) == 0 && r.move(c.offsetX, c.offsetY).intersect(c.clip()).h > 0) {
         std::vector<std::pair<std::string, std::string>> options;
         if (id == "track:language") {
@@ -225,8 +238,9 @@ void UI::input(const std::string &id, Rect r, std::string &value, const std::str
     }
     c.pop();
     float offset = c.offsetX;
-    auto place = [this, id, &value, x, offset] {
+    auto place = [this, id, &value, x, offset, context] {
         focus = id;
+        editingContext = context;
         editing = &value;
         auto w = wide(value);
         size_t best = 0;
@@ -244,7 +258,26 @@ void UI::input(const std::string &id, Rect r, std::string &value, const std::str
         if (!down || !capture || capture->id != id || std::hypot(mx - downX, my - downY) < 3)
             anchors[id] = best;
     };
-    hit(id, r, place, true);
+    std::string accessibleName=placeholder;
+    if(id=="track:language") accessibleName=tr("Язык дорожки", "Track language");
+    else if(id=="track:bitrate") accessibleName=tr("Битрейт, кбит/с", "Bitrate, kbps");
+    else if(id=="track:maxrate") accessibleName=tr("Максимальный битрейт, кбит/с", "Maximum bitrate, kbps");
+    else if(id=="track:bufsize") accessibleName=tr("Буфер, кбит", "Buffer, kbit");
+    else if(id=="track:framerate") accessibleName=tr("Частота кадров", "Frame rate");
+    else if(id=="track:width") accessibleName=tr("Ширина, пиксели", "Width, pixels");
+    else if(id=="track:samplerate") accessibleName=tr("Частота дискретизации, Гц", "Sample rate, Hz");
+    else if(id=="export:ocr-language") accessibleName=tr("Языки Tesseract", "Tesseract languages");
+    else if(id=="export:meta-key") accessibleName=tr("Поле или путь JSON", "JSON field or path");
+    else if(id=="export:meta-value") accessibleName=tr("Значение в формате JSON", "JSON value");
+    else if(id=="build:metadata-title") accessibleName=tr("Название", "Title");
+    else if(id.rfind("chapter:start:",0)==0) accessibleName=tr("Начало главы", "Chapter start");
+    else if(id.rfind("chapter:end:",0)==0) accessibleName=tr("Конец главы", "Chapter end");
+    else if(id.rfind("extra:global:",0)==0) accessibleName=std::string(tr("Тег ", "Tag "))+id.substr(13);
+    else if(id.rfind("extra:track:",0)==0) {
+        auto separator=id.find(':',12);
+        if(separator!=std::string::npos)accessibleName=std::string(tr("Тег дорожки ", "Track tag "))+id.substr(separator+1);
+    }
+    hit(id,r,place,true,accessibleName,ROLE_SYSTEM_TEXT,false,true,value);
     if (f && down && capture && capture->id == id && std::hypot(mx - downX, my - downY) > 3)
         place();
 }
@@ -258,7 +291,23 @@ void UI::choice(const std::string &id, Rect r, const std::vector<std::string> &o
     c.line(r.x + r.w - 23, r.y + r.h / 2 - 2 + v * 4, r.x + r.w - 18, r.y + r.h / 2 + 3 - v * 6, 1.5f, muted);
     c.line(r.x + r.w - 18, r.y + r.h / 2 + 3 - v * 6, r.x + r.w - 13, r.y + r.h / 2 - 2 + v * 4, 1.5f, muted);
     auto anchor = r.move(c.offsetX, c.offsetY);
-    hit(id, r, [this, id, options, select, anchor] {
+    std::string accessibleName=id;
+    if(id=="category") accessibleName=tr("Категория", "Category");
+    else if(id=="browser") accessibleName=tr("Браузер", "Browser");
+    else if(id=="profile") accessibleName=tr("Профиль браузера", "Browser profile");
+    else if(id=="parallel") accessibleName=tr("Одновременные загрузки", "Concurrent downloads");
+    else if(id=="settings:language") accessibleName=tr("Язык", "Language");
+    else if(id=="settings:fragments") accessibleName=tr("Параллельные фрагменты", "Parallel fragments");
+    else if(id=="settings:splashDuration") accessibleName=tr("Длительность заставки", "Startup screen duration");
+    else if(id=="export:format") accessibleName=tr("Формат", "Format");
+    else if(id=="export:quality") accessibleName=tr("Качество / сжатие", "Quality / compression");
+    else if(id=="track:subcodec") accessibleName=tr("Кодек субтитров", "Subtitle codec");
+    else if(id=="track:coverFormat") accessibleName=tr("Формат обложки", "Cover format");
+    else if(id=="track:codec") accessibleName=tr("Кодек", "Codec");
+    else if(id=="track:quality") accessibleName=tr("Профиль качества", "Quality profile");
+    else if(id=="build:mode") accessibleName=tr("Режим сохранения", "Output mode");
+    else if(id=="build:container") accessibleName=tr("Формат контейнера", "Container format");
+    hit(id, r, [this, id, options, selected, select, anchor] {
         if (menuOpen && menuId == id) {
             menuOpen = false;
             return;
@@ -268,8 +317,9 @@ void UI::choice(const std::string &id, Rect r, const std::vector<std::string> &o
         menuSelect = select;
         menuAnchor = anchor;
         menuOpen = true;
+        if(!options.empty())keyboardFocus="menu:item:"+std::to_string(std::clamp(selected,0,int(options.size())-1));
         menuScroll.p.target = 0;
-    });
+    },false,accessibleName,ROLE_SYSTEM_COMBOBOX,false,true,s);
 }
 void UI::card(Rect r) {
     c.glow({r.x - 20, r.y - 6, r.w + 40, r.h + 40}, hex(0, app.light ? .05f : .12f));
@@ -300,6 +350,36 @@ void UI::init() {
     theme.value = theme.target = app.light ? 1 : 0;
     if (app.splashEnabled) splashStarted = GetTickCount64();
 }
+std::string UI::inputContext() const {
+    if (page != 0 || !app.constructorOpen) return {};
+    uint64_t source = 0;
+    if (app.draftSelection >= 0 && app.draftSelection < int(app.draft.size()))
+        source = app.draft[app.draftSelection].uiId;
+    return std::to_string(app.constructorGeneration) + ":" + std::to_string(source);
+}
+std::string UI::accessibilityKey(const Hit &item) const {
+    const auto context = inputContext();
+    if (context.empty()) return item.id;
+    Json identity;
+    try {
+        if (item.id.rfind("draft:",0)==0) {
+            const auto index=std::stoull(item.id.substr(6));
+            if(index<app.draft.size()) identity=app.draft[index].uiId;
+        } else if (item.id.rfind("pool:",0)==0) {
+            const auto index=std::stoull(item.id.substr(5));
+            if(index<app.sourcePool.size()) {
+                const auto &source=app.sourcePool[index];
+                identity=Json::array({source.uiId,source.media.key,source.path,source.role,source.name});
+            }
+        }
+    } catch (...) { return {}; }
+    return Json::array({item.id,context,item.name,identity}).dump();
+}
+void UI::invalidateModelSnapshot() {
+    snapshotFresh = false;
+    editing = nullptr;
+    lostCapture();
+}
 void UI::navigate(int i) {
     if (i == page)
         return;
@@ -313,6 +393,7 @@ void UI::navigate(int i) {
 void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     if (pw < 1 || ph < 1)
         return;
+    app.beginPreviewFrame();
     dt = std::clamp(elapsed, .001f, .08f);
     clock += elapsed;
     scale = std::max(.5f, std::min({dpi, pw / 880.f, ph / 590.f}));
@@ -341,7 +422,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
         c.circle(cx + 11, cy - 105 + drift, 2.5f + pulse, hex(0x8be2d1));
         centered("KRECHETOV LABS", cy - 48, 13, hex(0x8be2d1));
         centered("StreamShelf", cy + 5, 36, hex(0xeef3fc));
-        centered(tr("Версия 2.5 Beta", "Version 2.5 Beta"), cy + 41, 12, hex(0x8999b4));
+        centered(tr("Версия v2026.11.1 Beta", "Version v2026.11.1 Beta"), cy + 41, 12, hex(0x8999b4));
         c.rect({cx - 50, cy + 69, 100, 2}, 1, hex(0x2a374b));
         c.rect({cx - 50, cy + 69, 100 * std::clamp(elapsedSeconds / float(app.splashSeconds), 0.f, 1.f), 2}, 1, hex(0x8be2d1));
         c.opacity = 1; c.render(); return;
@@ -450,12 +531,12 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
             c.line(x + 7, y + 7, x + 7, y + 11, 1.5f, col);
         }
         if(!compactMenu)c.text(names[i], 69, r.y + 27, 13, mix(muted, text, std::max(sel, h * .7f)));
-        hit("nav:" + std::to_string(i), r, [this, i] { navigate(i); });
+        hit("nav:" + std::to_string(i), r, [this, i] { navigate(i); },false,names[i]);
     }
     c.circle(40, height - 28, 3, app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady ? accent : muted);
     if(!compactMenu)c.text(app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady?tr("Браузер подключён", "Browser connected"):tr("Нет соединения", "Not connected"),52,height-24,10,muted,150);
     if (!compactMenu) {
-        c.text("KRECHETOV LABS · StreamShelf 2.5 Beta", 25, height - 80, 9, muted, 195);
+        c.text("StreamShelf v2026.11.1 Beta", 25, height - 80, 9, muted, 195);
         c.text(tr("Разработчик: Арсений Кречетов", "Developer: Arseniy Krechetov"), 25, height - 59, 9, muted, 195);
     }
     float contentLeft=compactMenu?76.f:226.f;
@@ -492,6 +573,20 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     }
     c.text(std::to_string(app.media.size()) + tr(" ресурсов", " resources"), width - 170, height - 15, 9, muted);
     overlays();
+    if (!keyboardFocus.empty()) {
+        auto current=std::find_if(hits.begin(),hits.end(),[this](const Hit &item){return item.id==keyboardFocus && keyboardFocusable(item);});
+        if(current!=hits.end()) {
+            // A transparent fill does not erase the solid outer rectangle drawn
+            // by Canvas::border, so draw the focus ring as four strokes instead.
+            auto ring=current->rect.inset(2);
+            c.line(ring.x,ring.y,ring.x+ring.w,ring.y,2,accent);
+            c.line(ring.x+ring.w,ring.y,ring.x+ring.w,ring.y+ring.h,2,accent);
+            c.line(ring.x+ring.w,ring.y+ring.h,ring.x,ring.y+ring.h,2,accent);
+            c.line(ring.x,ring.y+ring.h,ring.x,ring.y,2,accent);
+        }
+    }
+    snapshotFresh = true;
+    syncAccessibility();
     c.opacity = 1;
     c.render();
     c.capture();
@@ -580,7 +675,7 @@ std::vector<Media *> UI::filtered() {
     return out;
 }
 void UI::startMediaAnalysis(bool deep) {
-    app.category = 1; cardView = true;
+    app.category = 0; cardView = true;
     mediaScroll.p.target = mediaScroll.p.value = 0;
     app.action(deep ? "deepAnalyze" : "analyze");
 }
@@ -628,7 +723,7 @@ void UI::mediaPage(Rect r) {
     Rect table{r.x, r.y + 342 - saved, r.w, std::max(100.f, r.h - 462 + saved)};
     card(table);
     if(cardView){
-        auto rows=filtered();
+        const auto &rows=visible;
         int columns=std::max(1,int((table.w-18)/224));
         float cellWidth=(table.w-22)/columns,cellHeight=height<760?234.f:258.f;
         Rect body=table.inset(10);body.w-=12;
@@ -641,7 +736,7 @@ void UI::mediaPage(Rect r) {
             collectionSurface(id,box,false,m.selected,i);
             Rect image{box.x+6,box.y+6,box.w-12,box.h-122};
             previewTile(m,image);
-            auto name = m.format && m.page == app.analysis.page ? app.analysis.title : displayMediaTitle(app.interfaceLanguage, m);
+            auto name = m.format && !m.sourceTitle.empty() ? m.sourceTitle : displayMediaTitle(app.interfaceLanguage, m);
             if (name.empty()) name = tr("Медиа ", "Media ") + std::to_string(i + 1);
             c.text(name,box.x+10,box.y+box.h-75,12,text,box.w-20);
             double seconds = number(m.data, "duration");
@@ -668,11 +763,11 @@ void UI::mediaPage(Rect r) {
                 c.rect(badge, 7, hex(m.videoOnly || m.category == "Видео без звука" ? 0x8f462a : 0x263a48, .94f));
                 c.text(sound, badge.x + 9, badge.y + 15, 10, hex(0xffffff), badge.w - 14);
             }
-            hit(id,box,[this,key=m.key]{for(auto &item:app.media)if(item.key==key){app.selectedMedia=key;if(!item.drm)item.selected=!item.selected;break;}});
-            check(id+":check",{box.x+6,box.y+7,30,30},m.selected,[this,key=m.key]{for(auto &item:app.media)if(item.key==key&&!item.drm){item.selected=!item.selected;app.selectedMedia=key;}});
+            hit(id,box,[this,key=m.key]{for(auto &item:app.media)if(item.key==key){app.selectedMedia=key;if(!item.drm)item.selected=!item.selected;break;}},false,name);
+            check(id+":check",{box.x+6,box.y+7,30,30},m.selected,[this,key=m.key]{for(auto &item:app.media)if(item.key==key&&!item.drm){item.selected=!item.selected;app.selectedMedia=key;}},std::string(tr("Выбрать ", "Select "))+name);
         }
         c.pop();scrollbar("media:scroll",{table.x,table.y+6,table.w-5,table.h-12},mediaScroll);
-        if(rows.empty())c.text(app.scanning?tr("Поиск включён — запустите медиа в браузере", "Search is active — play media in your browser"):tr("Нет файлов. Добавьте ссылку или включите поиск во вкладке «Подключение».", "No files. Add a URL or start searching on the Connection page."),table.x+20,table.y+40,12,muted,table.w-40);
+        if(rows.empty())c.text(!app.media.empty()?tr("Нет результатов для выбранных фильтров.", "No results match the current filters."):app.scanning?tr("Поиск включён — запустите медиа в браузере", "Search is active — play media in your browser"):tr("Нет файлов. Добавьте ссылку или включите поиск во вкладке «Подключение».", "No files. Add a URL or start searching on the Connection page."),table.x+20,table.y+40,12,muted,table.w-40);
     }else{
     float contentWidth = std::max(1120.f, table.w - 28);
     tableScroll.step(dt);
@@ -684,7 +779,7 @@ void UI::mediaPage(Rect r) {
     for (auto &v : columns)
         v *= ratio;
     Rect body{table.x + 4, table.y + 42, table.w - 8, table.h - 59};
-    mediaScroll.bounds(filtered().size() * 49, body.h);
+    mediaScroll.bounds(visible.size() * 49, body.h);
     Rect scrollArea = body;
     if (mediaScroll.maximum > 0) body.w -= 18;
     Rect headerClip = table.inset(3);
@@ -710,12 +805,12 @@ void UI::mediaPage(Rect r) {
                 sortColumn = i;
                 descending = false;
             }
-        });
+        },false,std::string(tr("Сортировка: ", "Sort by "))+heads[i]);
         x += cw;
     }
     c.pop();
     c.pop();
-    auto rows = filtered();
+    const auto &rows = visible;
     c.push(body);
     for (size_t i = 0; i < rows.size(); i++) {
         auto *m = rows[i];
@@ -724,7 +819,9 @@ void UI::mediaPage(Rect r) {
         Rect row{body.x,body.y+collectionRowY(id,target)-mediaScroll.p.value,body.w,46};
         if(row.y+49<body.y || row.y>body.y+body.h)continue;
         collectionSurface(id,row,true,m->selected,i);
-        hit(id, row, [this, key = m->key] { app.selectedMedia = key; });
+        auto accessibleName=displayMediaTitle(app.interfaceLanguage,*m);
+        if(!m->sourceTitle.empty())accessibleName=mediaJobTitle(*m);
+        hit(id,row,[this,key=m->key]{app.selectedMedia=key;},false,accessibleName);
         check(id + ":check", {row.x + 5, row.y, 30, row.h}, m->selected, [this, key = m->key] {
             for (auto &m : app.media)
                 if (m.key == key && !m.drm) {
@@ -732,7 +829,7 @@ void UI::mediaPage(Rect r) {
                     app.selectedMedia = key;
                     break;
                 }
-        });
+        },std::string(tr("Выбрать ", "Select "))+accessibleName);
         Ink category = m->drm                                             ? hex(0xff8d8d)
                        : m->category == "Аудио"                           ? hex(0xc9a7ff)
                        : m->category.find("Субтитры") != m->category.npos ? hex(0xffd18d)
@@ -785,17 +882,32 @@ void UI::mediaPage(Rect r) {
         "resource", {r.x, bottom + 63, 166, 32}, tr("Анализ ресурса", "Analyze resource"), [this] { app.action("analyzeResource"); },
         false, !app.selectedMedia.empty());
     button("json", {r.x+178,bottom+63,126,32},tr("Метаданные", "Metadata"),[this]{app.action("json");});
+    button("manualAnalysis", {r.x+316,bottom+63,220,32},
+           app.manualAnalysis ? tr("Без браузера: включено", "No browser: on") : tr("Без браузера: выключено", "No browser: off"),
+           [this]{app.action("toggleManualAnalysis");});
 }
 void UI::previewTile(const Media &media,Rect box){
     c.rect(box,7,hex(app.light?0xe5eaf1:0x0b121d));
     auto preview=app.requestPreview(media);
-    auto key=std::to_string(app.previewGeneration) + "|" + (media.thumbnail.empty()?media.key:media.thumbnail);
     if(preview&&!preview->image.rgba.empty()){
-        if(!previewTextures.count(key)){
-            if(previewTextures.size()>=32){auto old=previewTextures.begin();c.deleteImage(old->second);previewTextures.erase(old);}
-            previewTextures[key]=c.createImage(preview->image);
+        auto key=std::to_string(app.previewGeneration) + "|" + std::to_string(preview->id);
+        auto it=previewTextures.find(key);
+        if(it==previewTextures.end()){
+            if(previewTextures.size()>=32){
+                auto old=previewTextures.end();
+                for(auto candidate=previewTextures.begin();candidate!=previewTextures.end();++candidate)
+                    if(candidate->second.lastSeenFrame+1<app.previewFrame &&
+                       (old==previewTextures.end() || candidate->second.lastSeenFrame<old->second.lastSeenFrame))old=candidate;
+                if(old!=previewTextures.end()){c.deleteImage(old->second.texture);previewTextures.erase(old);}
+            }
+            // Do not evict a texture used by the current or previous frame.
+            // A large display may need more than 32 visible textures.
+            if(previewTextures.size()<1024)it=previewTextures.emplace(key,PreviewTexture{c.createImage(preview->image),app.previewFrame}).first;
         }
-        c.image(previewTextures[key],box,preview->image.width,preview->image.height);
+        if(it!=previewTextures.end()){
+            it->second.lastSeenFrame=app.previewFrame;
+            c.image(it->second.texture,box,preview->image.width,preview->image.height);
+        }
     }else{
         c.text(preview?interfaceText(app.interfaceLanguage, preview->message):tr("Ожидание превью…", "Waiting for preview…"),box.x+12,box.y+box.h/2,11,muted,box.w-24);
     }
@@ -879,7 +991,8 @@ void UI::selectionHeading(const std::string &id,Rect area,bool &selectedFirst) {
     float h=hover(id,area);
     c.rect(area.inset(3),7,accent.alpha((selectedFirst?.16f:0.f)+h*.07f));
     c.text(selectedFirst?"✓ ↑":"✓",area.x+10,area.y+26,11,selectedFirst?accent:muted,area.w-12);
-    hit(id,area,[&selectedFirst]{selectedFirst=!selectedFirst;});
+    hit(id,area,[&selectedFirst]{selectedFirst=!selectedFirst;},false,
+        tr("Сначала отмеченные", "Selected first"),ROLE_SYSTEM_CHECKBUTTON,selectedFirst);
 }
 void UI::downloadsPage(Rect r) {
     c.text(tr("Загрузки · ", "Downloads · ")+std::to_string(app.jobs.size()), r.x, r.y + 28, 20, text, r.w - 400);
@@ -1050,7 +1163,7 @@ void UI::downloadsPage(Rect r) {
                 jobsDescending=jobSortColumn==i?!jobsDescending:false;
                 jobSortColumn=i;
                 jobsScroll.p.target=jobsScroll.p.value=0;
-            });
+            },false,std::string(tr("Сортировка: ", "Sort by "))+headings[i]);
             x+=w;
         }
     }
@@ -1074,8 +1187,10 @@ void UI::downloadsPage(Rect r) {
         }
         if(row.y+row.h<view.y || row.y>view.y+view.h)continue;
         bool checked=app.selectedJobs.count(j->id)!=0;
+        bool active=j->id==app.selectedJob;
         auto stateColor=j->state=="Ошибка"?hex(0xff9292):accent;
-        collectionSurface(id,row,jobDetails,checked,index);
+        collectionSurface(id,row,jobDetails,checked || active,index);
+        if(active)c.rect({row.x+row.w-4,row.y+5,3,std::max(0.f,row.h-10)},2,accent);
         if(!jobDetails) {
             auto previewItem=j->item;
             if(j->assembly && !j->singleExport && j->done && j->state=="Готово" && !j->output.empty())
@@ -1106,13 +1221,15 @@ void UI::downloadsPage(Rect r) {
             float x=row.x+42;
             for(int i=0;i<int(headings.size());++i){
                 float w=columnsWidth*widths[i];
-                c.text(values[i].empty()?"—":values[i],x+4,row.y+28,11,i==1?stateColor:i==0?text:muted,w-7);
+                auto value=values[i].empty()?std::string("—"):values[i];
+                if(i==0 && active)value=std::string(tr("[Активная] ", "[Active] "))+value;
+                c.text(value,x+4,row.y+28,11,i==1?stateColor:i==0?text:muted,w-7);
                 x+=w;
             }
         } else {
             float x=row.x+10,w=row.w-20;
             float y=row.y+row.h-100;
-            c.text(values[0],x,y,12,text,w);
+            c.text((active?std::string(tr("[Активная] ", "[Active] ")):std::string())+values[0],x,y,12,text,w);
             c.text(values[1]+(values[9].empty()?"":" · "+values[9]),x,y+16,10,stateColor,w);
             const int pairs[][2]={{2,3},{4,5},{7,8},{6,10}};
             int detailRow=0;
@@ -1127,22 +1244,24 @@ void UI::downloadsPage(Rect r) {
             auto detail=j->detail.empty()?j->output:interfaceText(app.interfaceLanguage, j->detail);
             if(!detail.empty())c.text(detail,x,y+32+15*detailRow,10,muted,w);
         }
-        auto select=[this,j]{
+        auto select=[this,j]{ app.selectedJob=j->id; };
+        auto checkJob=[this,j]{
             app.selectedJob=j->id;
             if(app.selectedJobs.count(j->id))app.selectedJobs.erase(j->id);
             else app.selectedJobs.insert(j->id);
         };
-        hit(id,row,select);
-        check(id+":check",{row.x+(jobDetails?5:6),row.y+(jobDetails?0:7),30,jobDetails?row.h:30},checked,select);
+        hit(id,row,select,false,j->title);
+        check(id+":check",{row.x+(jobDetails?5:6),row.y+(jobDetails?0:7),30,jobDetails?row.h:30},checked,checkJob,std::string(tr("Выбрать задачу ", "Select task "))+j->title);
     }
     c.pop();
     scrollbar("jobs:scroll",view,jobsScroll);
     float y = r.y + r.h - 52;
-    std::vector<std::pair<std::string, std::string>> actions = {{"cancelSelectedJobs", tr("Остановить", "Stop")},
-                                                                {"retryJob", tr("Повторить", "Retry")},
-                                                                {"openJobFolder", tr("Открыть папку", "Open folder")},
-                                                                {"openJobFile", tr("Открыть файл", "Open file")},
-                                                                {"removeJob", tr("Убрать запись", "Remove entry")}};
+    std::vector<std::pair<std::string, std::string>> actions = {
+        {"cancelSelectedJobs", app.selectedJobs.empty() ? tr("Стоп активной", "Stop active") : tr("Стоп выбранных", "Stop selected")},
+        {"retryJob", tr("Повтор активной", "Retry active")},
+        {"openJobFolder", tr("Папка активной", "Active folder")},
+        {"openJobFile", tr("Файл активной", "Active file")},
+        {"removeJob", tr("Убрать активную", "Remove active")}};
     float x = r.x;
     float actionWidth = std::min(145.f, (r.w - 4 * 10) / 5);
     for (auto &[cmd, name] : actions) {
@@ -1236,18 +1355,18 @@ void UI::settingsPage(Rect r) {
     c.text(tr("ОФОРМЛЕНИЕ И ДВИЖЕНИЕ", "APPEARANCE AND MOTION"), r.x + 24, y + 32, 10, accent);
     c.text(tr("Светлая тема", "Light theme"), r.x + 24, y + 77, 15, text);
     c.text(tr("Мягкий переход между светлой и тёмной палитрой", "Smooth transition between light and dark themes"), r.x + 24, y + 101, 11, muted);
-    toggle("settings:light", {r.x + r.w - 80, y + 62, 51, 28}, app.light, [this] { app.light = !app.light; });
+    toggle("settings:light", {r.x + r.w - 80, y + 62, 51, 28}, app.light, [this] { app.light = !app.light; },tr("Светлая тема", "Light theme"));
     c.rect({r.x + 24, y + 124, r.w - 48, 1}, 0, edge);
     c.text(tr("Уменьшить движение", "Reduce motion"), r.x + 24, y + 162, 15, text);
     c.text(tr("Более короткие переходы с минимальным пружинным эффектом", "Shorter transitions with less animation"), r.x + 24, y + 188, 11, muted);
     toggle("settings:reduced", {r.x + r.w - 80, y + 148, 51, 28}, app.reduced,
-           [this] { app.reduced = !app.reduced; });
+           [this] { app.reduced = !app.reduced; },tr("Уменьшить движение", "Reduce motion"));
     y += 249;
     card({r.x, y, r.w, 495});
     c.text(tr("КОМПОНЕНТЫ", "COMPONENTS"), r.x + 24, y + 32, 10, accent);
     c.text(app.componentsBusy ? interfaceText(app.interfaceLanguage, app.componentsActivity) : tr("Проверяйте версии и устанавливайте отсутствующие компоненты.", "Check versions and install missing components."), r.x + 24, y + 61, 13, text, r.w - 48);
     c.text(tr("Автоматически обновлять yt-dlp при запуске", "Automatically update yt-dlp on startup"), r.x + 24, y + 95, 12, muted, r.w - 130);
-    toggle("settings:update", {r.x + r.w - 80, y + 77, 51, 28}, app.autoUpdate, [this] { app.autoUpdate = !app.autoUpdate; });
+    toggle("settings:update", {r.x + r.w - 80, y + 77, 51, 28}, app.autoUpdate, [this] { app.autoUpdate = !app.autoUpdate; },tr("Автоматически обновлять yt-dlp", "Automatically update yt-dlp"));
     static const wchar_t *files[] = {L"yt-dlp.exe", L"ffmpeg.exe", L"ffprobe.exe", L"deno.exe"};
     static const auto componentsRoot = dataRoot() / L"tools";
     for (size_t i = 0; i < 4; ++i) {
@@ -1288,6 +1407,9 @@ void UI::settingsPage(Rect r) {
         }
     }
     const bool available = std::any_of(app.components.begin(), app.components.end(), [](const Component &c) { return c.update; });
+    static const bool hasBundledTools=[] {std::error_code ec;return fs::is_regular_file(executable().parent_path()/L"bundled-tools"/L"checksums.json",ec);}();
+    if(hasBundledTools)
+        button("settings:installBundled", {r.x+24,y+357,260,38}, tr("Установить из комплекта", "Install bundled tools"), [this] { app.action("installBundledComponents"); }, false, !app.componentsBusy);
     button("settings:scanComponents", {r.x + 24, y + 405, 220, 40}, app.componentsBusy ? tr("Выполняется…", "Working…") : tr("Проверить компоненты", "Check components"), [this] { app.action("update"); }, true, !app.componentsBusy);
     button("settings:installComponents", {r.x + 254, y + 405, 220, 40}, tr("Установить / обновить", "Install / update"), [this] { app.action("installComponents"); }, false, !app.componentsBusy && app.componentsScanned && available);
     button("settings:data", {r.x + 484, y + 405, 170, 40}, tr("Папка компонентов", "Components folder"), [this] { app.action("dataFolder"); }, false, !app.componentsBusy);
@@ -1313,13 +1435,13 @@ void UI::settingsPage(Rect r) {
     card({r.x, y, r.w, 90});
     c.text(tr("Сохранять предыдущие результаты анализа", "Keep previous analysis results"), r.x + 24, y + 48, 13, text, r.w - 130);
     toggle("settings:keepResults", {r.x + r.w - 80, y + 28, 51, 28}, app.keepResults,
-           [this] { app.keepResults = !app.keepResults; });
+           [this] { app.keepResults = !app.keepResults; },tr("Сохранять предыдущие результаты анализа", "Keep previous analysis results"));
     y += 106;
     card({r.x, y, r.w, 138});
     c.text(tr("ЗАСТАВКА ПРИ ЗАПУСКЕ", "STARTUP SCREEN"), r.x + 24, y + 30, 10, accent);
     c.text(tr("Показывать заставку", "Show startup screen"), r.x + 24, y + 70, 13, text);
     toggle("settings:splash", {r.x + r.w - 80, y + 50, 51, 28}, app.splashEnabled,
-           [this] { app.splashEnabled = !app.splashEnabled; });
+           [this] { app.splashEnabled = !app.splashEnabled; },tr("Показывать заставку", "Show startup screen"));
     c.text(tr("Длительность", "Duration"), r.x + 24, y + 113, 13, text);
     choice("settings:splashDuration", {r.x + r.w - 230, y + 86, 200, 38},
            {tr("1 секунда", "1 second"), tr("2 секунды", "2 seconds"), tr("3 секунды", "3 seconds"), tr("4 секунды", "4 seconds"), tr("5 секунд", "5 seconds"), tr("6 секунд", "6 seconds"), tr("7 секунд", "7 seconds"), tr("8 секунд", "8 seconds"), tr("9 секунд", "9 seconds"), tr("10 секунд", "10 seconds")},
@@ -1336,7 +1458,7 @@ void UI::aboutPage(Rect r) {
     card({r.x, y, r.w, 152});
     c.text("KRECHETOV LABS", r.x + 24, y + 30, 11, accent, r.w - 48);
     c.text("StreamShelf", r.x + 24, y + 69, 25, text, r.w - 48);
-    c.text(tr("Версия 2.5 Beta · Windows x64", "Version 2.5 Beta · Windows x64"), r.x + 24, y + 100, 12, muted, r.w - 48);
+    c.text(tr("Версия v2026.11.1 Beta · Windows x64", "Version v2026.11.1 Beta · Windows x64"), r.x + 24, y + 100, 12, muted, r.w - 48);
     c.text(tr("Разработчик: Арсений Кречетов", "Developer: Arseniy Krechetov"), r.x + 24, y + 126, 12, muted, r.w - 48);
     y += 168;
     card({r.x, y, r.w, 220});
@@ -1390,7 +1512,10 @@ void UI::overlays() {
     }
     float menu = to("menu:visibility", menuOpen ? 1 : 0, 0, 6, 1);
     if (menu > .002f && !menuId.empty()) {
-        hits.clear();
+        // A closing menu may keep fading for several frames, but must no
+        // longer intercept input or hide the controls underneath it.
+        const auto underlyingHits=hits.size();
+        if(menuOpen)hits.clear();
         hit("menu:outside", {0, 0, width, height}, [this] { menuOpen = false; });
         float h = std::min(300.f, float(menuItems.size() * 38 + 16)),
               top = std::min(menuAnchor.y + menuAnchor.h + 8, height - h - 20);
@@ -1410,9 +1535,11 @@ void UI::overlays() {
                 if (menuSelect)
                     menuSelect(i);
                 menuOpen = false;
+                keyboardFocus=menuId=="context:text"?focus:menuId;
             });
         }
         c.pop();
+        if(!menuOpen)hits.resize(underlyingHits);
         c.offsetY = 0;
         c.opacity = appearance.value;
         overlayInput = false;
@@ -1424,7 +1551,8 @@ void UI::overlays() {
         lastBody = interfaceText(app.interfaceLanguage, app.modalBody);
     }
     if (mv > .002f) {
-        hits.clear();
+        const auto underlyingHits=hits.size();
+        if(!app.modalTitle.empty())hits.clear();
         hit("modal:outside", {0, 0, width, height}, [this] {
             app.modalTitle.clear();
             app.modalConfirm = nullptr;
@@ -1437,8 +1565,10 @@ void UI::overlays() {
         c.opacity *= mv;
         card(box);
         hit("modal:block", box, [] {});
+        hit("modal:title",{box.x+28,box.y+14,box.w-56,38},{},false,lastTitle,ROLE_SYSTEM_STATICTEXT);
         c.text(lastTitle, box.x + 28, box.y + 44, 23, text, box.w - 80);
         Rect body{box.x + 26, box.y + 68, box.w - 52, box.h - 146};
+        hit("modal:message",body,{},false,lastBody,ROLE_SYSTEM_STATICTEXT);
         static std::string cachedBody;
         static float cachedWidth = 0;
         static std::vector<std::string> lines;
@@ -1506,6 +1636,7 @@ void UI::overlays() {
         });
         c.opacity = appearance.value;
         overlayInput = false;
+        if(app.modalTitle.empty())hits.resize(underlyingHits);
     }
 
 }
@@ -1514,16 +1645,18 @@ void UI::mouse(float x, float y) {
     my = y / scale;
 }
 void UI::rightClick(float x,float y) {
+    if(!snapshotFresh)return;
     mouse(x,y);if(!app.modalTitle.empty())return;
     for(auto it=hits.rbegin();it!=hits.rend();++it)if(it->edit&&it->rect.contains(mx,my)){
         if(focus!=it->id && !(it->id=="log:select"&&focus=="log:selection")){if(it->action)it->action();}
         bool logFocus=focus=="log:selection";
         menuId="context:text";menuAnchor={mx,my,1,1};menuItems=logFocus?std::vector<std::string>{tr("Копировать", "Copy"),tr("Выделить всё", "Select all")}:std::vector<std::string>{tr("Копировать", "Copy"),tr("Вырезать", "Cut"),tr("Вставить", "Paste"),tr("Выделить всё", "Select all")};
         menuSelect=[this,logFocus](int n){if(logFocus){key(n==0?'C':'A',true,false);}else{const int keys[]={'C','X','V','A'};if(n>=0&&n<4)key(keys[n],true,false);}};
-        menuScroll.p.target=menuScroll.p.value=0;menuOpen=true;return;
+        menuScroll.p.target=menuScroll.p.value=0;menuOpen=true;invalidateModelSnapshot();return;
     }
 }
 void UI::press() {
+    if(!snapshotFresh)return;
     down = true;
     downX = mx;
     downY = my;
@@ -1533,6 +1666,7 @@ void UI::press() {
             capture = *i;
             break;
         }
+    keyboardFocus = capture && keyboardFocusable(*capture) ? capture->id : std::string();
     bool contextAction = menuOpen && menuId == "context:text" && capture && capture->id.rfind("menu:item:", 0) == 0;
     if ((!capture || !capture->edit) && !contextAction) {
         focus.clear();
@@ -1542,15 +1676,16 @@ void UI::press() {
         capture->action();
 }
 void UI::release() {
+    if(!snapshotFresh){lostCapture();return;}
     auto old = capture;
     down = false;
     capture.reset();
     // Release OS capture before an action maximizes/minimizes the window.
     if (GetCapture() == app.hwnd) ReleaseCapture();
-    if (old && app.constructorOpen && finishDraftDrag(*old)) return;
+    if (old && app.constructorOpen && finishDraftDrag(*old)) {invalidateModelSnapshot();return;}
     if (old && !old->edit && old->rect.contains(mx, my) && std::hypot(mx - downX, my - downY) < 9 &&
         old->action)
-        old->action();
+        {old->action();invalidateModelSnapshot();}
 }
 void UI::lostCapture() {
     down = false;
@@ -1559,10 +1694,112 @@ void UI::lostCapture() {
 void UI::cancelInput() {
     lostCapture();
     focus.clear();
+    editingContext.clear();
+    keyboardFocus.clear();
     editing = nullptr;
     suggestions.clear();
     suggestionField.clear();
     suggestionDismissedValue.reset();
+}
+bool UI::accessibilityVisible(const Hit &item) const {
+    if (!app.modalTitle.empty() && item.id.rfind("modal:",0)!=0) return false;
+    if (app.modalTitle.empty() && item.id.rfind("modal:",0)==0) return false;
+    if (app.modalTitle.empty() && menuOpen && item.id.rfind("menu:item:",0)!=0) return false;
+    if (app.modalTitle.empty() && !menuOpen && item.id.rfind("menu:item:",0)==0) return false;
+    if ((item.enabled && !item.action && item.accessibleRole!=ROLE_SYSTEM_STATICTEXT) || item.id == "modal:block" || item.id == "modal:outside" || item.id == "menu:outside" ||
+        item.id == "assembly:panel" || item.id == "log:select" || item.id == "media:hscroll" ||
+        item.id.rfind("suggestion:",0)==0) return false;
+    return item.id.find(":scroll") == std::string::npos && item.id.rfind("scroll:",0)!=0;
+}
+bool UI::keyboardFocusable(const Hit &item) const {
+    return item.enabled && bool(item.action) && accessibilityVisible(item);
+}
+bool UI::focusControl(const std::string &id) {
+    auto it=std::find_if(hits.begin(),hits.end(),[&](const Hit &item){return item.id==id && keyboardFocusable(item);});
+    if(it==hits.end())return false;
+    keyboardFocus=id;
+    if(it->edit) {
+        // Place the caret at the end when focus came from the keyboard, rather
+        // than using the position of an unrelated mouse pointer.
+        const auto oldX=mx, oldY=my;
+        mx=it->rect.x+it->rect.w-1;my=it->rect.y+it->rect.h/2;
+        it->action();
+        mx=oldX;my=oldY;
+        if(editing && focus==id)carets[id]=anchors[id]=wide(*editing).size();
+    } else {
+        editing=nullptr;
+        focus.clear();
+        suggestions.clear();
+        suggestionField.clear();
+    }
+    return true;
+}
+void UI::focusNext(bool backwards) {
+    std::vector<std::string> order;
+    for(const auto &item:hits)
+        if(keyboardFocusable(item) && std::find(order.begin(),order.end(),item.id)==order.end())order.push_back(item.id);
+    if(order.empty())return;
+    const auto found=std::find(order.begin(),order.end(),keyboardFocus);
+    const auto index=found==order.end() ? (backwards?order.size()-1:0)
+        : (size_t(found-order.begin())+(backwards?order.size()-1:1))%order.size();
+    focusControl(order[index]);
+}
+void UI::syncAccessibility() {
+    POINT origin{};
+    if(!app.hwnd || !ClientToScreen(app.hwnd,&origin))return;
+    std::vector<AccessibleNode> nodes;
+    LONG focusedId=0;
+    for(const auto &item:hits) {
+        if(!accessibilityVisible(item))continue;
+        const auto key=accessibilityKey(item);
+        auto [id,created]=accessibilityIds.try_emplace(key,0);
+        if(created) {
+            if(nextAccessibilityId==LONG_MAX) { accessibilityIds.erase(id); continue; }
+            id->second=++nextAccessibilityId;
+            accessibilityNames.emplace(id->second,key);
+        }
+        if(std::any_of(nodes.begin(),nodes.end(),[&](const auto &node){return node.id==id->second;}))continue;
+        AccessibleNode node;
+        node.id=id->second;node.role=item.accessibleRole;node.enabled=item.enabled;node.editable=item.edit;node.actionable=bool(item.action);
+        node.state=(!item.enabled?STATE_SYSTEM_UNAVAILABLE:item.action?STATE_SYSTEM_FOCUSABLE:0) | (item.checked?STATE_SYSTEM_CHECKED:0);
+        if(item.id==keyboardFocus && GetForegroundWindow()==app.hwnd) {node.state|=STATE_SYSTEM_FOCUSED;focusedId=node.id;}
+        node.bounds={LONG(origin.x+std::lround(item.rect.x*scale)),LONG(origin.y+std::lround(item.rect.y*scale)),
+                     LONG(origin.x+std::lround((item.rect.x+item.rect.w)*scale)),LONG(origin.y+std::lround((item.rect.y+item.rect.h)*scale))};
+        try { node.name=wide(item.name);node.value=wide(item.value); } catch (...) { node.name=L"StreamShelf control"; }
+        nodes.push_back(std::move(node));
+    }
+    LONG previous=0;
+    {
+        std::lock_guard lock(accessibility->mutex);
+        previous=accessibility->focused;
+        accessibility->window=app.hwnd;accessibility->nodes=std::move(nodes);accessibility->focused=focusedId;
+    }
+    if(focusedId && focusedId!=previous)NotifyWinEvent(EVENT_OBJECT_FOCUS,app.hwnd,OBJID_CLIENT,focusedId);
+}
+LRESULT UI::accessibilityCommand(uint64_t request) {
+    AccessibilityCommand command;
+    {
+        std::lock_guard lock(accessibility->mutex);
+        auto found=accessibility->pending.find(request);
+        if(found==accessibility->pending.end() || accessibility->window!=app.hwnd)return 0;
+        command=std::move(found->second);accessibility->pending.erase(found);
+    }
+    if(!snapshotFresh)return 0;
+    auto name=accessibilityNames.find(command.id);
+    if(name==accessibilityNames.end())return 0;
+    auto item=std::find_if(hits.begin(),hits.end(),[&](const Hit &hit){return accessibilityKey(hit)==name->second && keyboardFocusable(hit);});
+    if(item==hits.end())return 0;
+    SetFocus(app.hwnd);
+    if(command.action==AccessibilityAction::Focus)return focusControl(item->id)?1:0;
+    if(command.action==AccessibilityAction::Invoke) {
+        if(item->edit)return focusControl(item->id)?1:0;
+        auto action=item->action;keyboardFocus=item->id;action();invalidateModelSnapshot();return 1;
+    }
+    if(!item->edit || !focusControl(item->id) || !editing || focus!=item->id)return 0;
+    command.value.erase(std::remove_if(command.value.begin(),command.value.end(),[](wchar_t ch){return ch<32;}),command.value.end());
+    try {*editing=utf8(command.value);}catch(...){return 0;}
+    carets[focus]=anchors[focus]=command.value.size();
+    return 1;
 }
 void UI::wheel(float d, bool shift) {
     if (!preserveTerminalSelectionOnWheel(page == 3, down, capture && capture->id == "log:select")) lostCapture();
@@ -1597,6 +1834,7 @@ void UI::wheel(float d, bool shift) {
         aboutScroll.wheel(d);
 }
 void UI::character(wchar_t ch) {
+    if(!snapshotFresh)return;
     static wchar_t high = 0;
     if (!editing || focus.empty() || ch < 32 || ch == 127)
         return;
@@ -1627,6 +1865,7 @@ void UI::runTerminalCommand() {
     const auto command=app.terminalCommand;
     app.action("runTerminal");
     focus="terminal:command";
+    editingContext=inputContext();
     editing=&app.terminalCommand;
     carets[focus]=anchors[focus]=wide(*editing).size();
     if(!app.terminalCommand.empty()) return;
@@ -1640,6 +1879,7 @@ void UI::runTerminalCommand() {
     suggestionDismissedValue.reset();
 }
 void UI::key(int k, bool ctrl, bool shift) {
+    if(!snapshotFresh)return;
     const bool terminal=focus=="terminal:command" && editing && app.modalTitle.empty();
     if(terminal && k==VK_ESCAPE && !suggestions.empty() && suggestionField==focus){
         suggestionDismissedValue=*editing;
@@ -1653,13 +1893,47 @@ void UI::key(int k, bool ctrl, bool shift) {
         shift=false;
     }
     if (k == VK_ESCAPE) {
-        menuOpen = false;
+        if(menuOpen) {
+            menuOpen=false;
+            keyboardFocus=menuId=="context:text"?focus:menuId;
+            invalidateModelSnapshot();
+            return;
+        }
         if (!app.modalTitle.empty()) {
             app.modalTitle.clear();
             app.modalConfirm = nullptr;
         } else
             cancelInput();
         return;
+    }
+    if (k == VK_TAB && !ctrl) {
+        // Terminal completion remains available with Tab; Shift+Tab always
+        // moves to the preceding control.
+        if (!shift && terminal && suggestionField==focus && !suggestions.empty())acceptSuggestion(suggestionIndex);
+        else focusNext(shift);
+        return;
+    }
+    if (!ctrl && !editing && (k==VK_PRIOR || k==VK_NEXT)) {
+        Scroll *target=nullptr;
+        if(!app.modalTitle.empty())target=&modalScroll;
+        else if(menuOpen)target=&menuScroll;
+        else if(page==0 && app.constructorOpen)target=&propertyScroll;
+        else if(page==0)target=&mediaScroll;
+        else if(page==1)target=&browserScroll;
+        else if(page==2)target=&jobsScroll;
+        else if(page==3)target=&logScroll;
+        else if(page==4)target=&settingsScroll;
+        else target=&aboutScroll;
+        if(target)target->wheel(k==VK_PRIOR?4.f:-4.f);
+        return;
+    }
+    if (!ctrl && !editing && menuOpen && (k==VK_UP || k==VK_DOWN)) {
+        focusNext(k==VK_UP);
+        return;
+    }
+    if ((k == VK_RETURN || k == VK_SPACE) && !ctrl && !editing && !keyboardFocus.empty()) {
+        auto it=std::find_if(hits.begin(),hits.end(),[this](const Hit &item){return item.id==keyboardFocus && keyboardFocusable(item);});
+        if(it!=hits.end() && !it->edit && it->action) { auto action=it->action; action(); invalidateModelSnapshot(); return; }
     }
     if (!app.modalTitle.empty()) {
         if (k == VK_RETURN) {
@@ -1668,14 +1942,18 @@ void UI::key(int k, bool ctrl, bool shift) {
             app.modalConfirm = nullptr;
             if (f)
                 f();
+            invalidateModelSnapshot();
         }
         return;
     }
     if (!editing || focus.empty()) {
         if(focus=="log:selection" && ctrl && k=='A'){logAnchor=0;logCaret=logSelectionBuffer.size();return;}
         if(focus=="log:selection" && ctrl && k=='C'){auto a=std::min(logAnchor,logCaret),b=std::max(logAnchor,logCaret);if(a<b)copyText(utf8(logSelectionBuffer.substr(a,b-a)));return;}
-        if (k == VK_RETURN && page == 0)
-            startMediaAnalysis(false);
+        return;
+    }
+    if (k == VK_RETURN && focus == "url" && page == 0 && !app.constructorOpen && !app.downloadChoice) {
+        if (app.busy) app.action("cancelAnalysis"); else startMediaAnalysis(false);
+        invalidateModelSnapshot();
         return;
     }
     if (suggestionField == focus && !suggestions.empty() && !ctrl && !shift) {

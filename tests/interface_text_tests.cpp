@@ -22,6 +22,7 @@ int main() {
     assert(interfaceText("en", "Расширение подключено · Chrome · Test") == "Extension connected · Chrome · Test");
     assert(interfaceText("en", "User-provided text") == "User-provided text");
     assert(interfaceText("en", "Контейнер не сохранил дату дорожки. Исходники сохранены.") == "The container did not preserve the track date. Sources were kept.");
+    assert(interfaceText("en", "Вложенное или нетекстовое поле JSON нельзя сохранить как тег контейнера. Сохраните JSON отдельно. Исходники сохранены.") == "A nested or non-text JSON field cannot be saved as a container tag. Save the JSON separately. Sources were kept.");
     assert(interfaceText("en", "Не удалось преобразовать файл. Исходник сохранён. diagnostic") == "Could not convert the file. The original was kept. diagnostic");
     assert(interfaceText("en", "Контейнер не сохранил общий тег «Название». Выберите другой формат или удалите тег. Исходники сохранены.") == "The container did not preserve the global tag \"Название\". Choose another format or remove the tag. Sources were kept.");
     assert(interfaceText("en", "HTTP 429: субтитры отложены на 60 с") == "HTTP 429: subtitles delayed for 60 s");

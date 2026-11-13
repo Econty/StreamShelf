@@ -4,7 +4,9 @@
 
 The guided extension setup is available for Google Chrome, Yandex Browser, and Mozilla Firefox. In the Connection page, select the browser and profile, then choose **Install with guide**. Other compatible browsers require manual installation.
 
-For Chrome and Yandex Browser, the guide walks through developer mode, loading the unpacked extension, checking installation, and connecting the tab. For Firefox, it guides you through installing the signed XPI in the add-ons manager and checking the connection.
+**For builds from the current source:** the signed Firefox XPI 1.0.4 in this repository predates the tab-scoped credentials fix. The application does not use cookies from that old version. To test the updated source, load `extensions/firefox-development/manifest.json` as a temporary add-on using `about:debugging#/runtime/this-firefox`; Firefox removes it on restart. A new Mozilla signature is required for permanent installation; see [FIREFOX-SIGNING.md](FIREFOX-SIGNING.md).
+
+For Chrome and Yandex Browser, the guide walks through developer mode, loading the unpacked extension, checking installation, and connecting the tab. For Firefox, the guide requires the current Mozilla-signed XPI; it is not available in the beta package that omits the Firefox connector.
 
 The guide waits until it confirms that the extension has appeared. If you cancel folder selection or the browser reports an error, use **Retry loading**. If StreamShelf Connector is disabled, the guide highlights the switch or the enable button. Review and confirm browser prompts yourself; an already enabled extension skips that step.
 

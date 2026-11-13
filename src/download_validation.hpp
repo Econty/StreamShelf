@@ -11,6 +11,18 @@ inline bool looksLikeHtml(const std::string &data) {
 }
 enum class ExpectedStreams { AnyMedia, Audio, Video, VideoAndAudio };
 
+inline bool isPlayableVideoStream(const Json &stream) {
+    if (!stream.is_object() || str(stream, "codec_type") != "video") return false;
+    auto disposition = stream.find("disposition");
+    if (disposition != stream.end() && disposition->is_object()) {
+        auto attached = disposition->find("attached_pic");
+        if (attached != disposition->end() &&
+            ((attached->is_boolean() && attached->get<bool>()) ||
+             (attached->is_number() && attached->get<double>() != 0))) return false;
+    }
+    return true;
+}
+
 // A nonzero exit or malformed/empty output is not evidence of a media file.
 inline bool probeMatches(int exitCode, const Json &probe, ExpectedStreams expected) {
     if (exitCode != 0 || !probe.is_object() || !probe.contains("streams") || !probe["streams"].is_array()) return false;
@@ -19,7 +31,7 @@ inline bool probeMatches(int exitCode, const Json &probe, ExpectedStreams expect
         if (!stream.is_object()) continue;
         auto it = stream.find("codec_type");
         if (it == stream.end() || !it->is_string()) continue;
-        video |= it->get_ref<const std::string &>() == "video";
+        video |= isPlayableVideoStream(stream);
         audio |= it->get_ref<const std::string &>() == "audio";
     }
     switch (expected) {

@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 namespace ss {
 enum class FirefoxGuideStage { OpenManager, OpenMenu, InstallFile, SelectFile, ConfirmInstall, Enable, Connect, Done };
@@ -14,6 +15,26 @@ inline bool firefoxRemovedNotice(const std::wstring &name) {
     return false;
 }
 enum class FirefoxPickerAction { Navigate, SelectFile, OpenFile, Wait };
+// A browser Open dialog is only a possible add-on picker immediately after
+// the installation menu was observed in the target browser window. A dialog
+// from any other window must not advance the guide.
+struct FirefoxPickerGuard {
+    uint64_t menuSeenAt = 0;
+    bool accepted = false;
+    void observeMenu(bool manager, bool menu, uint64_t now) {
+        if (manager && menu) menuSeenAt = now;
+    }
+    bool observePicker(bool picker, bool sameOwner, uint64_t now) {
+        if (!picker) {
+            if (accepted) { accepted = false; menuSeenAt = 0; }
+            return false;
+        }
+        if (!sameOwner) { accepted = false; menuSeenAt = 0; return false; }
+        if (accepted) return true;
+        if (menuSeenAt && now >= menuSeenAt && now - menuSeenAt <= 5000) return accepted = true;
+        return false;
+    }
+};
 inline FirefoxPickerAction firefoxPickerAction(bool folderReady, bool fileFound, bool fileSelected, bool filenameReady) {
     if (filenameReady || fileSelected) return FirefoxPickerAction::OpenFile;
     if (fileFound) return FirefoxPickerAction::SelectFile;

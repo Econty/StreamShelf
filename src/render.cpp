@@ -267,7 +267,7 @@ unsigned Canvas::createImage(const PreviewImage &image) {
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
     return texture;
 }
-void Canvas::deleteImage(unsigned texture){if(texture)glDeleteTextures(1,&texture);}
+void Canvas::deleteImage(unsigned texture){if(texture)retiredImages.push_back(texture);}
 void Canvas::image(unsigned texture,Rect r,int w,int h,float alpha){
     if(!texture||!w||!h)return;
     float fit=std::min(r.w/w,r.h/h);
@@ -328,6 +328,12 @@ void Canvas::render() {
         glDrawArrays(GL_TRIANGLES, b.start, b.count);
     }
     glDisable(GL_SCISSOR_TEST);
+    // Release evicted images only after all batches that may reference them have
+    // been drawn; otherwise GL can reuse their names during this same frame.
+    if (!retiredImages.empty()) {
+        glDeleteTextures(GLsizei(retiredImages.size()), retiredImages.data());
+        retiredImages.clear();
+    }
 }
 void Canvas::capture() {
     if (snapshotW != pixelW || snapshotH != pixelH) return;
@@ -340,6 +346,10 @@ std::string Canvas::driver() {
            (const char *)glGetString(GL_RENDERER) + " / " + (const char *)glGetString(GL_VERSION);
 }
 void Canvas::destroy() {
+    if (!retiredImages.empty()) {
+        glDeleteTextures(GLsizei(retiredImages.size()), retiredImages.data());
+        retiredImages.clear();
+    }
     if (program) {
         glDeleteTextures(1, &font);
         glDeleteTextures(1, &history);

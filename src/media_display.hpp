@@ -2,6 +2,13 @@
 #include "core.hpp"
 #include "interface_text.hpp"
 namespace ss {
+// Each item carries the title of its own page, even when results from multiple
+// analyses are kept in the same list.
+inline std::string mediaJobTitle(const Media &m) {
+    if (m.sourceTitle.empty()) return m.title;
+    if (m.title.empty() || m.title == m.sourceTitle) return m.sourceTitle;
+    return m.sourceTitle + " · " + m.title;
+}
 inline std::string displayMediaTitle(std::string_view language, const Media &m) {
     if (language != "en") return m.title;
     if (m.id == "metadata" && m.title == "Метаданные JSON") return "JSON metadata";
@@ -11,7 +18,7 @@ inline std::string displayMediaTitle(std::string_view language, const Media &m) 
     return m.title;
 }
 inline std::string mediaSearchText(std::string_view language, const Media &m) {
-    return m.title + " " + displayMediaTitle(language, m) + " " + m.language + " " + m.id + " " + m.vcodec + " " + m.acodec;
+    return m.sourceTitle + " " + m.title + " " + displayMediaTitle(language, m) + " " + m.language + " " + m.id + " " + m.vcodec + " " + m.acodec;
 }
 inline bool matchesMediaCategory(const Media &m, const std::string &category) {
     if (category == "Все категории") return true;

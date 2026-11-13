@@ -13,13 +13,14 @@
       const u=new URL(value,location.href);
       if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.href.length>16000)return;
       const previous=sent.get(u.href);
-      if(previous!==undefined&&(!mime||previous===mime))return;
+      const current={mime:mime||previous?.mime||'',thumbnail:thumbnail||previous?.thumbnail||'',title:String(title||previous?.title||'').slice(0,300)};
+      if(previous && previous.mime===current.mime && previous.thumbnail===current.thumbnail && previous.title===current.title)return;
       if(sent.size>=1000&&!sent.has(u.href)){
         if(mime.startsWith('image/'))return;
-        const image=[...sent].find(([,type])=>type.startsWith('image/'));
+        const image=[...sent].find(([,item])=>item.mime.startsWith('image/'));
         if(image)sent.delete(image[0]);else return;
       }
-      sent.set(u.href,mime);items.push({url:u.href,mime,source,thumbnail,title:String(title).slice(0,300)});
+      sent.set(u.href,current);items.push({url:u.href,...current,source});
     }catch{}
   }
   function timing(entries){
@@ -105,7 +106,7 @@
   }
   function schedule(){clearTimeout(timer);timer=setTimeout(scan,250);}
   const observer=new MutationObserver(schedule);
-  observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['src','href','content','poster','type','data-src','data-original','data-video-src','data-audio-src']});
+  observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['src','href','content','poster','title','aria-label','type','data-src','data-original','data-video-src','data-audio-src']});
   const events=['loadedmetadata','loadeddata','play','canplay'];
   for(const name of events)document.addEventListener(name,schedule,true);
   try{resourceObserver=new PerformanceObserver(list=>timing(list.getEntries()));resourceObserver.observe({type:'resource',buffered:true});}catch{}

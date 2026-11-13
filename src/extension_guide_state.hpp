@@ -1,7 +1,24 @@
 #pragma once
 #include <cstdint>
+#include <map>
 #include <string>
 namespace ss {
+inline bool guideProcessDescendsFrom(uint32_t process, uint32_t ancestor, const std::map<uint32_t,uint32_t> &parents) {
+    if (!process || !ancestor) return false;
+    for (int depth = 0; depth < 16 && process; ++depth) {
+        if (process == ancestor) return true;
+        auto it = parents.find(process);
+        if (it == parents.end() || it->second == process) return false;
+        process = it->second;
+    }
+    return false;
+}
+// A window found solely by executable name does not identify a browser profile.
+// Once a profile-specific launch has produced a new window, that exact window
+// can be reused for a retry within the same guide session.
+inline bool guideCanReuseBrowserWindow(bool explicitProfile, bool windowBoundToLaunch) {
+    return !explicitProfile || windowBoundToLaunch;
+}
 inline bool verifiedExtensionPage(int navigationPhase, bool internalUrl, bool pageControls) {
     return navigationPhase == 5 && internalUrl && pageControls;
 }

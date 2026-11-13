@@ -142,6 +142,10 @@ inline std::string editedMetadataJson(const std::string &content, const Assembly
     if(str(data,"title")!=source.metadataEditTitle)data["title"]=source.metadataEditTitle;
     if(str(data,"artist")!=source.metadataEditArtist)data["artist"]=source.metadataEditArtist;
     if(str(data,"description")!=source.metadataEditDescription)data["description"]=source.metadataEditDescription;
+    // The builder also exposes string tags from this JSON.  Apply only the
+    // changed values, so a stale UI snapshot cannot undo an explicit JSON edit.
+    for(const auto &[key,value]:source.extraTags)
+        if(metadataTagChanged(source.originalExtraTags,key,value))data[key]=value;
     for(const auto &key:source.metadataRemoved)data.erase(key);
     for(const auto &[key,value]:source.metadataOverrides)data[key]=value;
     if(!source.metadataPathEdits.is_array())throw std::runtime_error("Некорректный список изменений JSON.");

@@ -26,6 +26,9 @@ for(const family of ['chromium','firefox']){
   let has=path=>resources().some(m=>m.item.url===`https://media.example/${path}`);
   check(has('opaque-video')&&has('opaque-audio')&&has('source-no-extension'),`${family}: extensionless audio/video elements reach application`);
   check(resources().some(m=>m.item.url==='https://media.example/opaque-video'&&m.item.thumbnail==='https://media.example/video-poster.png'&&m.item.title==='Known test video'),`${family}: exact video keeps its own poster and title`);
+  video.poster='https://media.example/updated-poster.png';video.title='Updated title';
+  mutations.at(-1).fn();for(const fn of [...timers.values()])fn();timers.clear();
+  check(resources().some(m=>m.item.url==='https://media.example/opaque-video'&&m.item.thumbnail===video.poster&&m.item.title===video.title),`${family}: changed poster and title update an existing video`);
   check(has('voice-id')&&has('json-video')&&has('poster'),`${family}: structured page data exposes attachments and thumbnails`);
   check(has('playlist.m3u8?expires=1'),`${family}: escaped media URL in page code is parsed without executing code`);
   check(has('previous.mpd')&&has('mime-only'),`${family}: previously loaded manifest and MIME-only resource are recovered`);

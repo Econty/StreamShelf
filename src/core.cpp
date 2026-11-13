@@ -15,9 +15,15 @@ double number(const Json &j, const char *k, double f) {
     return i != j.end() && i->is_number() ? i->get<double>() : f;
 }
 bool httpUrl(const std::string &s) {
-    return s.size() < 32768 && (s.rfind("https://", 0) == 0 || s.rfind("http://", 0) == 0) &&
-           s.find_first_of("\r\n\t ") == std::string::npos &&
-           s.find('@', s.find("://") + 3) == std::string::npos;
+    if (s.size() >= 32768 || (s.rfind("https://", 0) != 0 && s.rfind("http://", 0) != 0) ||
+        std::any_of(s.begin(), s.end(), [](unsigned char c) { return c <= ' ' || c == 127 || c == '\\'; }))
+        return false;
+    // User information is forbidden in the authority, but @ is valid in a
+    // path, query or fragment (for example /@channel).
+    const auto begin = s.find("://") + 3;
+    const auto end = s.find_first_of("/?#", begin);
+    const auto authority = s.substr(begin, end - begin);
+    return !authority.empty() && authority.find('@') == std::string::npos;
 }
 Analysis parseAnalysis(const Json &j, const std::string &url) {
     if (!j.is_object())
@@ -28,6 +34,7 @@ Analysis parseAnalysis(const Json &j, const std::string &url) {
     auto add = [&](Media m) {
         m.key = m.category + "|" + m.id + "|" + m.url + "|page:" + url;
         m.page = url;
+        m.sourceTitle = a.title;
         if(m.thumbnail.empty())m.thumbnail=str(j,"thumbnail");
         a.items.push_back(std::move(m));
     };

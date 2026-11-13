@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "connector_uninstall.hpp"
 #include "interface_text.hpp"
 #include <windowsx.h>
 #include <shellapi.h>
@@ -54,6 +55,11 @@ void toggleWindow(HWND h) {
 static LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     try {
         switch (m) {
+        case WM_GETOBJECT:
+            if (ui && DWORD(l)==DWORD(OBJID_CLIENT)) return ui->accessibilityObject(w);
+            break;
+        case ss::AccessibilityCommandMessage:
+            return ui ? ui->accessibilityCommand(uint64_t(w)) : 0;
         case WM_ERASEBKGND:
             return 1;
         case WM_SIZE:
@@ -234,6 +240,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     GuidedBrowser smokeBrowser = GuidedBrowser::None;
     fs::path smokeReport;
     bool watchInstallation = false, watchToolbar = false;
+    bool unregisterIfOwned = false;
     {
         int argc = 0; auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         for (int i = 1; argv && i < argc; ++i) {
@@ -243,6 +250,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
             } else if (std::wstring(argv[i]) == L"--test-report" && i + 1 < argc) smokeReport = argv[++i];
             else if (std::wstring(argv[i]) == L"--test-installation-flow") watchInstallation = true;
             else if (std::wstring(argv[i]) == L"--test-toolbar-flow") watchToolbar = true;
+            else if (std::wstring(argv[i]) == L"--unregister-connector-if-owned") unregisterIfOwned = true;
         }
         if (argv) LocalFree(argv);
     }
@@ -250,6 +258,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
         auto filename = executable().filename().wstring();
         if (filename == L"StreamShelf.Host.exe")
             return nativeHostMain();
+        if (unregisterIfOwned) {
+            try { unregisterConnectorIfOwned(dataRoot(), executable(), HKEY_CURRENT_USER); return 0; }
+            catch (...) { return 1; }
+        }
+        const HRESULT comResult=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+        struct FinishCom {HRESULT result;~FinishCom(){if(SUCCEEDED(result))CoUninitialize();}} finishCom{comResult};
         try {
             const auto settings = dataRoot() / L"settings.dpapi";
             if (fs::exists(settings)) {
@@ -293,7 +307,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
         if (!h)
             throw std::runtime_error("CreateWindow");
         DragAcceptFiles(h, TRUE);
-        if(auto dwm=LoadLibraryW(L"dwmapi.dll")) {
+        if(auto dwm=LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
             auto attribute=reinterpret_cast<HRESULT(WINAPI*)(HWND,DWORD,LPCVOID,DWORD)>(GetProcAddress(dwm,"DwmSetWindowAttribute"));
             if(attribute){BOOL dark=TRUE;attribute(h,20,&dark,sizeof(dark));COLORREF border=0xfffffffe;attribute(h,34,&border,sizeof(border));}
             FreeLibrary(dwm);
@@ -375,7 +389,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
             auto previous = std::chrono::steady_clock::now();
             auto nextFrame = previous;
             renderFrame = [&] {
-                model.drain();
+                if (!screen.interactionInProgress() && model.drain()) screen.invalidateModelSnapshot();
                 if (IsIconic(h))
                     return;
                 RECT r;
@@ -400,7 +414,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
                 }
                 if (!run)
                     break;
-                model.drain();
+                if (!screen.interactionInProgress() && model.drain()) {
+                    screen.invalidateModelSnapshot();
+                    nextFrame = std::chrono::steady_clock::now();
+                }
                 if (smoke && !smokeFinished) {
                     auto now = GetTickCount64();
                     // Match the real button's precondition: StreamShelf owns foreground focus.
