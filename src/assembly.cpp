@@ -378,7 +378,7 @@ void App::enqueueAssembly() {
             source.enabled=true;parent->sources.push_back(source);queued.push_back(parent);selectedJob=parent->id;
         }
         {std::lock_guard lock(jobsMutex);jobs.insert(jobs.end(),queued.begin(),queued.end());}
-        constructorOpen=false;requestedPage=2;saveHistory();jobsCv.notify_all();notify("Отдельное сохранение добавлено в очередь: "+std::to_string(draft.size()));return;
+        constructorOpen=false;requestedPage=2;stageDownloadAccess(queued);jobsCv.notify_all();notify("Отдельное сохранение добавлено в очередь: "+std::to_string(draft.size()));return;
     }
     if(std::any_of(draft.begin(),draft.end(),[](const auto &s){return s.metadataPending;}))
         throw std::runtime_error("Дождитесь чтения метаданных дорожек");
@@ -469,7 +469,7 @@ void App::enqueueAssembly() {
     }
     {std::lock_guard lock(jobsMutex);jobs.insert(jobs.end(),children.begin(),children.end());jobs.push_back(parent);}
     selectedJob=parent->id;constructorOpen=false;requestedPage=2;
-    saveHistory();jobsCv.notify_all();notify("Загрузка источников и сборка добавлены в очередь");
+    stageDownloadAccess(children);jobsCv.notify_all();notify("Загрузка источников и сборка добавлены в очередь");
 }
 void App::resolveAssembly(const std::shared_ptr<Job> &parent,bool partial) {
     auto resolved=parent->sources;bool missing=false,playable=false;

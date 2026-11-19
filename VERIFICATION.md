@@ -1,5 +1,5 @@
-# StreamShelf 2.5 Beta verification
+# StreamShelf v2026.11.17 Beta verification
 
-The Windows x64 Release build completed with LLVM-MinGW and all 17 registered CTest checks passed. MediaInfo 26.10 was included from the locally installed, validly signed MediaArea library. The project includes the signed StreamShelf Connector 1.0.4 for Firefox.
+The portable Windows x64 Release build completed with LLVM-MinGW. The `native_core`, `guide_flow_resume`, `guide_profile_challenge`, `extension_installer`, and `firefox_package_validation` CTest checks passed. The archive includes the Mozilla-signed StreamShelf Connector 1.0.6 for Firefox, whose SHA-256 matches the package in the repository.
 
-Browser permission dialogs, multiple browser profiles, clean installations, and all media formats require separate real-world verification.
+Manual browser testing was outside the scope of this release check.

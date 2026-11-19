@@ -52,6 +52,7 @@ class Canvas {
     void begin(float, float, int, int, bool deferSnapshots = false);
     void rect(Rect, float, Ink);
     void border(Rect, float, Ink, Ink, float thickness = 1);
+    void outline(Rect, float radius, Ink, float thickness = 2);
     void circle(float, float, float, Ink);
     void glow(Rect, Ink);
     void line(float, float, float, float, float, Ink);

@@ -1,3 +1,4 @@
+#include "guide_profile_challenge.hpp"
 #include "extension_guide_state.hpp"
 #include "app.hpp"
 #include "probe_result.hpp"
@@ -6,14 +7,29 @@
 #include "download_validation.hpp"
 #include "http_resume.hpp"
 #include "media_display.hpp"
+#include "preview_policy.hpp"
+#include "media_preview.hpp"
 #include <fstream>
 #include <shlobj.h>
 #include <sddl.h>
 #include <iomanip>
+#include <wincrypt.h>
 namespace ss {
 // The same bound applies to encrypted history on both read and write.  Other
 // DPAPI files retain the smaller default read limit.
 static constexpr size_t QueueHistoryLimit = size_t(512) * 1024 * 1024;
+static std::wstring guideIdentityPath(const std::string &path) {
+    if (path.empty()) return {};
+    auto value = fs::path(wide(path)).lexically_normal().wstring();
+    DWORD needed = GetLongPathNameW(value.c_str(), nullptr, 0);
+    if (needed && needed < 32768) {
+        std::wstring expanded(needed, L'\0');
+        DWORD written = GetLongPathNameW(value.c_str(), expanded.data(), needed);
+        if (written && written < needed) { expanded.resize(written); value = std::move(expanded); }
+    }
+    if (!value.empty()) CharLowerBuffW(value.data(), DWORD(value.size()));
+    return value;
+}
 static Json mediaJson(const Media &m) {
     return {{"id", m.id},
             {"key", m.key},
@@ -117,6 +133,8 @@ App::App() {
                 // Old histories did not record their browser identity. They must
                 // not silently adopt whichever account happens to be selected now.
                 job->browserSourceRequired = v.value("browserSourceRequired", !v.value("localFile", false) && !v.value("assembly", false) && httpUrl(job->page));
+                const auto accessKey = str(v, "resumeAccessKey");
+                if (job->browserSourceRequired && validJobAccessKey(accessKey)) job->resumeAccessKey = accessKey;
                 job->assemblyInput = v.value("assemblyInput",false);
                 job->localFile=v.value("localFile",false);job->conversionSource=v.value("conversionSource",false);
                 job->assembly = v.value("assembly",false);
@@ -150,6 +168,11 @@ App::App() {
         }
     } catch (...) {
         historyRecoveryRequired = true;
+    }
+    if (!historyRecoveryRequired) {
+        std::set<std::string> retainedAccess;
+        for (const auto &job : jobs) if (!job->resumeAccessKey.empty()) retainedAccess.insert(job->resumeAccessKey);
+        removeOrphanJobAccess(root, retainedAccess);
     }
     if (historyRecoveryRequired) {
         logs.push_back({"Историю очереди не удалось восстановить", true});
@@ -220,6 +243,28 @@ bool App::drain() {
     bool changed = !v.empty();
     for (auto &f : v)
         f();
+    if (!extensionInstaller.active() && (installerProfileChallenge || !installerProfilePing.empty() || installerConnectionPending)) {
+        extensionInstaller.finishProfileVerification(wide(installerProfileUrl));
+        installerProfileChallenge.reset();
+        installerProfileSession.reset();
+        installerProfilePing.clear();
+        installerProfileUrl.clear();
+        installerConnectionPending = false;
+    } else if (extensionInstaller.active() && installerConnectionPending &&
+               !extensionInstaller.profileVerificationFinishing()) {
+        auto bound = installerProfileSession.lock();
+        const bool connected = bound && bound->alive && bound->verified && bound->setupReady && bound->languageSupported;
+        installerConnectionPending = false;
+        installerProfileChallenge.reset();
+        installerProfileSession.reset();
+        installerProfilePing.clear();
+        installerProfileUrl.clear();
+        if (connected) {
+            extensionInstaller.connectionEstablished();
+            notify("Расширение установлено и подключено");
+            requestedPage = 0;
+        }
+    }
     changed = updateAssemblies() || changed;
     for (auto it=workers.begin(); it!=workers.end();) {
         if (it->finished->load()) { if (it->thread.joinable()) it->thread.join(); it=workers.erase(it); }
@@ -291,9 +336,18 @@ void App::start() {
             if (!s) return;
             if (type == "pong") {
                 std::string actual; { std::lock_guard lock(s->mutex); actual = s->browserExecutable; }
-                bool matching = sameBrowserExecutable(actual, installerBrowserExecutable) && !extensionInstaller.hasExplicitProfile();
+                const bool profileMatches = !extensionInstaller.hasExplicitProfile() ||
+                    (installerProfileSession.lock() == s &&
+                     !installerProfilePing.empty() && str(j, "requestId") == installerProfilePing);
+                bool matching = sameBrowserExecutable(actual, installerBrowserExecutable) && profileMatches;
                 bool wasInstalling = extensionInstaller.active() && matching;
+                bool profileProof = installerProbeSession.lock() == s;
                 bool currentSetup = j.value("setupRevision", std::string()) == "2026-10-31-1";
+                const auto granted = j.find("hasSiteAccess");
+                if (granted != j.end() && granted->is_boolean()) {
+                    if (granted->get<bool>()) sessionsWithSiteAccess.insert(s->instanceSerial);
+                    else if (sessionsWithSiteAccess.erase(s->instanceSerial)) revokeSessionAccess(s);
+                }
                 s->setupReady = connectorSetupReady(currentSetup, j.value("hasSiteAccess", false));
                 s->setupApiSupported = currentSetup && j.value("setupApi", false);
                 if (extensionInstaller.active() && matching) {
@@ -301,12 +355,21 @@ void App::start() {
                     extensionInstaller.setExtensionReloadRequired(!currentSetup || !s->languageSupported);
                 }
                 if (extensionInstaller.active() && s->verified && matching && s->setupReady && s->languageSupported) {
-                    extensionInstaller.connectionEstablished();
-                    notify("Расширение установлено и подключено");
-                    requestedPage = 0;
+                    if (installerProfileSession.lock() == s && !installerProfileUrl.empty()) {
+                        if (!installerProfileKey.first.empty() && !installerProfileKey.second.empty())
+                            installerVerifiedProfiles[installerProfileKey] = s;
+                        if (installerProfileChallenge && installerProfileChallenge->url == installerProfileUrl)
+                            installerProfileChallenge->advance(GuideProbeProgress::proceeding);
+                        extensionInstaller.finishProfileVerification(wide(installerProfileUrl));
+                        installerConnectionPending = true;
+                    } else {
+                        extensionInstaller.connectionEstablished();
+                        notify("Расширение установлено и подключено");
+                        requestedPage = 0;
+                    }
                 }
                 refreshSessions();
-                if (s->verified && wasInstalling) {
+                if (s->verified && wasInstalling && !profileProof) {
                     auto it = std::find(sessions.begin(), sessions.end(), s);
                     if (it != sessions.end()) { sessionIndex = int(it - sessions.begin()); { std::lock_guard lock(s->mutex); if (!s->url.empty()) url = s->url; } refreshSessions(); }
                 }
@@ -315,10 +378,12 @@ void App::start() {
             if (type == "setupChanged") {
                 s->setupReady = false;
                 refreshSessions();
-                if (s->alive) work([s] { try { s->verifyConnection(); } catch (...) {} });
+                auto ping = installerProfileSession.lock() == s ? installerProfilePing : std::string();
+                if (s->alive) work([s, ping] { try { s->verifyConnection(ping); } catch (...) {} });
                 return;
             }
             if (type == "hello" || type == "tabSelected" || type == "tabClosed" || type == "disconnected") {
+                if (type == "disconnected") sessionsWithSiteAccess.erase(s->instanceSerial);
                 if (type == "hello" && s->languageSupported) {
                     const auto language = interfaceLanguage;
                     const auto revision = languageRevision.load();
@@ -329,18 +394,53 @@ void App::start() {
                     bool running = false;
                     for (auto &other : sessions) {
                         std::string actual; { std::lock_guard lock(other->mutex); actual = other->browserExecutable; }
-                        if (other->alive && other->verified && !extensionInstaller.hasExplicitProfile() && sameBrowserExecutable(actual, installerBrowserExecutable)) { running = true; break; }
+                        if (other->alive && other->verified &&
+                            (!extensionInstaller.hasExplicitProfile() || installerProfileSession.lock() == other) &&
+                            sameBrowserExecutable(actual, installerBrowserExecutable)) { running = true; break; }
                     }
                     extensionInstaller.setExtensionRunning(running);
                 }
                 if (type == "tabSelected") {
+                    const auto observedUrl = str(j, "url");
+                    const bool initialProof = extensionInstaller.isVerificationUrl(observedUrl);
+                    if (initialProof) {
+                        if (installerProbeUrls.size() >= 16) installerProbeUrls.erase(installerProbeUrls.begin());
+                        installerProbeUrls.insert(observedUrl);
+                        installerProbeSession = s;
+                    }
+                    const bool profileProof = installerProbeUrls.contains(observedUrl);
+                    const bool currentProfileProof = initialProof ||
+                        (installerProfileChallenge && observedUrl == installerProfileChallenge->url);
+                    if (extensionInstaller.active() && extensionInstaller.hasExplicitProfile() && currentProfileProof &&
+                        !installerProfileSession.lock()) {
+                        std::string actual; { std::lock_guard lock(s->mutex); actual = s->browserExecutable; }
+                        if (s->alive && sameBrowserExecutable(actual, installerBrowserExecutable)) {
+                            installerProfileSession = s;
+                            installerProbeSession = s;
+                            installerProfileUrl = observedUrl;
+                            installerProfilePing = initialProof ? "profile-initial-" + observedUrl : installerProfileChallenge->pingToken;
+                            if (installerProfileChallenge && installerProfileChallenge->url == observedUrl)
+                                installerProfileChallenge->advance(GuideProbeProgress::matched);
+                            extensionInstaller.finishProfileVerification(wide(observedUrl));
+                            auto ping = installerProfilePing;
+                            work([s, ping] { try { s->verifyConnection(ping); } catch (...) {} });
+                        }
+                    }
+                    // This temporary page identifies a browser profile; it is
+                    // not a user-selected source for downloads or scans.
+                    if (profileProof) { refreshSessions(); return; }
+                    if (installerProbeSession.lock() == s) installerProbeSession.reset();
                     auto it = std::find(sessions.begin(), sessions.end(), s);
                     if (it != sessions.end()) {
                         sessionIndex = int(it - sessions.begin());
-                        { std::lock_guard lock(s->mutex); url = s->url; }
+                        // Session may already contain a newer queued browser
+                        // event. Use this event's URL so a later probe cannot
+                        // leak through an earlier ordinary-tab notification.
+                        url = observedUrl;
                         refreshSessions();
                     }
-                } else if (type == "tabClosed" && session() == s) {
+                } else if (type == "tabClosed" && session() == s &&
+                           installerProbeSession.lock() != s) {
                     url.clear();
                     connection = "Вкладка закрыта — выберите страницу в браузере";
                 }
@@ -348,6 +448,7 @@ void App::start() {
             }
             // Older signed extensions may send unsolicited snapshots; do not retain them.
             if (type == "scanCredentials") return;
+            if (type == "credentialsChanged") return;
             if (session() != s)
                 return;
             if (type == "scanState" || type == "resource") {
@@ -364,6 +465,8 @@ void App::start() {
             } else if (type == "resource" && scanning && j.contains("item")) {
                 const auto eventSource = s->source();
                 if (j.contains("sourceId") && (!eventSource.extensionSource || !j["sourceId"].is_number_unsigned() || j["sourceId"].get<uint64_t>() != *eventSource.extensionSource)) return;
+                if (eventSource.credentialRevision && (!j.contains("credentialRevision") ||
+                    !j["credentialRevision"].is_number_unsigned() || j["credentialRevision"].get<uint64_t>() != *eventSource.credentialRevision)) return;
                 auto &i = j["item"];
                 auto u = str(i, "url");
                 if (!httpUrl(u) || media.size() > 5000)
@@ -375,6 +478,9 @@ void App::start() {
                 discovery.quality = str(i, "source");
                 discovery.thumbnail = str(i, "thumbnail");
                 discovery.title = str(i, "title");
+                const auto capturedKind = str(i,"kind","Ресурс");
+                const bool captureOnly = eventSource.valid() && !i.value("drm",false) &&
+                    (capturedKind == "Изображения" || capturedKind == "Превью" || capturedKind == "Субтитры");
                 auto existing = std::find_if(media.begin(), media.end(), [&](const auto &m) {
                     auto source = mediaSessions.find(m.key);
                     auto identity = mediaSources.find(m.key);
@@ -418,6 +524,7 @@ void App::start() {
                 mediaSessions[m.key] = s;
                 mediaSources[m.key] = eventSource;
                 if (needsProbe) enqueueProbe(m, s, scanGeneration, int(number(j, "tabId", -1)));
+                else if (captureOnly) enqueueProbe(m, s, scanGeneration, eventSource.tab, true);
             } else if (type == "notice" || type == "error") {
                 log(str(j, "message"), false);
                 notify(str(j, "message"));
@@ -650,7 +757,8 @@ void App::refreshSessions() {
     if (s) {
         std::lock_guard l(s->mutex);
         std::string browser = s->browser.find("YaBrowser/") != std::string::npos ? (interfaceLanguage == "ru" ? "Яндекс Браузер" : "Yandex Browser") : s->browser.find("Chrome/") != std::string::npos ? "Chrome" : (interfaceLanguage == "ru" ? "Браузер" : "Browser");
-        connection = !s->alive ? "Расширение отключено · " + browser : !s->verified ? "Нет подтверждения связи · " + browser : !s->setupReady ? "Требуется разрешение · " + browser : "Расширение подключено · " + browser + (s->title.empty() ? "" : " · " + s->title);
+        const bool probe = installerProbeSession.lock() == s || installerProbeUrls.contains(s->url);
+        connection = !s->alive ? "Расширение отключено · " + browser : !s->verified ? "Нет подтверждения связи · " + browser : !s->setupReady ? "Требуется разрешение · " + browser : "Расширение подключено · " + browser + (s->title.empty() || probe ? "" : " · " + s->title);
     } else
         connection = "Браузер не подключён";
 }
@@ -658,12 +766,14 @@ std::shared_ptr<Session> App::session() {
     return sessionIndex >= 0 && sessionIndex < int(sessions.size()) ? sessions[sessionIndex] : nullptr;
 }
 std::pair<std::string, Json> App::credentials(std::shared_ptr<Session> s, const std::string &u,
-                                              std::atomic_bool &cancel, const BrowserSource *source) {
+                                              std::atomic_bool &cancel, const BrowserSource *source, Session::CredentialSnapshot *pinned) {
     if (s) {
         try {
-            auto j = source ? s->credentials(u, *source, cancel) : s->credentials(u, cancel);
+            auto j = source ? s->credentials(u, *source, cancel, pinned) : s->credentials(u, cancel);
             return {cookies(j.value("cookies", Json::array())), j.value("headers", Json::object())};
         } catch (const BrowserSourceChanged &) {
+            throw;
+        } catch (const BrowserCredentialsChanged &) {
             throw;
         } catch (...) {
             if (cancel) throw;
@@ -676,6 +786,7 @@ std::pair<std::string, Json> App::credentials(std::shared_ptr<Session> s, const 
     return {fs::exists(p) ? validateCookies(unprotectFile(p)) : "", Json::object()};
 }
 void App::bindJobSource(Job &job, const Media &item) {
+    if (item.category == "Данные") return;
     auto it = mediaSessions.find(item.key);
     if (it == mediaSessions.end()) {
         if (item.id.rfind("network:", 0) == 0) throw BrowserSourceChanged();
@@ -685,9 +796,140 @@ void App::bindJobSource(Job &job, const Media &item) {
     job.browserSourceRequired = bool(job.session);
     if (job.session) {
         auto source = mediaSources.find(item.key);
-        if (source == mediaSources.end() || !job.session->sourceMatches(source->second)) throw BrowserSourceChanged();
+        if (source == mediaSources.end() || !source->second.valid()) throw BrowserSourceChanged();
         job.browserSource = source->second;
+        const auto current = job.session->source();
+        const bool canQuery = job.session->sourceMatches(job.browserSource) &&
+            current.credentialRevision == job.browserSource.credentialRevision;
+        job.resumeAccessKey = newJobAccessKey();
+        auto captured = capturedDownloadAccess(job);
+        if (!captured && isExtractedThumbnail(item))
+            captured = JobDownloadAccess{{"", Json::object()}, std::nullopt};
+        const bool checkpointed = captured && saveDownloadAccess(job, *captured);
+        if (!canQuery && !checkpointed) {
+            if (current == job.browserSource && current.credentialRevision != job.browserSource.credentialRevision)
+                throw BrowserCredentialsChanged();
+            throw BrowserSourceChanged();
+        }
+        job.preparingAccess = canQuery && !checkpointed;
     }
+}
+
+static bool subtitleNeedsPageAccess(const Job &job) {
+    return (job.item.category == "Субтитры" || job.item.category == "Автосубтитры") && httpUrl(job.page) &&
+        !job.item.language.empty() && (job.item.id.starts_with("subtitles:") || job.item.id.starts_with("automatic_captions:"));
+}
+
+static Json downloadAccessScope(const Job &job) {
+    return Json::array({job.id, job.item.id, job.page, jobCredentialTarget(job), job.item.url, job.pair});
+}
+
+bool App::saveDownloadAccess(Job &job, const JobDownloadAccess &access) {
+    if (job.resumeAccessKey.empty()) return false;
+    std::lock_guard lock(job.resumeAccessMutex);
+    if (job.resumeAccessRemoved) return false;
+    if (access.target.second.contains("Authorization") || (access.page && access.page->second.contains("Authorization"))) {
+        eraseJobAccess(dataRoot(), job.resumeAccessKey);
+        return false;
+    }
+    saveJobAccess(dataRoot(), job.resumeAccessKey, downloadAccessScope(job), access);
+    return true;
+}
+
+void App::discardDownloadAccess(Job &job, bool removed) {
+    if (job.resumeAccessKey.empty()) return;
+    std::lock_guard lock(job.resumeAccessMutex);
+    job.resumeAccessRemoved = job.resumeAccessRemoved || removed;
+    eraseJobAccess(dataRoot(), job.resumeAccessKey);
+}
+
+void App::revokeSessionAccess(const std::shared_ptr<Session> &session) {
+    siteAccessWithdrawnAt[session->instanceSerial] = GetTickCount64();
+    for (const auto &[key, owner] : mediaSessions) if (owner == session) mediaSources.erase(key);
+    std::erase_if(mediaCredentialSnapshots, [&](const auto &entry) {
+        const auto &snapshot = entry.second;
+        if (snapshot.owner != session->instanceSerial) return false;
+        mediaCredentialBytes -= snapshot.protectedData->size() + std::get<3>(entry.first).size() + snapshot.source.page.size();
+        return true;
+    });
+    std::lock_guard lock(jobsMutex);
+    for (const auto &job : jobs) {
+        if (job->session != session) continue;
+        try { discardDownloadAccess(*job, true); }
+        catch (...) { log("Не удалось удалить отозванный доступ загрузки."); }
+    }
+}
+
+JobDownloadAccess App::getDownloadAccess(Job &job, bool prepareOnly) {
+    if (job.cancel || stopping) throw std::runtime_error("Отменено");
+    const auto target = jobCredentialTarget(job);
+    const bool needsPage = subtitleNeedsPageAccess(job);
+    if (!job.browserSourceRequired) {
+        JobDownloadAccess access{{"", Json::object()}, std::nullopt};
+        if (isExtractedThumbnail(job.item)) return access;
+        try { access.target = credentials(nullptr, needsPage ? job.page : target, job.cancel); }
+        catch (...) { if (job.cancel || stopping) throw; log("Не удалось прочитать импортированные cookies. Пробуем без них."); }
+        if (needsPage) {
+            access.page = std::move(access.target);
+            access.target = subtitleDownloadAccess(job.page, target, *access.page);
+        }
+        return access;
+    }
+    {
+        std::lock_guard lock(job.resumeAccessMutex);
+        if (job.resumeAccessRemoved) throw BrowserCredentialsChanged();
+        if (!prepareOnly) {
+            auto saved = readJobAccess(dataRoot(), job.resumeAccessKey, downloadAccessScope(job));
+            if (saved && (!needsPage || saved->page)) return std::move(*saved);
+        }
+    }
+    if (job.session && job.session->sourceMatches(job.browserSource)) {
+        if (job.session->source().credentialRevision != job.browserSource.credentialRevision)
+            throw BrowserCredentialsChanged();
+        try {
+            JobDownloadAccess access{{"", Json::object()}, std::nullopt};
+            if (needsPage) {
+                access.page = credentials(job.session, job.page, job.cancel, &job.browserSource);
+                access.target = subtitleDownloadAccess(job.page, target, *access.page);
+            } else {
+                access.target = credentials(job.session, target, job.cancel, &job.browserSource);
+            }
+            if (job.cancel || stopping) throw std::runtime_error("Отменено");
+            const auto current = job.session->source();
+            if (current != job.browserSource) throw BrowserSourceChanged();
+            if (current.credentialRevision != job.browserSource.credentialRevision) throw BrowserCredentialsChanged();
+            try { saveDownloadAccess(job, access); }
+            catch (...) { log("Не удалось сохранить защищённый доступ для повтора загрузки."); }
+            return access;
+        } catch (const BrowserCredentialsChanged &) {
+            discardDownloadAccess(job);
+            throw;
+        } catch (const BrowserSourceChanged &) {
+            if (job.session->sourceMatches(job.browserSource)) discardDownloadAccess(job);
+            throw;
+        }
+    }
+    throw BrowserSourceChanged();
+}
+
+void App::stageDownloadAccess(const std::vector<std::shared_ptr<Job>> &pending) {
+    const auto clear = [this, &pending] {
+        for (const auto &job : pending) job->preparingAccess = false;
+        jobsCv.notify_all();
+    };
+    try {
+        saveHistory();
+        if (std::none_of(pending.begin(), pending.end(), [](const auto &job) { return job->preparingAccess.load(); })) return;
+        work([this, pending] {
+            for (const auto &job : pending) if (job->preparingAccess) {
+                if (!job->cancel && !stopping) {
+                    try { (void)getDownloadAccess(*job, true); } catch (...) {}
+                }
+                job->preparingAccess = false;
+                jobsCv.notify_all();
+            }
+        });
+    } catch (...) { clear(); throw; }
 }
 
 // Temporary plaintext credentials are needed by external tools, but must not
@@ -735,17 +977,87 @@ struct TempCookie {
     }
     ~TempCookie() { if (!path.empty()) { std::error_code ec; fs::remove(path, ec); } }
 };
-void App::enqueueProbe(const Media &item, const std::shared_ptr<Session> &source, uint64_t generation, int tab) {
+static constexpr size_t MediaAccessLimit = 128 * 1024;
+static constexpr size_t MediaAccessBudget = 32 * 1024 * 1024;
+static Session::CredentialSnapshot freezeMediaAccess(const std::shared_ptr<Session> &session,
+                                                    Session::CredentialSnapshot snapshot) {
+    if (!session || !snapshot.protectedData) return {};
+    std::lock_guard lock(session->mutex);
+    if (snapshot.protectedData->empty() || snapshot.protectedData->size() > MediaAccessLimit) return {};
+    snapshot.protectedData = std::make_shared<std::string>(*snapshot.protectedData);
+    return snapshot;
+}
+void App::rememberMediaAccess(const std::shared_ptr<Session> &owner, const std::string &target,
+                             Session::CredentialSnapshot snapshot) {
+    if (!owner || !snapshot.protectedData || snapshot.owner != owner->instanceSerial || !snapshot.source.valid())
+        return;
+    if (const auto withdrawal = siteAccessWithdrawnAt.find(snapshot.owner);
+        withdrawal != siteAccessWithdrawnAt.end() && snapshot.captured <= withdrawal->second) return;
+    MediaCredentialKey key{snapshot.owner, snapshot.source.generation, snapshot.source.credentialRevision, target};
+    const auto existing = mediaCredentialSnapshots.find(key);
+    const auto recordBytes = snapshot.protectedData->size() + target.size() + snapshot.source.page.size();
+    size_t freed = 0;
+    if (existing != mediaCredentialSnapshots.end()) {
+        if (existing->second.captured > snapshot.captured) return;
+        freed = existing->second.protectedData->size() + std::get<3>(existing->first).size() + existing->second.source.page.size();
+    } else if (mediaCredentialSnapshots.size() >= 5000) return;
+    if (recordBytes > MediaAccessBudget - (mediaCredentialBytes - freed)) return;
+    mediaCredentialSnapshots.insert_or_assign(std::move(key), std::move(snapshot));
+    mediaCredentialBytes = mediaCredentialBytes - freed + recordBytes;
+}
+std::optional<JobDownloadAccess> App::capturedDownloadAccess(const Job &job) {
+    if (!job.session || !job.browserSource.valid()) return {};
+    const auto read = [&](const std::string &target) -> std::optional<DownloadAccess> {
+        const auto found = mediaCredentialSnapshots.find({job.session->instanceSerial, job.browserSource.generation, job.browserSource.credentialRevision, target});
+        if (found == mediaCredentialSnapshots.end()) return {};
+        const auto &snapshot = found->second;
+        if (snapshot.source != job.browserSource || snapshot.source.credentialRevision != job.browserSource.credentialRevision ||
+            !snapshot.protectedData || snapshot.protectedData->size() > MediaAccessLimit) return {};
+        const auto &blob = *snapshot.protectedData;
+        DATA_BLOB input{DWORD(blob.size()), reinterpret_cast<BYTE *>(const_cast<char *>(blob.data()))}, output{};
+        if (!CryptUnprotectData(&input, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &output)) return {};
+        struct ClearOutput {
+            DATA_BLOB &blob;
+            ~ClearOutput() { SecureZeroMemory(blob.pbData, blob.cbData); LocalFree(blob.pbData); }
+        } clear{output};
+        try {
+            const auto parsed = Json::parse(output.pbData, output.pbData + output.cbData);
+            if (str(parsed,"url") != target || number(parsed,"tabId",-1) != snapshot.source.tab ||
+                str(parsed,"storeId") != snapshot.source.store ||
+                parsed.at("sourceId") != Json(*snapshot.source.extensionSource) ||
+                (snapshot.source.credentialRevision && parsed.at("credentialRevision") != Json(*snapshot.source.credentialRevision))) return {};
+            DownloadAccess access{cookies(parsed.at("cookies")), parsed.at("headers")};
+            checkDownloadAccess(access);
+            return access;
+        } catch (...) { return {}; }
+    };
+    const auto targetUrl = jobCredentialTarget(job);
+    auto target = read(targetUrl);
+    if (subtitleNeedsPageAccess(job)) {
+        auto page = read(job.page);
+        if (!page) return {};
+        if (!target) target = subtitleDownloadAccess(job.page, targetUrl, *page);
+        return JobDownloadAccess{std::move(*target), std::move(page)};
+    }
+    if (!target) return {};
+    return JobDownloadAccess{std::move(*target), std::nullopt};
+}
+void App::enqueueProbe(const Media &item, const std::shared_ptr<Session> &source, uint64_t generation, int tab, bool captureOnly) {
     const auto kind = str(item.data, "kind");
     auto identity = mediaSources.find(item.key);
-    ProbeTask task{item, source, identity == mediaSources.end() ? BrowserSource{} : identity->second, probeCancel, generation, tab, kind == "HLS" || kind == "DASH" ? 3 : kind == "Видео" ? 2 : 1};
+    ProbeTask task{item, source, identity == mediaSources.end() ? BrowserSource{} : identity->second, probeCancel, generation, tab,
+        captureOnly ? 0 : kind == "HLS" || kind == "DASH" ? 3 : kind == "Видео" ? 2 : 1, captureOnly};
     {
         std::lock_guard lock(probeMutex);
         probes.erase(std::remove_if(probes.begin(), probes.end(), [](const ProbeTask &p) { return p.cancelled->load(); }), probes.end());
         if (probes.size() >= 256) {
             auto it = std::find_if(media.begin(), media.end(), [&](const Media &m) { return m.key == item.key; });
-            if (it != media.end()) it->quality = "Проверка отложена";
-            return;
+            if (captureOnly) return;
+            if (probes.back().captureOnly) probes.pop_back();
+            else {
+                if (it != media.end()) it->quality = "Проверка отложена";
+                return;
+            }
         }
         auto position = std::find_if(probes.begin(), probes.end(), [&](const ProbeTask &p) { return p.priority < task.priority; });
         probes.insert(position, std::move(task));
@@ -762,7 +1074,7 @@ void App::probeLoop() {
             task = std::move(probes.front()); probes.pop_front();
         }
         if (*task.cancelled) continue;
-        {
+        if (!task.captureOnly) {
             std::unique_lock lock(readyMutex);
             readyCv.wait(lock, [&] { return ready || stopping || *task.cancelled; });
         }
@@ -774,10 +1086,12 @@ void App::probeLoop() {
         });
         Json result;
         try {
-            std::shared_lock lock(toolsMutex);
             std::pair<std::string, Json> cred;
-            try { cred = credentials(task.session, task.item.format ? task.item.page : task.item.url, cancel, task.session ? &task.source : nullptr); }
+            const auto target = task.item.format ? task.item.page : task.item.url;
+            Session::CredentialSnapshot snapshot;
+            try { cred = credentials(task.session, target, cancel, task.session ? &task.source : nullptr, &snapshot); }
             catch (const BrowserSourceChanged &) { throw; }
+            catch (const BrowserCredentialsChanged &) { throw; }
             catch (...) {
                 if (cancel || stopping || *task.cancelled) throw;
                 std::lock_guard guard(task.session->mutex);
@@ -785,25 +1099,33 @@ void App::probeLoop() {
                 // A public resource may still be probed without optional site permissions.
                 cred = {"", Json::object()};
             }
-            if (cred.second.contains("Authorization")) throw std::runtime_error("Authorization requires a scoped request");
-            std::vector<std::wstring> args{L"-v", L"error", L"-rw_timeout", L"6000000", L"-protocol_whitelist", L"http,https,tcp,tls,crypto", L"-analyzeduration", L"2000000", L"-probesize", L"2000000"};
-            for (auto name : {"User-Agent", "Referer"}) if (cred.second.contains(name)) {
-                auto value = str(cred.second, name);
-                if (value.find_first_of("\r\n") == value.npos) { args.push_back(std::string(name) == "User-Agent" ? L"-user_agent" : L"-referer"); args.push_back(wide(value)); }
+            if (auto frozen = freezeMediaAccess(task.session, std::move(snapshot)); frozen.protectedData) {
+                post([this, owner = task.session, key = task.item.key, target, frozen = std::move(frozen)]() mutable {
+                    const auto linked = mediaSources.find(key);
+                    const auto ownerEntry = mediaSessions.find(key);
+                    if (linked != mediaSources.end() && ownerEntry != mediaSessions.end() && ownerEntry->second == owner &&
+                        linked->second == frozen.source && linked->second.credentialRevision == frozen.source.credentialRevision)
+                        rememberMediaAccess(owner, target, std::move(frozen));
+                });
             }
-            // FFprobe versions in use do not reliably keep host-only and
-            // Secure cookies scoped on redirects. Probe without cookies; the
-            // authenticated download path uses yt-dlp's scoped cookie jar.
-            args.insert(args.end(), {L"-show_entries", L"stream=codec_name,codec_type,width,height:stream_disposition=attached_pic:format=duration,format_name", L"-of", L"json", wide(task.item.url)});
-            auto process = runProcess(tool(L"ffprobe.exe"), args, nullptr, cancel, true);
-            if (!process.code && !cancel) result = Json::parse(process.output, nullptr, false);
-            else if (!cancel && !stopping && !*task.cancelled) log("Не удалось уточнить параметры: " + redact(process.error.substr(0, 500)));
-        } catch (const std::exception &e) { if (!cancel && !stopping && !*task.cancelled) log("Не удалось уточнить параметры: " + redact(e.what())); }
+            if (!task.captureOnly) {
+                std::shared_lock lock(toolsMutex);
+                if (cred.second.contains("Authorization")) throw std::runtime_error("Authorization requires a scoped request");
+                std::vector<std::wstring> args{L"-v", L"error", L"-rw_timeout", L"6000000", L"-protocol_whitelist", L"http,https,tcp,tls,crypto", L"-analyzeduration", L"2000000", L"-probesize", L"2000000"};
+                if (auto value = str(cred.second,"User-Agent"); !value.empty() && value.find_first_of("\r\n") == value.npos)
+                    args.insert(args.end(), {L"-user_agent", wide(value)});
+                args.insert(args.end(), {L"-show_entries", L"stream=codec_name,codec_type,width,height:stream_disposition=attached_pic:format=duration,format_name", L"-of", L"json", wide(task.item.url)});
+                auto process = runProcess(tool(L"ffprobe.exe"), args, nullptr, cancel, true);
+                if (!process.code && !cancel) result = Json::parse(process.output, nullptr, false);
+                else if (!cancel && !stopping && !*task.cancelled) log("Не удалось уточнить параметры: " + redact(process.error.substr(0, 500)));
+            }
+        } catch (const std::exception &e) { if (!task.captureOnly && !cancel && !stopping && !*task.cancelled) log("Не удалось уточнить параметры: " + redact(e.what())); }
         finished = true; watchdog.join();
-        if (stopping || *task.cancelled) continue;
+        if (task.captureOnly || stopping || *task.cancelled) continue;
         post([this, task = std::move(task), result = std::move(result)]() mutable {
             if (*task.cancelled || task.generation != scanGeneration || session() != task.session) return;
-            { std::lock_guard lock(task.session->mutex); if (task.session->tab != task.tab || task.session->url != task.item.page) return; }
+            const auto current = task.session->source();
+            if (current != task.source || current.credentialRevision != task.source.credentialRevision) return;
             auto it = std::find_if(media.begin(), media.end(), [&](const Media &m) { return m.key == task.item.key && m.url == task.item.url; });
             if (it == media.end()) return;
             if (!applyMediaProbe(*it, result)) { it->category = "Требуют проверки"; it->quality = "Не удалось уточнить параметры"; }
@@ -849,6 +1171,41 @@ void App::resetCredentialSnapshots() {
         source->credentialScanId=0;
     }
 }
+void App::prepareAnalysisAccess(const std::shared_ptr<Session> &session, const std::string &url, std::atomic_bool &cancel,
+                                BrowserSource &source, Session::CredentialSnapshot &snapshot,
+                                const std::function<void(const DownloadAccess &)> &prepare) {
+    if (!session) { prepare(credentials(nullptr, url, cancel)); return; }
+    const auto original = source;
+    const auto currentSource = [&] {
+        auto current = session->source();
+        if (!session->alive || !session->scopedCredentialsSupported || !current.valid() || current != original)
+            throw BrowserSourceChanged();
+        return current;
+    };
+    constexpr int attempts = 3;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        if (stopping || cancel) throw std::runtime_error("Анализ отменён");
+        auto current = currentSource();
+        Session::CredentialSnapshot fresh;
+        try {
+            auto access = credentials(session, url, cancel, &current, &fresh);
+            if (currentSource().credentialRevision != current.credentialRevision)
+                throw BrowserCredentialsRefreshPending();
+            prepare(access);
+            if (stopping || cancel) throw std::runtime_error("Анализ отменён");
+            if (currentSource().credentialRevision != current.credentialRevision)
+                throw BrowserCredentialsRefreshPending();
+            source = std::move(current);
+            snapshot = std::move(fresh);
+            return;
+        } catch (const BrowserCredentialsRefreshPending &) {
+            if (attempt + 1 == attempts) throw;
+            for (int waited = 0; waited < (attempt + 1) * 40 && !stopping && !cancel; waited += 5) Sleep(5);
+        }
+    }
+    throw BrowserCredentialsRefreshPending();
+}
+
 void App::analyze(const std::string &u, bool deep) {
     if (!httpUrl(u)) {
         error("Введите HTTP/HTTPS-ссылку");
@@ -863,11 +1220,11 @@ void App::analyze(const std::string &u, bool deep) {
     auto generation = ++analysisGeneration;
     // Session snapshots stay bound to the current source generation. Clearing
     // them here would discard the authentication baseline of queued jobs.
-    if (!keepResults) { media.clear(); mediaSessions.clear(); mediaSources.clear(); previews.clear(); ++previewGeneration; analysis = {}; selectedMedia.clear(); }
+    if (!keepResults) { media.clear(); mediaSessions.clear(); mediaSources.clear(); clearMediaAccess(); previews.clear(); ++previewGeneration; analysis = {}; selectedMedia.clear(); }
     busy = true;
     auto s = manualAnalysis ? nullptr : session();
-    const auto source = s ? s->source() : BrowserSource{};
-    work([this, u, s, source, cancel, generation, deep] {
+    auto source = s ? s->source() : BrowserSource{};
+    work([this, u, s, source = std::move(source), cancel, generation, deep]() mutable {
         try {
             {
                 std::unique_lock l(readyMutex);
@@ -876,19 +1233,26 @@ void App::analyze(const std::string &u, bool deep) {
             if (stopping || *cancel)
                 return;
             std::shared_lock tools(toolsMutex);
-            auto cred = credentials(s, u, *cancel, s ? &source : nullptr);
-            TempCookie file(cred.first);
-            auto args = headersArgs(cred.second);
-            args.insert(args.end(),
-                        {L"--ignore-config", L"--encoding", L"utf-8", L"--no-playlist",
-                         L"--quiet", L"--dump-single-json", L"--skip-download", L"--allow-unplayable-formats",
-                         L"--js-runtimes", L"deno:" + (dataRoot() / L"tools" / L"deno.exe").wstring()});
-            if (!file.path.empty()) {
-                args.push_back(L"--cookies");
-                args.push_back(file.path.wstring());
+            Session::CredentialSnapshot snapshot;
+            std::unique_ptr<TempCookie> file;
+            std::vector<std::wstring> args;
+            prepareAnalysisAccess(s, u, *cancel, source, snapshot, [&](const DownloadAccess &access) {
+                file = std::make_unique<TempCookie>(access.first);
+                args = headersArgs(access.second);
+                args.insert(args.end(),
+                            {L"--ignore-config", L"--encoding", L"utf-8", L"--no-playlist",
+                             L"--quiet", L"--dump-single-json", L"--skip-download", L"--allow-unplayable-formats",
+                             L"--js-runtimes", L"deno:" + (dataRoot() / L"tools" / L"deno.exe").wstring()});
+                if (!file->path.empty()) args.insert(args.end(), {L"--cookies", file->path.wstring()});
+                args.insert(args.end(), {L"--", wide(u)});
+            });
+            auto frozen = freezeMediaAccess(s, std::move(snapshot));
+            const auto analyzedAt = frozen.protectedData ? frozen.captured : GetTickCount64();
+            if (s) {
+                const auto current = s->source();
+                if (current != source || !s->alive) throw BrowserSourceChanged();
+                if (current.credentialRevision != source.credentialRevision) throw BrowserCredentialsRefreshPending();
             }
-            args.push_back(L"--");
-            args.push_back(wide(u));
             log("yt-dlp --dump-single-json --skip-download " + redact(u));
             auto result = runProcess(tool(L"yt-dlp.exe"), args, nullptr, *cancel, true);
             if (*cancel)
@@ -913,18 +1277,31 @@ void App::analyze(const std::string &u, bool deep) {
             if (!result.error.empty())
                 log(result.error, false);
             auto a = parseAnalysis(Json::parse(result.output), u);
-            post([this, a = std::move(a), s, source, cancel, generation]() mutable {
+            post([this, a = std::move(a), s, source, u, frozen = std::move(frozen), cancel, generation, analyzedAt, deep]() mutable {
                 if (*cancel || generation != analysisGeneration) return;
-                if (s && !s->sourceMatches(source)) { busy = false; error("Источник браузера изменился. Повторите анализ страницы."); return; }
+                if (s) {
+                    const auto withdrawal = siteAccessWithdrawnAt.find(s->instanceSerial);
+                    if (withdrawal != siteAccessWithdrawnAt.end() && analyzedAt <= withdrawal->second) {
+                        busy = false;
+                        if (!deep) error("Доступ к сайту изменился. Повторите анализ перед новой попыткой скачивания.");
+                        return;
+                    }
+                }
+                rememberMediaAccess(s, u, std::move(frozen));
                 analysis = std::move(a);
                 analysisSession = s;
                 for (auto item : analysis.items) {
                     // The same resource may be authorized differently in two browser profiles.
-                    item.key += "|session:" + (s ? s->id + ":" + std::to_string(source.generation) : std::string("manual"));
+                    item.key += "|session:" + (s ? std::to_string(s->instanceSerial) + ":" +
+                        std::to_string(source.generation) + ":" +
+                        (source.credentialRevision ? std::to_string(*source.credentialRevision) : "-") : std::string("manual"));
                     auto network = std::find_if(media.begin(), media.end(), [&](const Media &m) {
                         auto owner = mediaSessions.find(m.key);
                         auto identity = mediaSources.find(m.key);
-                        return owner != mediaSessions.end() && owner->second == s && (!s || (identity != mediaSources.end() && identity->second == source)) && m.id.rfind("network:", 0) == 0 && sameDiscoveredResource(m, item);
+                        return owner != mediaSessions.end() && owner->second == s &&
+                            (!s || (identity != mediaSources.end() && identity->second == source &&
+                                     identity->second.credentialRevision == source.credentialRevision)) &&
+                            m.id.rfind("network:", 0) == 0 && sameDiscoveredResource(m, item);
                     });
                     if (network != media.end()) {
                         auto old = *network;
@@ -961,30 +1338,62 @@ void App::analyze(const std::string &u, bool deep) {
                 busy = false;
                 notify("Анализ завершён");
             });
+        } catch (const BrowserCredentialsRefreshPending &) {
+            post([this, cancel, generation, deep] {
+                if (!*cancel && generation == analysisGeneration) {
+                    busy = false;
+                    if (!deep) error("Доступ к странице обновляется. Подождите немного и повторите анализ.");
+                }
+            });
+        } catch (const BrowserCookieFormatUnsupported &) {
+            post([this, cancel, generation, deep] {
+                if (!*cancel && generation == analysisGeneration) {
+                    busy = false;
+                    if (!deep) error("Браузер передал cookies, которые нельзя безопасно использовать для анализа. Для общедоступной страницы можно выбрать режим «Без браузера».");
+                }
+            });
         } catch (const std::exception &e) {
             auto message = redact(e.what());
             post([this, cancel, generation, message, deep] { if (!*cancel && generation == analysisGeneration) { busy = false; if (!deep) error(message); } });
         }
     });
 }
-std::string App::previewCacheKey(const Media &item) {
+static std::string previewLocalPath(const Media &item, const Job *job) {
+    if (job && job->done && job->state=="Готово" && !job->output.empty()) return job->output;
+    if (item.key.starts_with("local:")) return item.key.substr(6);
+    return {};
+}
+
+std::string App::previewCacheKey(const Media &item, const Job *job) {
     const auto foundSession = mediaSessions.find(item.key);
-    const auto selectedSession = foundSession != mediaSessions.end() ? foundSession->second : (item.format ? analysisSession : session());
+    auto selectedSession = job ? job->session : foundSession != mediaSessions.end() ? foundSession->second : nullptr;
     const auto foundSource = mediaSources.find(item.key);
-    const auto source = foundSource != mediaSources.end() ? foundSource->second : BrowserSource{};
-    // Equal image URLs may share work only within the same browser connection
-    // and document. A source without a thumbnail can produce an item-specific frame.
-    return Json::array({item.thumbnail.empty() ? "item" : "thumbnail",
-                        item.thumbnail.empty() ? item.key : item.thumbnail,
+    const auto source = job ? job->browserSource : foundSource != mediaSources.end() ? foundSource->second : BrowserSource{};
+    if (!source.valid()) selectedSession.reset();
+    return Json::array({item.key,item.thumbnail,previewLocalPath(item,job),
                         selectedSession ? selectedSession->instanceSerial : uint64_t(0),
                         source.tab, source.generation, source.page, source.store,
-                        source.extensionSource ? Json(*source.extensionSource) : Json()}).dump();
+                        source.extensionSource ? Json(*source.extensionSource) : Json(),
+                        source.credentialRevision ? Json(*source.credentialRevision) : Json()}).dump();
 }
-std::shared_ptr<Preview> App::requestPreview(const Media &item) {
-    auto key=previewCacheKey(item);
+std::shared_ptr<Preview> App::requestPreview(const Media &item, const Job *job) {
+    const bool still=item.category=="Изображения" || item.category=="Превью";
+    const auto local=previewLocalPath(item,job);
+    const auto thumbnail=local.empty() ? (item.thumbnail.empty() && still ? item.url : item.thumbnail) : std::string{};
+    const auto publicKey=httpUrl(thumbnail) ? Json::array({"public-cover",thumbnail}).dump() : std::string{};
+    if(!publicKey.empty()) {
+        const auto shared=previews.find(publicKey);
+        if(shared!=previews.end()) {
+            shared->second->lastSeenFrame=previewFrame;
+            return shared->second;
+        }
+    }
+    auto key=previewCacheKey(item,job);
     if(auto it=previews.find(key);it!=previews.end()){
         it->second->lastSeenFrame=previewFrame;
-        return it->second;
+        if (!it->second->done || !it->second->image.rgba.empty() || !it->second->retryAt || GetTickCount64() < it->second->retryAt)
+            return it->second;
+        previews.erase(it);
     }
     if(previewActive>=2)return nullptr;
     if(previews.size()>=64){
@@ -995,102 +1404,110 @@ std::shared_ptr<Preview> App::requestPreview(const Media &item) {
             if(old==previews.end() || candidate->lastSeenFrame<old->second->lastSeenFrame)old=it;
         }
         if(old!=previews.end())previews.erase(old);
-        // A large display can show more than the soft limit at once. Keep
-        // visible entries pinned, while retaining a finite hard ceiling.
         else if(previews.size()>=1024)return nullptr;
     }
     auto preview=std::make_shared<Preview>();
     preview->id=++previewSerial;preview->lastSeenFrame=previewFrame;
     previews[key]=preview;++previewActive;
     auto foundSession = mediaSessions.find(item.key);
-    auto selectedSession = foundSession != mediaSessions.end() ? foundSession->second : (item.format ? analysisSession : session());
+    auto selectedSession = job ? job->session : foundSession != mediaSessions.end() ? foundSession->second : nullptr;
     auto foundSource = mediaSources.find(item.key);
-    const auto selectedSource = foundSource != mediaSources.end() ? foundSource->second : BrowserSource{};
-    work([this,item,selectedSession,selectedSource,preview]{
+    const auto selectedSource = job ? job->browserSource : foundSource != mediaSources.end() ? foundSource->second : BrowserSource{};
+    if (!selectedSource.valid()) selectedSession.reset();
+    const auto generation=previewGeneration;
+    work([this,item,selectedSession,selectedSource,preview,key,publicKey,local,thumbnail,still,generation]{
         PreviewImage image;
-        std::string message="Превью недоступно";
-        try {
-            std::string thumbnail=item.thumbnail;
-            if(thumbnail.empty() && item.key.rfind("local:",0)==0) {
-                auto path=item.key.substr(6);
-                thumbnail=(item.category=="Изображения" || item.category=="Превью")?path:"assembly-cover:"+item.key+"|"+path;
+        bool publicCover=false;
+        const bool frame=previewFrameCandidate(item) && httpUrl(item.url);
+        const bool retryable=!local.empty() || !publicKey.empty() || frame;
+        if (retryable && !stopping) {
+            std::atomic_bool cancel{false};
+            std::jthread watchdog([this,&cancel](std::stop_token stop){
+                const auto until=GetTickCount64()+18000;
+                while(!stop.stop_requested() && !stopping && GetTickCount64()<until)Sleep(50);
+                if(!stop.stop_requested())cancel=true;
+            });
+            static std::atomic_uint64_t serial{0};
+            const auto scratch=dataRoot()/L"temp"/(L"preview-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++serial)+L".input");
+            struct Cleanup {fs::path path;~Cleanup(){std::error_code ec;fs::remove(path,ec);}} cleanup{scratch};
+            const auto kind=previewAudioCandidate(item) ? MediaPreviewKind::audio : MediaPreviewKind::video;
+            const auto decode=[&](const std::wstring &input,bool remote,MediaPreviewKind mediaKind) {
+                if(cancel || stopping)return PreviewImage{};
+                std::shared_lock lock(toolsMutex);
+                fs::path ffprobe;
+                if(!remote && mediaKind!=MediaPreviewKind::image) {try{ffprobe=tool(L"ffprobe.exe");}catch(...){}}
+                return decodeMediaPreview(tool(L"ffmpeg.exe"),ffprobe,input,remote,mediaKind,cancel);
+            };
+            const auto scopedFile=[&](const std::string &contents,MediaPreviewKind mediaKind) {
+                if(cancel || stopping || contents.empty())return PreviewImage{};
+                writePrivateCredentialFile(scratch,contents);
+                struct Erase {const fs::path &path;~Erase(){std::error_code ec;fs::remove(path,ec);}} erase{scratch};
+                return decode(scratch.wstring(),false,mediaKind);
+            };
+            const auto decodeCover=[&](const std::string &contents) {
+                try {return decodePreview(contents);}
+                catch (...) {return scopedFile(contents,MediaPreviewKind::image);}
+            };
+            const auto attempt=[&](auto &&fn) {
+                if(image.rgba.empty() && !cancel && !stopping) {
+                    try {image=fn();}
+                    catch (...) {}
+                }
+            };
+            if(!local.empty()) {
+                attempt([&] {
+                    const fs::path path=wide(local);
+                    if(!path.is_absolute() || !fs::is_regular_file(path))return PreviewImage{};
+                    if(still) {
+                        try {return decodePreview(readFile(path,8*1024*1024));}
+                        catch (...) {return decode(path.wstring(),false,MediaPreviewKind::image);}
+                    }
+                    return decode(path.wstring(),false,kind);
+                });
+            } else {
+                if(!publicKey.empty()) {
+                    attempt([&]{return decodeCover(httpPreview(thumbnail,cancel,Json::object(),""));});
+                    publicCover=!image.rgba.empty();
+                    if(selectedSession) attempt([&]{
+                        auto cred=credentials(selectedSession,thumbnail,cancel,&selectedSource);
+                        return decodeCover(httpPreview(thumbnail,cancel,cred.second,cred.first));
+                    });
+                }
+                if(frame) {
+                    const bool manifest=previewManifest(item);
+                    const bool signedAddress=item.url.find('?')!=std::string::npos;
+                    const auto anonymous=[&] {
+                        if(signedAddress && !manifest)
+                            return scopedFile(httpPreviewPrefix(item.url,cancel,Json::object(),"",32*1024*1024),kind);
+                        if(signedAddress)return PreviewImage{};
+                        return decode(wide(item.url),true,kind);
+                    };
+                    if(item.format || manifest || !selectedSession)attempt(anonymous);
+                    if(!manifest) attempt([&] {
+                        auto cred=credentials(selectedSession,item.url,cancel,selectedSession?&selectedSource:nullptr);
+                        if(!previewHasCookies(cred.first) && cred.second.empty())
+                            return (item.format || !selectedSession) ? PreviewImage{} : anonymous();
+                        return scopedFile(httpPreviewPrefix(item.url,cancel,cred.second,cred.first,32*1024*1024),kind);
+                    });
+                    if(!item.format && !manifest && selectedSession)attempt(anonymous);
+                }
             }
-            if(thumbnail.empty()&&(item.category=="Изображения"||item.category=="Превью"))thumbnail=item.url;
-            if(thumbnail.rfind("assembly-cover:",0)==0) {
-                message="Вложенная обложка не найдена";
-                auto separator=thumbnail.find('|',15);
-                if(separator==std::string::npos)throw std::runtime_error("Нет пути к контейнеру");
-                auto input=fs::path(wide(thumbnail.substr(separator+1)));
-                std::atomic_bool cancel{false},finished{false};
-                std::thread watchdog([&]{for(int i=0;i<150&&!finished&&!stopping;i++)Sleep(100);if(!finished)cancel=true;});
-                try {
-                    auto probe=runProcess(tool(L"ffprobe.exe"),{L"-v",L"error",L"-show_streams",L"-of",L"json",input.wstring()},nullptr,cancel,true);
-                    auto data=Json::parse(probe.output,nullptr,false);
-                    int coverIndex=-1;
-                    if(!probe.code && data.is_object())for(const auto &stream:data.value("streams",Json::array())) {
-                        auto codec=str(stream,"codec_name");
-                        auto filename=str(stream.value("tags",Json::object()),"filename");
-                        std::transform(filename.begin(),filename.end(),filename.begin(),[](unsigned char c){return char(std::tolower(c));});
-                        if(number(stream.value("disposition",Json::object()),"attached_pic")!=0 || ((codec=="mjpeg" || codec=="png") && (filename=="cover.jpg" || filename=="cover.jpeg" || filename=="cover.png"))) {
-                            coverIndex=int(number(stream,"index",-1));break;
-                        }
-                    }
-                    if(coverIndex>=0 && !cancel) {
-                        static std::atomic_uint64_t coverSerial{0};
-                        auto path=dataRoot()/L"temp"/(L"cover-preview-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++coverSerial)+L".png");
-                        struct Cleanup {fs::path path;~Cleanup(){std::error_code ec;fs::remove(path,ec);}} cleanup{path};
-                        fs::create_directories(path.parent_path());
-                        auto result=runProcess(tool(L"ffmpeg.exe"),{L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-i",input.wstring(),L"-map",L"0:"+std::to_wstring(coverIndex),L"-frames:v",L"1",L"-vf",L"scale=480:270:force_original_aspect_ratio=decrease",L"-update",L"1",L"-y",path.wstring()},nullptr,cancel,true);
-                        if(!result.code && fs::is_regular_file(path))image=decodePreview(readFile(path,8*1024*1024));
-                        else message="Не удалось прочитать вложенную обложку";
-                    }
-                } catch(...) {finished=true;watchdog.join();throw;}
-                finished=true;watchdog.join();
-            } else if(!thumbnail.empty() && !httpUrl(thumbnail) && fs::is_regular_file(wide(thumbnail))) {
-                image=decodePreview(readFile(wide(thumbnail),8*1024*1024));
-            } else if(httpUrl(thumbnail)) {
-                Json headers=Json::object();std::string cookieText;
-                if(selectedSession){try{auto cred=credentials(selectedSession,thumbnail,stopping,&selectedSource);cookieText=cred.first;headers=cred.second;}catch(const BrowserSourceChanged &){throw;}catch(...){}}
-                image=decodePreview(httpPreview(thumbnail,stopping,headers,cookieText));
-            } else if(!item.drm && (item.category.find("Видео")!=std::string::npos||item.category=="HLS"||item.category=="DASH") && httpUrl(item.url)) {
-                std::pair<std::string, Json> cred;
-                try { cred=credentials(selectedSession,item.format?item.page:item.url,stopping,selectedSession?&selectedSource:nullptr); }
-                catch (const BrowserSourceChanged &) { throw; }
-                catch (...) { if(stopping) throw; cred={"",Json::object()}; }
-                if(cred.second.contains("Authorization"))throw std::runtime_error("Превью требует отдельной авторизации");
-                static std::atomic_uint64_t serial{0};
-                auto path=dataRoot()/L"temp"/(L"preview-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++serial)+L".png");
-                struct Cleanup {fs::path path;~Cleanup(){std::error_code ec;fs::remove(path,ec);}} cleanup{path};
-                std::vector<std::wstring> args={L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-protocol_whitelist",L"http,https,tcp,tls,crypto",L"-rw_timeout",L"6000000",L"-analyzeduration",L"2000000",L"-probesize",L"2000000"};
-                for(auto name:{"User-Agent","Referer"})if(cred.second.contains(name)){
-                    auto value=str(cred.second,name);if(value.find_first_of("\r\n")==value.npos){args.push_back(std::string(name)=="User-Agent"?L"-user_agent":L"-referer");args.push_back(wide(value));}
+        }
+        const std::string message=retryable ? "Превью недоступно" : "Обложка не предоставлена";
+        post([this,preview,key,publicKey,publicCover,generation,retryable,image=std::move(image),message]()mutable{
+            preview->image=std::move(image);
+            preview->done=true;
+            preview->message=message;
+            if(preview->image.rgba.empty() && retryable)preview->retryAt=GetTickCount64()+45000;
+            if(publicCover && generation==previewGeneration){
+                const auto entry=previews.find(key);
+                if(entry!=previews.end() && entry->second==preview){
+                    previews.erase(entry);
+                    previews.try_emplace(publicKey,preview);
                 }
-                // FFmpeg's cookie store retains domain/path scope; never use a global Cookie header.
-                std::istringstream lines(cred.first);std::string line,ffCookies;
-                while(std::getline(lines,line)){
-                    if(line.rfind("#HttpOnly_",0)==0)line.erase(0,10);
-                    if(line.empty()||line[0]=='#')continue;
-                    std::istringstream fields(line);std::vector<std::string> values;std::string value;
-                    while(std::getline(fields,value,'\t'))values.push_back(value);
-                    if(values.size()==7)ffCookies+=values[5]+"="+values[6]+"; path="+values[2]+"; domain="+values[0]+";"+(values[3]=="TRUE"?" secure;":"")+"\n";
-                }
-                if(!ffCookies.empty()) {
-                    // FFmpeg does not support reading this AVOption from a file.
-                    // Do not expose the cookie jar to other local processes via
-                    // its command line. Image thumbnails still use WinHTTP.
-                    message="Превью защищённого видео недоступно";
-                    throw std::runtime_error(message);
-                }
-                args.insert(args.end(),{L"-i",wide(item.url),L"-frames:v",L"1",L"-an",L"-vf",L"scale=480:270:force_original_aspect_ratio=decrease",L"-y",path.wstring()});
-                std::atomic_bool cancel{false},finished{false};
-                std::thread watchdog([&]{for(int i=0;i<100&&!finished&&!stopping;i++)Sleep(100);if(!finished)cancel=true;});
-                ProcessResult result{};
-                try{result=runProcess(tool(L"ffmpeg.exe"),args,nullptr,cancel,true);}catch(...){finished=true;watchdog.join();throw;}
-                finished=true;watchdog.join();
-                if(result.code==0 && fs::exists(path))image=decodePreview(readFile(path,8*1024*1024));
-            } else message=item.category=="Аудио"?"Аудиофайл":"Обложка не предоставлена";
-        }catch(...){/* A failed preview must not fail analysis or leak signed URLs into logs. */}
-        post([this,preview,image=std::move(image),message]()mutable{preview->image=std::move(image);preview->done=true;preview->message=message;--previewActive;});
+            }
+            --previewActive;
+        });
     });
     return preview;
 }
@@ -1109,7 +1526,7 @@ void App::saveHistory() {
                      {"output", j->output},
                      {"outputDirectory", j->outputDirectory},
                      {"assembly", j->assembly}, {"singleExport",j->singleExport}, {"exportFormat",j->exportFormat}, {"exportQuality",j->exportQuality}, {"assemblyInput",j->assemblyInput}, {"localFile",j->localFile}, {"conversionSource",j->conversionSource}, {"sources", sources}, {"assemblyMetadataTitle",j->assemblyMetadataTitle}, {"assemblyArtist",j->assemblyArtist}, {"assemblyDescription",j->assemblyDescription}, {"globalTags",j->globalTags}, {"originalGlobalTags",j->originalGlobalTags},
-                     {"item", mediaJson(j->item)}, {"browserSourceRequired", j->browserSourceRequired}, {"mux", j->mux}, {"muxInputs", j->muxInputs}, {"muxChapters", j->muxChapters},
+                     {"item", mediaJson(j->item)}, {"browserSourceRequired", j->browserSourceRequired}, {"resumeAccessKey", j->resumeAccessKey}, {"mux", j->mux}, {"muxInputs", j->muxInputs}, {"muxChapters", j->muxChapters},
                      {"muxOptions", {{"container", j->muxOptions.container}, {"video", j->muxOptions.video}, {"audio", j->muxOptions.audio}, {"subtitles", j->muxOptions.subtitles}}}});
     }
     const auto serialized = v.dump();
@@ -1181,7 +1598,7 @@ void App::enqueue() {
     }
     { std::lock_guard l(jobsMutex); jobs.insert(jobs.end(), pending.begin(), pending.end()); }
     selectedJob = pending.back()->id;
-    saveHistory();
+    stageDownloadAccess(pending);
     jobsCv.notify_all();
     requestedPage = 2;
     notify("Добавлено задач: " + std::to_string(chosen.size()));
@@ -1206,7 +1623,7 @@ void App::downloadLoop() {
         {
             std::unique_lock lock(jobsMutex);
             auto eligible=[this](const auto &job) {
-                return !job->waitingSources && !job->claimed && !job->done && !job->cancel &&
+                return !job->waitingSources && !job->preparingAccess && !job->claimed && !job->done && !job->cancel &&
                     (!isSubtitleJob(*job) || (!subtitleActive && GetTickCount64()>=subtitleResumeAt));
             };
             jobsCv.wait_for(lock,std::chrono::seconds(1),[&] {
@@ -1484,35 +1901,11 @@ void App::download(const std::shared_ptr<Job> &j) {
         }
     }
     const bool subtitle=isSubtitleJob(*j);
-    const bool extractedSubtitle = subtitle && httpUrl(j->page) && !j->item.language.empty() &&
-        (j->item.id.rfind("subtitles:",0)==0 || j->item.id.rfind("automatic_captions:",0)==0);
-    if(j->cancel || stopping)throw std::runtime_error("Отменено");
-    auto target = j->item.format                  ? j->page
-                  : j->item.credentialUrl.empty() ? j->item.url
-                                                  : j->item.credentialUrl;
-    if (j->browserSourceRequired && !j->session) throw BrowserSourceChanged();
-    if (j->session && (!j->browserSourceRequired || !j->session->sourceMatches(j->browserSource))) throw BrowserSourceChanged();
-    std::pair<std::string, Json> cred{"", Json::object()};
-    try {
-        cred = credentials(j->session, target, j->cancel, j->session ? &j->browserSource : nullptr);
-    } catch (const BrowserSourceChanged &) {
-        throw;
-    } catch (const std::exception &) {
-        if (j->cancel || stopping) throw;
-        log("Снимок доступа не получен, пробуем скачать без cookies.");
-    }
-    std::pair<std::string,Json> pageCred{"",Json::object()};
-    if(extractedSubtitle) {
-        try { pageCred=credentials(j->session,j->page,j->cancel,j->session ? &j->browserSource : nullptr); }
-        catch(const BrowserSourceChanged &) { throw; }
-        catch(const std::exception &) { if(j->cancel || stopping)throw; }
-        // The HTTP client applies the original domain/path scope to each cookie.
-        if(cred.first.empty())cred.first=pageCred.first;
-        if(!cred.second.contains("Referer"))cred.second["Referer"]=j->page;
-        if(!cred.second.contains("User-Agent") && pageCred.second.contains("User-Agent"))
-            cred.second["User-Agent"]=pageCred.second["User-Agent"];
-    }
-    TempCookie cookie(cred.first);
+    const bool extractedSubtitle = subtitleNeedsPageAccess(*j);
+    auto access = getDownloadAccess(*j);
+    auto &cred = access.target;
+    const DownloadAccess emptyPage{"", Json::object()};
+    const auto &pageCred = access.page ? *access.page : emptyPage;
     if (!j->item.format && j->item.protocol != "m3u8" && j->item.protocol != "dash" &&
         j->item.category != "HLS" && j->item.category != "DASH") {
         auto path = folder / (L"media." + wide(j->item.ext.empty() ? "bin" : j->item.ext));
@@ -1539,8 +1932,11 @@ void App::download(const std::shared_ptr<Job> &j) {
             catch(const std::runtime_error &e) {
                 std::string reason=e.what();
                 if(subtitle && reason=="HTTP 429" && !j->cancel && !stopping)throw SubtitleRateLimited();
-                if(!extractedSubtitle || j->cancel || stopping)throw;
-                if(refreshed || (reason!="HTTP 401" && reason!="HTTP 403" && reason!="HTTP 404" && reason!="HTTP 410"))throw;
+                if(j->cancel || stopping)throw;
+                if(!extractedSubtitle || refreshed || (reason!="HTTP 401" && reason!="HTTP 403" && reason!="HTTP 404" && reason!="HTTP 410")) {
+                    if (reason == "HTTP 401" || reason == "HTTP 403") discardDownloadAccess(*j);
+                    throw;
+                }
                 refreshed=true;
                 post([j]{j->detail="Обновляем ссылку на субтитры…";});
                 TempCookie pageCookie(pageCred.first);
@@ -1562,12 +1958,7 @@ void App::download(const std::shared_ptr<Job> &j) {
                 if(track==updated.items.end())
                     throw std::runtime_error("Субтитры выбранного языка и формата больше не доступны");
                 downloadUrl=track->url;
-                if(downloadUrl!=j->item.url) {
-                    // A new URL gets scoped cookies and page context, never old resource headers.
-                    cred.first=pageCred.first;
-                    cred.second=Json{{"Referer",j->page}};
-                    if(pageCred.second.contains("User-Agent"))cred.second["User-Agent"]=pageCred.second["User-Agent"];
-                }
+                cred = subtitleDownloadAccess(j->page, downloadUrl, pageCred);
             }
         }
         if(subtitle) {
@@ -1601,6 +1992,7 @@ void App::download(const std::shared_ptr<Job> &j) {
         j->workerOutput = utf8(final.wstring());
         return;
     }
+    TempCookie cookie(cred.first);
     auto args = headersArgs(cred.second);
     args.insert(args.end(),
                 {L"--ignore-config", L"--encoding", L"utf-8", L"--no-playlist", L"--newline", L"--progress",
@@ -1642,8 +2034,11 @@ void App::download(const std::shared_ptr<Job> &j) {
             });
         },
         j->cancel, true);
-    if (result.code && !j->cancel)
+    if (result.code && !j->cancel) {
+        if (result.error.find("HTTP Error 401") != result.error.npos || result.error.find("HTTP Error 403") != result.error.npos)
+            discardDownloadAccess(*j);
         throw std::runtime_error("yt-dlp завершился с кодом " + std::to_string(result.code));
+    }
     if (j->cancel) throw std::runtime_error("Отменено");
     auto resultPath = finalDownloadedPath(result.output);
     if (!resultPath) throw std::runtime_error("Не удалось определить итоговый файл загрузки.");
@@ -1710,7 +2105,7 @@ void App::action(const std::string &cmd) {
             { *analysisCancel = true; ++analysisGeneration; busy = false; }
         else if (cmd == "clearMedia") {
             *analysisCancel = true; ++analysisGeneration; busy = false; scanning = false;
-            media.clear(); mediaSessions.clear(); mediaSources.clear(); previews.clear(); ++previewGeneration; analysis = {}; selectedMedia.clear(); audioIndex = -1;
+            media.clear(); mediaSessions.clear(); mediaSources.clear(); clearMediaAccess(); previews.clear(); ++previewGeneration; analysis = {}; selectedMedia.clear(); audioIndex = -1;
             auto id = nextScanGeneration();
             if (auto s = session()) work([s, id] { try { s->send({{"type", "scanStop"}, {"scanId", id}}); } catch (...) {} });
             notify("Список очищен");
@@ -1725,7 +2120,6 @@ void App::action(const std::string &cmd) {
                     std::lock_guard queueLock(jobsMutex);
                     for (const auto &s : j->sources) for (const auto &child : jobs)
                         if (child->id == s.dependency && child->done && child->state != "Готово") {
-                            if (child->browserSourceRequired && !child->session) throw BrowserSourceChanged();
                             child->cancel=false; child->done=false; child->claimed=false; child->state="Ожидание";
                         }
                     for(auto &source:j->sources)source.enabled=true;
@@ -1789,12 +2183,39 @@ void App::action(const std::string &cmd) {
                 extensionInstaller.start(hwnd, {}, nullptr, {}, reduced);
                 return;
             }
-            bool reuseConnector = !sessions.empty();
+            installerProfileChallenge.reset();
+            installerProfileSession.reset();
+            installerProfilePing.clear();
+            installerProfileUrl.clear();
+            installerConnectionPending = false;
             Browser selected;
             if (browserIndex >= 0 && browserIndex < int(browsers.size())) selected = browsers[browserIndex];
             installerBrowserExecutable = selected.exe;
             std::optional<Profile> profile;
             if (profileIndex >= 0 && profileIndex < int(selected.profiles.size())) profile = selected.profiles[profileIndex];
+            installerProfileKey = {guideIdentityPath(selected.exe), profile ? guideIdentityPath(profile->path) : std::wstring()};
+            if (!installerProfileKey.first.empty() && !installerProfileKey.second.empty()) {
+                auto found = installerVerifiedProfiles.find(installerProfileKey);
+                if (found != installerVerifiedProfiles.end()) {
+                    auto existing = found->second.lock();
+                    const auto now = GetTickCount64();
+                    const auto pong = existing ? existing->lastPong.load() : 0;
+                    std::string actual;
+                    if (existing) { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
+                    if (existing && existing->alive && existing->verified && existing->setupReady &&
+                        existing->languageSupported && pong && now >= pong && now - pong <= 5000 &&
+                        sameBrowserExecutable(actual, selected.exe)) {
+                        notify("Расширение установлено и подключено");
+                        return;
+                    }
+                    // Keep an established profile identity through a transient
+                    // ping or permissions refresh. It is usable only after the
+                    // readiness checks above pass again; a dead session cannot
+                    // identify a future connection.
+                    if (!existing || !existing->alive || !sameBrowserExecutable(actual, selected.exe))
+                        installerVerifiedProfiles.erase(found);
+                }
+            }
             for (auto &existing : sessions) {
                 std::string actual; { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
                 if ((!profile || profile->path.empty()) && existing->alive && existing->verified && existing->setupReady && existing->languageSupported && sameBrowserExecutable(actual, selected.exe)) {
@@ -1805,11 +2226,9 @@ void App::action(const std::string &cmd) {
             auto kind = guidedBrowser(selected);
             if (kind != GuidedBrowser::None) extensionLaunchArguments(kind, profile ? &*profile : nullptr);
             preparingInstaller = true;
-            work([this, selected, profile, reuseConnector] {
+            work([this, selected, profile] {
                 try {
-                    if (reuseConnector) {
-                        updateConnectorExtensions(executable());
-                    } else installConnector(executable());
+                    installConnector(executable());
                 }
                 catch (...) { post([this] { preparingInstaller = false; }); throw; }
                 post([this, selected, profile] {
@@ -1817,13 +2236,49 @@ void App::action(const std::string &cmd) {
                     try {
                     auto folder = executable().parent_path() / L"extensions" /
                         (selected.family == "firefox" ? L"firefox-signed" : L"chromium-development");
+                    auto signedXpi = folder / SignedFirefoxConnectorFilename;
                     if (guidedBrowser(selected) != GuidedBrowser::None) {
-                        auto guideTarget = guidedBrowser(selected) == GuidedBrowser::Firefox
-                            ? executable().parent_path() / L"extensions" / L"firefox-signed" / SignedFirefoxConnectorFilename : folder;
-                        if (guidedBrowser(selected) == GuidedBrowser::Firefox && !fs::is_regular_file(guideTarget)) throw std::runtime_error("Подписанный файл расширения Firefox версии 1.0.5 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.5.xpi рядом с программой.");
+                        auto guideTarget = guidedBrowser(selected) == GuidedBrowser::Firefox ? signedXpi : folder;
+                        if (guidedBrowser(selected) == GuidedBrowser::Firefox && !fs::is_regular_file(guideTarget)) throw std::runtime_error("Подписанный файл расширения Firefox версии 1.0.6 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.6.xpi рядом с программой.");
                         extensionInstaller.start(hwnd, selected, profile ? &*profile : nullptr, guideTarget, reduced, light);
                         auto checkConnection = [this, expected = selected.exe] {
-                            if (extensionInstaller.hasExplicitProfile()) return;
+                            if (installerConnectionPending) return;
+                            if (extensionInstaller.hasExplicitProfile()) {
+                                if (auto bound = installerProfileSession.lock()) {
+                                    if (bound->alive && !installerProfilePing.empty()) {
+                                        auto ping = installerProfilePing;
+                                        work([bound, ping] { try { bound->verifyConnection(ping); } catch (...) {} });
+                                        return;
+                                    }
+                                    installerProfileSession.reset();
+                                    installerProfilePing.clear();
+                                    installerProfileUrl.clear();
+                                }
+                                if (installerProfileChallenge && GetTickCount64() - installerProfileChallenge->started < 15000) return;
+                                if (installerProfileChallenge)
+                                    extensionInstaller.finishProfileVerification(wide(installerProfileChallenge->url));
+                                installerProfileChallenge.reset();
+                                bool candidateConnected = false;
+                                for (const auto &candidate : sessions) {
+                                    std::string actual; { std::lock_guard lock(candidate->mutex); actual = candidate->browserExecutable; }
+                                    if (candidate->alive && sameBrowserExecutable(actual, expected)) { candidateConnected = true; break; }
+                                }
+                                if (!candidateConnected) return;
+                                try {
+                                    auto challenge = std::make_shared<GuideProfileChallenge>(GuideProbePurpose::verifyConnector,
+                                        interfaceLanguage == "en", light, reduced);
+                                    installerProfileChallenge = challenge;
+                                    if (!extensionInstaller.beginProfileVerification(wide(challenge->url)))
+                                        installerProfileChallenge.reset();
+                                    else {
+                                        // Keep exact URLs after cleanup: browser events can
+                                        // arrive after the guide has already closed.
+                                        if (installerProbeUrls.size() >= 16) installerProbeUrls.erase(installerProbeUrls.begin());
+                                        installerProbeUrls.insert(challenge->url);
+                                    }
+                                } catch (const std::exception &e) { log(e.what()); }
+                                return;
+                            }
                             for (auto &existing : sessions) {
                                 std::string actual; { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
                                 if (existing->alive && sameBrowserExecutable(actual, expected)) {
@@ -1839,7 +2294,14 @@ void App::action(const std::string &cmd) {
                         };
                         extensionInstaller.setRetryConnection(checkConnection);
                         extensionInstaller.setOpenSetup([this, expected = selected.exe] {
-                            if (extensionInstaller.hasExplicitProfile()) return false;
+                            if (extensionInstaller.hasExplicitProfile()) {
+                                auto bound = installerProfileSession.lock();
+                                if (bound && bound->alive && bound->verified && bound->setupApiSupported && !bound->setupReady) {
+                                    work([bound] { try { bound->send({{"type", "openSetup"}}); } catch (...) {} });
+                                    return true;
+                                }
+                                return false;
+                            }
                             for (auto &existing : sessions) {
                                 std::string actual; { std::lock_guard lock(existing->mutex); actual = existing->browserExecutable; }
                                 if (existing->alive && existing->verified && existing->setupApiSupported && !existing->setupReady && sameBrowserExecutable(actual, expected)) {
@@ -1853,7 +2315,6 @@ void App::action(const std::string &cmd) {
                         notify("Мастер установки открыт. Следуйте подсказкам поверх браузера.");
                     } else {
                         auto signedDir = executable().parent_path() / L"extensions" / L"firefox-signed";
-                        auto signedXpi = signedDir / SignedFirefoxConnectorFilename;
                         bool signedAvailable = selected.family == "firefox" && fs::is_regular_file(signedXpi);
                         auto developmentFolder = selected.family == "firefox" ? executable().parent_path() / L"extensions" / L"firefox-development" : folder;
                         openPath(signedAvailable ? signedDir : developmentFolder);
@@ -1936,6 +2397,7 @@ void App::action(const std::string &cmd) {
                         media.clear();
                         mediaSessions.clear();
                         mediaSources.clear();
+                        clearMediaAccess();
                         previews.clear(); ++previewGeneration;
                         notify("Cookies импортированы и защищены DPAPI");
                     });
@@ -2075,6 +2537,8 @@ void App::action(const std::string &cmd) {
                 }
                 if(!cancelOnly){
                     for(const auto &child:jobs)if(targets.count(child->id)){
+                        try { discardDownloadAccess(*child, true); }
+                        catch (...) { log("Не удалось удалить сохранённый доступ загрузки."); }
                         for(const auto &parent:jobs)if(!targets.count(parent->id) && !parent->done && parent->waitingSources)
                             for(auto &source:parent->sources)if(source.dependency==child->id){
                                 if(child->state=="Готово" && !child->output.empty() && fs::is_regular_file(wide(child->output)))
@@ -2107,7 +2571,6 @@ void App::action(const std::string &cmd) {
                                (j->state == "Ошибка" || j->state == "Отменено" ||
                                 j->state == "Ожидание повтора")) {
                         std::lock_guard queueLock(jobsMutex);
-                        if (j->browserSourceRequired && !j->session) throw BrowserSourceChanged();
                         j->cancel = false;
                         j->done = false;
                         j->claimed = false;

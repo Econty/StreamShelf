@@ -1,5 +1,6 @@
 #include "core.hpp"
 #include <iomanip>
+#include <limits>
 #include <set>
 namespace ss {
 std::string str(const Json &j, const char *k, const std::string &f) {
@@ -25,17 +26,42 @@ bool httpUrl(const std::string &s) {
     const auto authority = s.substr(begin, end - begin);
     return !authority.empty() && authority.find('@') == std::string::npos;
 }
+bool isExtractedThumbnail(const Media &item) {
+    if (item.drm || item.format || item.category != "Превью" || !item.id.starts_with("thumb:") ||
+        !httpUrl(item.page) || !httpUrl(item.url) || !item.data.is_object()) return false;
+    const auto source = item.data.find("url");
+    return source != item.data.end() && source->is_string() &&
+        source->get_ref<const std::string &>() == item.url;
+}
 Analysis parseAnalysis(const Json &j, const std::string &url) {
     if (!j.is_object())
         throw std::runtime_error("Некорректный ответ yt-dlp");
     if (j.contains("entries"))
         throw std::runtime_error("Выберите отдельный ролик вместо плейлиста");
     Analysis a{str(j, "title", "Медиаконтент"), url, j, {}};
+    auto cover = str(j, "thumbnail");
+    if (!httpUrl(cover)) {
+        cover.clear();
+        if (auto thumbnails = j.find("thumbnails"); thumbnails != j.end() && thumbnails->is_array()) {
+            auto best = std::pair{-std::numeric_limits<double>::infinity(), 0.0};
+            for (const auto &thumbnail : *thumbnails) {
+                if (!thumbnail.is_object()) continue;
+                auto candidate = str(thumbnail, "url");
+                if (!httpUrl(candidate)) continue;
+                auto rank = std::pair{number(thumbnail, "preference"),
+                                      number(thumbnail, "width") * number(thumbnail, "height")};
+                if (cover.empty() || rank >= best) {
+                    best = rank;
+                    cover = std::move(candidate);
+                }
+            }
+        }
+    }
     auto add = [&](Media m) {
         m.key = m.category + "|" + m.id + "|" + m.url + "|page:" + url;
         m.page = url;
         m.sourceTitle = a.title;
-        if(m.thumbnail.empty())m.thumbnail=str(j,"thumbnail");
+        if (!httpUrl(m.thumbnail)) m.thumbnail = cover;
         a.items.push_back(std::move(m));
     };
     auto formats = j.value("formats", Json::array());
@@ -47,6 +73,7 @@ Analysis parseAnalysis(const Json &j, const std::string &url) {
         m.title = str(f, "format_note", m.id);
         m.url = str(f, "url");
         m.ext = str(f, "ext");
+        m.thumbnail = str(f, "thumbnail");
         m.protocol = str(f, "protocol");
         m.vcodec = str(f, "vcodec");
         m.acodec = str(f, "acodec");
@@ -92,6 +119,7 @@ Analysis parseAnalysis(const Json &j, const std::string &url) {
                     }
     if (j.contains("thumbnails") && j["thumbnails"].is_array())
         for (auto &t : j["thumbnails"]) {
+            if (!t.is_object() || !httpUrl(str(t, "url"))) continue;
             Media m;
             m.category = "Превью";
             m.id = "thumb:" + str(t, "id", std::to_string(a.items.size()));

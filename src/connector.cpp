@@ -1,4 +1,6 @@
 #include "platform.hpp"
+#include <wincrypt.h>
+#include "connector_install.hpp"
 #include "browser_identity.hpp"
 #include "pipe_io.hpp"
 #include <sddl.h>
@@ -106,9 +108,9 @@ void Session::send(const Json &j) {
         throw std::runtime_error("Расширение не принимает команды или отключено. Подключите расширение заново.");
     }
 }
-void Session::verifyConnection() {
+void Session::verifyConnection(const std::string &requestToken) {
     static std::atomic_uint64_t serial{0};
-    auto token = std::to_string(GetTickCount64()) + "-" + std::to_string(++serial);
+    auto token = requestToken.empty() ? std::to_string(GetTickCount64()) + "-" + std::to_string(++serial) : requestToken;
     { std::lock_guard lock(mutex); verificationToken = token; verificationSent = GetTickCount64(); }
     send({{"type", "ping"}, {"requestId", token}});
 }
@@ -127,7 +129,7 @@ void Session::acceptCredentialReply(const Json &reply) {
 }
 BrowserSource Session::source() {
     std::lock_guard lock(mutex);
-    return {tab, sourceGeneration, url, store, extensionSource};
+    return {tab, sourceGeneration, url, store, extensionSource, credentialRevision};
 }
 bool Session::sourceMatches(const BrowserSource &expected) {
     std::lock_guard lock(mutex);
@@ -144,24 +146,62 @@ void Session::updateTab(const Json &j) {
     if (tab != newTab || url != newUrl || store != newStore || extensionSource != newSource) {
         ++sourceGeneration; ++credentialEpoch; credentialSnapshots.clear(); cv.notify_all();
     }
+    std::optional<uint64_t> revision;
+    if (j.contains("credentialRevision") && j["credentialRevision"].is_number_unsigned()) revision = j["credentialRevision"].get<uint64_t>();
+    if (credentialRevision != revision) { credentialSnapshots.clear(); ++credentialEpoch; cv.notify_all(); }
+    credentialRevision = revision;
     tab = newTab; url = std::move(newUrl); store = std::move(newStore); extensionSource = newSource;
     title = str(j, "title");
 }
+void Session::updateCredentials(const Json &j) {
+    std::lock_guard lock(mutex);
+    if (int(number(j, "tabId", -1)) != tab || str(j, "storeId") != store || !extensionSource ||
+        !j.contains("sourceId") || !j["sourceId"].is_number_unsigned() || j["sourceId"].get<uint64_t>() != *extensionSource ||
+        !j.contains("credentialRevision") || !j["credentialRevision"].is_number_unsigned()) return;
+    const auto revision = j["credentialRevision"].get<uint64_t>();
+    if (credentialRevision && revision <= *credentialRevision) return;
+    credentialRevision = revision; ++credentialEpoch; credentialSnapshots.clear(); cv.notify_all();
+}
 void Session::closeTab() {
     std::lock_guard lock(mutex);
-    ++sourceGeneration; ++credentialEpoch; credentialSnapshots.clear(); tab = -1; url.clear(); store.clear(); extensionSource.reset(); cv.notify_all();
+    ++sourceGeneration; ++credentialEpoch; credentialSnapshots.clear(); tab = -1; url.clear(); store.clear(); extensionSource.reset(); credentialRevision.reset(); cv.notify_all();
+}
+std::optional<Session::CredentialSnapshot> Session::pinCredentials(const std::string &url, const BrowserSource &expected) {
+    std::lock_guard lock(mutex);
+    const auto found = credentialSnapshots.find(url);
+    if (!alive || !expected.credentialRevision || found == credentialSnapshots.end() || found->second.owner != instanceSerial ||
+        found->second.source != expected || found->second.source.credentialRevision != credentialRevision ||
+        expected.credentialRevision != credentialRevision) return {};
+    return found->second;
+}
+namespace {
+std::string protectSnapshot(const Json &value) {
+    auto text = value.dump();
+    DATA_BLOB input{DWORD(text.size()), reinterpret_cast<BYTE *>(text.data())}, output{};
+    const bool ok = CryptProtectData(&input, L"StreamShelf credential snapshot", nullptr, nullptr, nullptr,
+        CRYPTPROTECT_UI_FORBIDDEN, &output) != FALSE;
+    if (!text.empty()) SecureZeroMemory(text.data(), text.size());
+    if (!ok) throw std::runtime_error("Не удалось защитить снимок доступа");
+    std::string result(reinterpret_cast<char *>(output.pbData), output.cbData);
+    SecureZeroMemory(output.pbData, output.cbData); LocalFree(output.pbData); return result;
+}
 }
 Json Session::credentials(const std::string &url, std::atomic_bool &cancel) {
     return credentials(url, source(), cancel);
 }
-Json Session::credentials(const std::string &url, const BrowserSource &expected, std::atomic_bool &cancel) {
+Json Session::credentials(const std::string &url, const BrowserSource &expected, std::atomic_bool &cancel, CredentialSnapshot *pinned) {
+    if (cancel) throw std::runtime_error("Отменено");
     static std::atomic_uint64_t serial{0};
     std::string request = std::to_string(++serial);
     uint64_t epoch;
     {
         std::lock_guard l(mutex);
         if (!alive || !scopedCredentialsSupported || !expected.valid() || expected != BrowserSource{tab, sourceGeneration, this->url, store, extensionSource}) throw BrowserSourceChanged();
+        if (expected.credentialRevision != credentialRevision) throw BrowserCredentialsRefreshPending();
         epoch = credentialEpoch;
+        // A snapshot belongs to an in-flight transfer, not to a future request.
+        // Even a live revision can lag a browser cookie event, so always ask the
+        // extension for a fresh authoritative jar before another network attempt.
     }
     if (cancel) throw std::runtime_error("Отменено");
     { std::lock_guard lock(mutex); pendingCredentials.insert(request); }
@@ -169,9 +209,11 @@ Json Session::credentials(const std::string &url, const BrowserSource &expected,
         Session &session; const std::string &request;
         ~PendingGuard() { std::lock_guard lock(session.mutex); session.pendingCredentials.erase(request); session.replies.erase(request); }
     } guard{*this, request};
-    {
+    for (int attempt = 0; attempt < 2; ++attempt) {
         try {
-            send({{"type", "credentials"}, {"requestId", request}, {"tabId", expected.tab}, {"sourceId", *expected.extensionSource}, {"storeId", expected.store}, {"url", url}});
+            Json command{{"type", "credentials"}, {"requestId", request}, {"tabId", expected.tab}, {"sourceId", *expected.extensionSource}, {"storeId", expected.store}, {"url", url}};
+            if (expected.credentialRevision) command["credentialRevision"] = *expected.credentialRevision;
+            send(command);
         } catch (...) {
             if (cancel) throw;
             // Browser-bound tasks must not silently fall back to anonymous I/O
@@ -183,25 +225,84 @@ Json Session::credentials(const std::string &url, const BrowserSource &expected,
         while (alive && !cancel && !replies.count(request) && expected == BrowserSource{tab, sourceGeneration, this->url, store, extensionSource} && epoch == credentialEpoch) {
             if (cv.wait_for(l, std::chrono::milliseconds(100)) == std::cv_status::timeout &&
                 std::chrono::steady_clock::now() > until)
-                throw BrowserSourceChanged();
+                break;
         }
         if (cancel)
             throw std::runtime_error("Отменено");
-        if (!alive || !scopedCredentialsSupported || expected != BrowserSource{tab, sourceGeneration, this->url, store, extensionSource} || epoch != credentialEpoch) throw BrowserSourceChanged();
-        if (!replies.count(request))
+        if (!alive || !scopedCredentialsSupported || expected != BrowserSource{tab, sourceGeneration, this->url, store, extensionSource}) throw BrowserSourceChanged();
+        if (expected.credentialRevision != credentialRevision || epoch != credentialEpoch) throw BrowserCredentialsRefreshPending();
+        if (!replies.count(request)) {
             throw BrowserSourceChanged();
+        }
         auto result = replies[request];
         replies.erase(request);
         // A refusal can be caused by a changed account before the asynchronous
         // tabSelected update reaches us. Never substitute a stale snapshot or
         // let the caller retry anonymously in that window.
+        const auto message = str(result, "message");
+        // Legacy 1.0.5 increments a selection counter when the same tab gains
+        // focus. Retry that narrow refusal once, asking the extension again;
+        // never substitute cached credentials after an explicit refusal.
+        if (attempt == 0 && !expected.credentialRevision && str(result, "type") == "error" &&
+            (message == "Вкладка изменилась" || message == "The tab changed")) {
+            credentialSnapshots.erase(url); if (pinned) *pinned = {};
+            pendingCredentials.erase(request);
+            request = std::to_string(++serial);
+            pendingCredentials.insert(request);
+            continue;
+        }
+        auto refuse = [&] { credentialSnapshots.erase(url); if (pinned) *pinned = {}; };
         if (str(result, "type") != "credentialsResult" || !result.contains("cookies") || !result["cookies"].is_array() ||
-            !result.contains("headers") || !result["headers"].is_object()) throw BrowserSourceChanged();
-        if (str(result, "url") != url)
+            !result.contains("headers") || !result["headers"].is_object()) {
+            refuse();
+            if (str(result, "type") == "error" &&
+                (message == "Данные доступа обновились. Повторите запрос." || message == "Credentials were refreshed. Retry the request."))
+                throw BrowserCredentialsRefreshPending();
+            if (str(result, "code") == "credentials_changed" || message == "Доступ к сайту изменился" || message == "Site credentials changed")
+                throw BrowserCredentialsChanged();
             throw BrowserSourceChanged();
-        if (int(number(result, "tabId", -1)) != expected.tab || !result.contains("sourceId") || !result["sourceId"].is_number_unsigned() || result["sourceId"].get<uint64_t>() != *expected.extensionSource || str(result, "storeId") != expected.store) throw BrowserSourceChanged();
+        }
+        if (str(result, "url") != url)
+            { refuse(); throw BrowserSourceChanged(); }
+        if (int(number(result, "tabId", -1)) != expected.tab || !result.contains("sourceId") || !result["sourceId"].is_number_unsigned() || result["sourceId"].get<uint64_t>() != *expected.extensionSource || str(result, "storeId") != expected.store) { refuse(); throw BrowserSourceChanged(); }
+        if (expected.credentialRevision && (!result.contains("credentialRevision") || !result["credentialRevision"].is_number_unsigned() ||
+            result["credentialRevision"].get<uint64_t>() != *expected.credentialRevision)) { refuse(); throw BrowserCredentialsChanged(); }
+        // Validate the entire representation before remembering it. Cookies
+        // remain domain/path/Secure scoped and a newer authoritative jar replaces
+        // the old jar, including cookies removed by the site.
+        try { (void)cookies(result["cookies"]); }
+        catch (...) { refuse(); throw BrowserCookieFormatUnsupported(); }
+        if (pinned && !expected.credentialRevision)
+            *pinned = {std::make_shared<std::string>(protectSnapshot(result)), expected, instanceSerial, GetTickCount64()};
+        if (expected.credentialRevision) {
+            auto blob = std::make_shared<std::string>(protectSnapshot(result));
+            if (auto previous = credentialSnapshots.find(url); previous != credentialSnapshots.end() &&
+                previous->second.owner == instanceSerial && previous->second.source == expected &&
+                previous->second.source.credentialRevision == credentialRevision && previous->second.protectedData) {
+                *previous->second.protectedData = std::move(*blob);
+                blob = previous->second.protectedData;
+            }
+            CredentialSnapshot snapshot{std::move(blob), expected, instanceSerial, GetTickCount64()};
+            credentialSnapshots.insert_or_assign(url, snapshot);
+            if (pinned) *pinned = std::move(snapshot);
+            else snapshot = {};
+            // Pins keep their cache slot so a subsequent authoritative response
+            // updates every queued/active job. Only unreferenced slots are evicted.
+            for (;;) {
+                size_t unused = 0;
+                auto oldest = credentialSnapshots.end();
+                for (auto it = credentialSnapshots.begin(); it != credentialSnapshots.end(); ++it) {
+                    if (!it->second.protectedData || it->second.protectedData.use_count() != 1) continue;
+                    ++unused;
+                    if (oldest == credentialSnapshots.end() || it->second.captured < oldest->second.captured) oldest = it;
+                }
+                if (unused <= 128) break;
+                credentialSnapshots.erase(oldest);
+            }
+        }
         return result;
     }
+    throw BrowserSourceChanged();
 }
 void Connector::start() {
     acceptThread = std::thread([this] {
@@ -272,6 +373,7 @@ void Connector::start() {
                                 s->acceptCredentialReply(j);
                             } else {
                                 if (type == "tabSelected") s->updateTab(j);
+                                if (type == "credentialsChanged") s->updateCredentials(j);
                                 if (type == "tabClosed") s->closeTab();
                                 if (message)
                                     message(s, j);
@@ -361,14 +463,13 @@ void updateConnectorExtensions(const fs::path &app) {
             throw std::runtime_error("В папке программы отсутствует файл расширения Chromium: " + utf8((source / name).wstring()));
 }
 void installConnector(const fs::path &app) {
-    auto dir = dataRoot() / L"connector";
-    fs::create_directories(dir);
-    fs::copy_file(app, dir / L"StreamShelf.Host.exe", fs::copy_options::overwrite_existing);
-    writeFile(dir / L"app-path.txt", utf8(app.wstring()));
     updateConnectorExtensions(app);
+    auto dir = dataRoot() / L"connector";
+    const auto host = stageConnectorHost(app, dir);
+    writeFile(dir / L"app-path.txt", utf8(app.wstring()));
     Json base = {{"name", "dev.streamshelf.connector"},
                  {"description", "StreamShelf C++ Native Messaging"},
-                 {"path", utf8((dir / L"StreamShelf.Host.exe").wstring())},
+                 {"path", utf8(host.wstring())},
                  {"type", "stdio"}};
     auto chrome = base;
     chrome["allowed_origins"] = {std::string("chrome-extension://") + ExtensionId + "/"};

@@ -1,7 +1,11 @@
+#include "guide_profile_challenge.hpp"
+#include "focus_visual.hpp"
 #include "extension_installer.hpp"
 #include "firefox_guide_state.hpp"
 #include "render.hpp"
 #include "extension_guide_state.hpp"
+#include "guide_overlay_motion.hpp"
+#include "firefox_profile_identity.hpp"
 #include "extension_presence.hpp"
 #include "uia_result.hpp"
 #include <objbase.h>
@@ -10,6 +14,7 @@
 #include <winver.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
+#include <bcrypt.h>
 #include <chrono>
 #include <cwctype>
 #include <array>
@@ -92,30 +97,41 @@ std::optional<int> cachedInt(IUIAutomationElement *element, PROPERTYID id) {
     return {};
 }
 bool extensionUrl(const std::wstring &value) {
-    for (auto prefix : {L"chrome://extensions", L"browser://extensions", L"browser://tune", L"about:addons"}) {
-        size_t n = wcslen(prefix);
-        if (value.compare(0, n, prefix) == 0 && (value.size() == n || value[n] == L'/' || value[n] == L'?' || value[n] == L'#')) return true;
-    }
+    for (auto prefix : {L"chrome://extensions", L"browser://extensions", L"about:addons"})
+        if (guideInternalPage(value, prefix)) return true;
     return false;
 }
 std::wstring normalizedPath(std::wstring value) {
-    value = lower(value);
     std::replace(value.begin(), value.end(), L'/', L'\\');
     while (value.size() > 3 && value.back() == L'\\') value.pop_back();
-    return value;
+    // Shell can display a long path even when the application was launched
+    // through its 8.3 alias. Resolve the existing path before comparing it.
+    DWORD needed = GetLongPathNameW(value.c_str(), nullptr, 0);
+    if (needed && needed < 32768) {
+        std::wstring expanded(needed, L'\0');
+        DWORD written = GetLongPathNameW(value.c_str(), expanded.data(), needed);
+        if (written && written < needed) {
+            expanded.resize(written);
+            value = std::move(expanded);
+        }
+    }
+    return lower(value);
 }
 bool mentionsPath(const std::wstring &value, const std::wstring &path) {
-    auto v = normalizedPath(value), p = normalizedPath(path);
-    if (v == p) return true;
-    for (auto prefix : {L"адрес: ", L"address: "}) if (v == prefix + p) return true;
-    return false;
+    auto displayed = value;
+    auto lowered = lower(displayed);
+    for (auto prefix : {L"адрес: ", L"address: "}) {
+        const std::wstring text(prefix);
+        if (lowered.rfind(text, 0) == 0) { displayed.erase(0, text.size()); break; }
+    }
+    return normalizedPath(displayed) == normalizedPath(path);
 }
 struct Control { RECT rect{}; bool found = false; };
 struct Scene {
     HWND window{}; RECT windowRect{};
     ULONGLONG at = 0;
     bool valid = false;
-    std::wstring internalUrl;
+    std::wstring internalUrl, currentAddress;
     GuideObservation facts;
     Control developer, load, confirm, enable, connect, popupConnect, permissionAllow;
     Control toolbarAction, firefoxGear, firefoxMenu, firefoxAdd, firefoxOpen, firefoxFile, firefoxOk;
@@ -258,7 +274,8 @@ CardInfo installedCard(IUIAutomation *automation, IUIAutomationElement *nameElem
     }
     return partial;
 }
-Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder, bool firefox = false) {
+bool browserChromeAddress(IUIAutomation *, IUIAutomationElement *, HWND, bool, bool verifyRoot = true);
+Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder, bool firefox = false, bool yandex = false) {
     Scene scene; scene.window = window; scene.at = GetTickCount64();
     if (!automation || !IsWindow(window) || !GetWindowRect(window, &scene.windowRect)) return scene;
     Com<IUIAutomationElement> root;
@@ -290,6 +307,9 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
     struct FlatCandidate { RECT rect{}; std::optional<bool> enabled; bool explicitId = false; bool toggle = false; };
     std::vector<RECT> flatTitles, flatRemoveButtons;
     std::vector<FlatCandidate> flatSwitches;
+    std::vector<FlatCandidate> developerSwitches;
+    std::vector<RECT> developerLabels, connectorTitles, developerWarnings;
+    bool connectorWarningInTitle = false;
     std::vector<IUIAutomationElement *> titleElements;
     struct ReleaseTitles { std::vector<IUIAutomationElement *> &items; ~ReleaseTitles() { for (auto item : items) item->Release(); } } releaseTitles{titleElements};
     BSTR rootName = nullptr;
@@ -315,14 +335,19 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
         // Inactive tabs can remain in the accessibility tree. Only the browser's
         // visible address bar identifies the active page; a document's URL does not.
         RECT addressRect{};
+        const bool smartBox = yandex && yandexOmniboxIdentity(cachedString(element.p, UIA_AutomationIdPropertyId), name);
         bool addressControl = !dialog && (type == UIA_EditControlTypeId || type == UIA_ComboBoxControlTypeId) &&
-            contains(name, {L"адрес", L"address", L"поиск", L"search"}) &&
+            (smartBox || contains(name, {L"адрес", L"address", L"поиск", L"search"}) || value.rfind(L"http://127.0.0.1:", 0) == 0 || extensionUrl(value)) &&
             SUCCEEDED(element->get_CachedBoundingRectangle(&addressRect)) && validRect(addressRect) &&
-            addressRect.top >= scene.windowRect.top && addressRect.bottom <= scene.windowRect.top + int(180 * GetDpiForWindow(window) / 96);
+            (yandex ? guideOmniboxBounds(addressRect.left, addressRect.top, addressRect.right, addressRect.bottom,
+                scene.windowRect.left, scene.windowRect.top, scene.windowRect.right, scene.windowRect.bottom, GetDpiForWindow(window), true) &&
+                browserChromeAddress(automation, element.p, window, smartBox)
+                : addressRect.top >= scene.windowRect.top && addressRect.bottom <= scene.windowRect.top + int(180 * GetDpiForWindow(window) / 96));
 #ifdef STREAMSHELF_INSTALLER_TESTING
         if (!dialog && std::wstring(cls) == L"StreamShelfGuideFixture" && type == UIA_EditControlTypeId) addressControl = true;
 #endif
         if (addressControl && !value.empty()) {
+            scene.currentAddress = value;
             browserAddressKnown = true; browserAddressIsExtensions = extensionUrl(value);
             if (browserAddressIsExtensions) { scene.facts.page = true; scene.internalUrl = value; }
         }
@@ -337,7 +362,7 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
             auto id = cachedString(element.p, UIA_AutomationIdPropertyId);
             if (!dialog && button && (id == L"addon-page-options-button" || contains(name, {L"инструменты для всех дополнений", L"tools for all add-ons"}))) scene.firefoxGear = {rect, true};
             if (!dialog && (button || type == UIA_MenuItemControlTypeId || type == UIA_HyperlinkControlTypeId) && contains(name, {L"установить дополнение из файла", L"install add-on from file"})) scene.firefoxMenu = {rect, true};
-            if (dialog && (button || type == UIA_SplitButtonControlTypeId) && (name == L"открыть" || name == L"open") &&
+            if (dialog && (button || type == UIA_SplitButtonControlTypeId) && (id == L"1" || name == L"открыть" || name == L"open") &&
                 rect.right - rect.left >= int(50 * GetDpiForWindow(window) / 96)) scene.firefoxOpen = {rect, true};
             if (dialog && (type == UIA_ListItemControlTypeId || type == UIA_DataItemControlTypeId) &&
                 name == lower(fs::path(folder).filename().wstring())) {
@@ -357,8 +382,20 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
         if ((button || type == UIA_HyperlinkControlTypeId || type == UIA_MenuItemControlTypeId) && removeName(name) &&
             std::none_of(flatRemoveButtons.begin(), flatRemoveButtons.end(), [&](const RECT &other) { return EqualRect(&other, &rect); })) flatRemoveButtons.push_back(rect);
         auto automationId = cachedString(element.p, UIA_AutomationIdPropertyId);
+        const bool enabled = cachedInt(element.p, UIA_IsEnabledPropertyId).value_or(0) != 0;
         bool switchId = automationId == L"enable-toggle" || automationId == L"enabletoggle" || automationId == L"enable_toggle";
         bool actionable = button || type == UIA_CheckBoxControlTypeId || type == UIA_CustomControlTypeId || type == UIA_RadioButtonControlTypeId;
+        if (!firefox && !dialog) {
+            if (guideDeveloperModeLabel(name)) developerLabels.push_back(rect);
+            if (titleAnchor && name == L"streamshelf connector") connectorTitles.push_back(rect);
+            if (guideDeveloperModeWarning(name)) {
+                developerWarnings.push_back(rect);
+                if (titleAnchor) connectorWarningInTitle = true;
+            }
+            if (enabled && actionable && (cachedInt(element.p, UIA_IsKeyboardFocusablePropertyId).value_or(0) ||
+                enableControl(element.p, type, name)))
+                developerSwitches.push_back({rect, toggleState(element.p, type)});
+        }
         bool forbiddenName = contains(name, {L"разработчик", L"developer", L"удалить", L"remove", L"ошибк", L"error", L"сведения", L"details", L"инкогнито", L"incognito"});
         if (!forbiddenName && (switchId || (actionable && (enableControl(element.p, type, name) || cachedInt(element.p, UIA_IsKeyboardFocusablePropertyId).value_or(0)))))
             flatSwitches.push_back({rect, enabledValue(element.p, type, name), switchId, enableControl(element.p, type, name)});
@@ -370,12 +407,13 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
         if (button && connectorPopupButton(name)) { scene.connectorPopup = true; scene.popupConnect = {rect, true}; }
         if (button && (name == L"разрешить" || name == L"allow")) popupAllow = {rect, true};
         if (button && contains(name, {L"включить", L"enable", L"turn on", L"добавить расширение", L"add extension"}) && !contains(name, {L"разработчик", L"developer"})) popupEnable = {rect, true};
-        if (!dialog && (button || type == UIA_CheckBoxControlTypeId || type == UIA_CustomControlTypeId) && contains(name, {L"режим разработчика", L"developer mode"})) {
+        const bool developerId = !firefox && (automationId == L"devmode" || automationId == L"dev-mode" || automationId == L"developer-mode");
+        if (!dialog && (button || type == UIA_CheckBoxControlTypeId || type == UIA_CustomControlTypeId) &&
+            (developerId || (contains(name, {L"режим разработчика", L"developer mode"}) && !guideDeveloperModeWarning(name)))) {
             scene.developer = {rect, true};
             auto state = toggleState(element.p, type);
             if (state) { scene.facts.developerKnown = true; scene.facts.developerOn = *state; }
         }
-        bool enabled = cachedInt(element.p, UIA_IsEnabledPropertyId).value_or(0) != 0;
         if (!dialog && button && enabled && contains(name, {L"загрузить распакован", L"load unpacked"})) scene.load = {rect, true};
         if (dialog && button && enabled && contains(name, {L"выбор папки", L"выбрать папку", L"select folder"})) scene.confirm = {rect, true};
         if (!dialog && titleAnchor && titleElements.size() < 8) { element.p->AddRef(); titleElements.push_back(element.p); }
@@ -384,7 +422,8 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
                 {"rect", {rect.left, rect.top, rect.right, rect.bottom}}});
         if (!dialog && button && (name == L"расширения" || name == L"extensions" || name == L"дополнения") &&
             browserToolbarButton(rect.left, rect.top, rect.right, rect.bottom, scene.windowRect.left, scene.windowRect.top,
-                                 scene.windowRect.right, scene.windowRect.bottom, GetDpiForWindow(window), toolbarAncestor(automation, element.p)) &&
+                                 scene.windowRect.right, scene.windowRect.bottom, GetDpiForWindow(window),
+                                 yandex ? browserChromeAddress(automation, element.p, window, false) : toolbarAncestor(automation, element.p), yandex) &&
             (!scene.connect.found || rect.left > scene.connect.rect.left)) scene.connect = {rect, true};
     }
     if (firefox && dialog && !scene.firefoxOpen.found) {
@@ -407,12 +446,31 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
     }
     if (permissionRequest && scene.ownNamesSeen && popupAllow.found) scene.permissionAllow = popupAllow;
     if (addressEditing) scene.facts.folderReady = false;
+    if (!firefox && !dialog && !scene.developer.found) {
+        std::vector<FlatCandidate> matches;
+        const auto dpi = GetDpiForWindow(window);
+        for (const auto &label : developerLabels) for (const auto &candidate : developerSwitches) {
+            if (!guideDeveloperModeSwitch(label.left, label.top, label.right, label.bottom,
+                    candidate.rect.left, candidate.rect.top, candidate.rect.right, candidate.rect.bottom, dpi)) continue;
+            if (std::none_of(matches.begin(), matches.end(), [&](const FlatCandidate &other) {
+                return EqualRect(&other.rect, &candidate.rect);
+            })) matches.push_back(candidate);
+        }
+        if (matches.size() == 1) {
+            scene.developer = {matches.front().rect, true};
+            if (matches.front().enabled.has_value()) {
+                scene.facts.developerKnown = true;
+                scene.facts.developerOn = *matches.front().enabled;
+            }
+        }
+    }
     if (!dialog && !scene.facts.page && (!browserAddressKnown || browserAddressIsExtensions) && (scene.developer.found || scene.load.found)) {
         // Some Chromium builds omit the address-bar value from UI Automation.
         // Use the browser window title only together with an actual page control.
         wchar_t title[512]{}; GetWindowTextW(window, title, 512);
         auto name = lower(title);
-        bool extensionsTitle = name.rfind(L"расширения", 0) == 0 || name.rfind(L"extensions", 0) == 0;
+        bool extensionsTitle = name.starts_with(L"расширения") || name.starts_with(L"extensions") ||
+            (yandex && extensionsTabTitle(name, false, true));
         bool browserTitle = contains(name, {L"google chrome", L"яндекс", L"yandex"});
         if (extensionsTitle && browserTitle) scene.facts.page = true;
     }
@@ -483,6 +541,15 @@ Scene inspect(IUIAutomation *automation, HWND window, const std::wstring &folder
         }
     }
     if (!dialog && scene.facts.page && scene.load.found) { scene.facts.developerKnown = true; scene.facts.developerOn = true; }
+    if (!firefox && scene.facts.page && !scene.facts.developerOn) {
+        const auto dpi = GetDpiForWindow(window);
+        for (const auto &title : connectorTitles) for (const auto &warning : developerWarnings)
+            connectorWarningInTitle |= guideConnectorWarningPosition(title.left, title.top, title.bottom, warning.left, warning.top, dpi);
+        if (connectorWarningInTitle) {
+            scene.facts.developerRequired = scene.facts.developerKnown = scene.facts.installedCard = scene.facts.enabledKnown = true;
+            scene.facts.enabled = false;
+        }
+    }
     scene.at = GetTickCount64();
     return scene;
 }
@@ -519,7 +586,7 @@ bool enterText(HWND window, const std::wstring &exe, const std::wstring &text, W
 void showIfChanged(HWND window, bool show) {
     if (window && bool(IsWindowVisible(window)) != show) ShowWindow(window, show ? SW_SHOWNOACTIVATE : SW_HIDE);
 }
-HWND findBrowserWindow(const std::wstring &exe, const std::set<HWND> &old, bool requireNew, DWORD expectedPid = 0) {
+HWND findBrowserWindow(const std::wstring &exe, const std::set<HWND> &old, bool requireNew, DWORD expectedPid = 0, DWORD exactPid = 0) {
     std::map<uint32_t,uint32_t> parents;
     if (expectedPid) {
         Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
@@ -528,7 +595,7 @@ HWND findBrowserWindow(const std::wstring &exe, const std::set<HWND> &old, bool 
             parents[process.th32ProcessID] = process.th32ParentProcessID;
         } while (Process32NextW(snapshot, &process));
     }
-    struct Search { const std::wstring &exe; const std::set<HWND> &old; bool fresh; DWORD expectedPid; const std::map<uint32_t,uint32_t> &parents; HWND found{}; long long score = -1; } search{exe, old, requireNew, expectedPid, parents};
+    struct Search { const std::wstring &exe; const std::set<HWND> &old; bool fresh; DWORD expectedPid, exactPid; const std::map<uint32_t,uint32_t> &parents; HWND found{}; long long score = -1; } search{exe, old, requireNew, expectedPid, exactPid, parents};
     EnumWindows([](HWND window, LPARAM context) -> BOOL {
         auto &s = *reinterpret_cast<Search *>(context);
         if (!IsWindowVisible(window) || (s.fresh && s.old.count(window))) return TRUE;
@@ -537,6 +604,7 @@ HWND findBrowserWindow(const std::wstring &exe, const std::set<HWND> &old, bool 
         if ((windowClass != L"Chrome_WidgetWin_1" && windowClass != L"Chrome_Yandex_WidgetWin_1" && windowClass != L"MozillaWindowClass") || GetWindow(window, GW_OWNER) ||
             lower(processPath(window)) != lower(s.exe)) return TRUE;
         DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+        if (s.exactPid && pid != s.exactPid) return TRUE;
         if (s.expectedPid && !guideProcessDescendsFrom(pid, s.expectedPid, s.parents)) return TRUE;
         RECT rect{}; GetWindowRect(window, &rect);
         long long area = (long long)(rect.right - rect.left) * (rect.bottom - rect.top);
@@ -547,8 +615,77 @@ HWND findBrowserWindow(const std::wstring &exe, const std::set<HWND> &old, bool 
     }, reinterpret_cast<LPARAM>(&search));
     return search.found;
 }
+// Query just edit controls in the browser chrome. Full extension-card scans are
+// expensive and must not delay identifying a forwarded window or closing a probe.
+std::wstring readActiveBrowserAddress(IUIAutomation *automation, HWND window, bool yandex = false) {
+    if (!automation || !IsWindow(window)) return {};
+    RECT frame{}; if (!GetWindowRect(window, &frame)) return {};
+    Com<IUIAutomationElement> root;
+    if (!hasInterface(automation->ElementFromHandle(window, root.out()), root.p)) return {};
+    Variant edit, combo; edit.value.vt = combo.value.vt = VT_I4;
+    edit.value.lVal = UIA_EditControlTypeId; combo.value.lVal = UIA_ComboBoxControlTypeId;
+    Com<IUIAutomationCondition> editCondition, comboCondition, condition;
+    if (FAILED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, edit.value, editCondition.out())) ||
+        FAILED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, combo.value, comboCondition.out())) ||
+        FAILED(automation->CreateOrCondition(editCondition.p, comboCondition.p, condition.out()))) return {};
+    Com<IUIAutomationCacheRequest> cache;
+    if (!hasInterface(automation->CreateCacheRequest(cache.out()), cache.p)) return {};
+    for (auto id : {UIA_NamePropertyId, UIA_AutomationIdPropertyId, UIA_IsOffscreenPropertyId,
+        UIA_BoundingRectanglePropertyId, UIA_ValueValuePropertyId, UIA_LegacyIAccessibleValuePropertyId}) cache->AddProperty(id);
+    Com<IUIAutomationElementArray> elements;
+    if (!hasInterface(root->FindAllBuildCache(TreeScope_Descendants, condition.p, cache.p, elements.out()), elements.p)) return {};
+    int count = 0; elements->get_Length(&count);
+    for (int i = 0; i < std::min(count, 100); ++i) {
+        Com<IUIAutomationElement> element;
+        if (!hasInterface(elements->GetElement(i, element.out()), element.p) || cachedInt(element.p, UIA_IsOffscreenPropertyId).value_or(1)) continue;
+        RECT bounds{};
+        const auto dpi = GetDpiForWindow(window);
+        if (FAILED(element->get_CachedBoundingRectangle(&bounds)) || !validRect(bounds) ||
+            (yandex ? !guideOmniboxBounds(bounds.left, bounds.top, bounds.right, bounds.bottom, frame.left, frame.top, frame.right, frame.bottom, dpi, true)
+                    : bounds.top < frame.top || bounds.bottom > frame.top + int(180 * dpi / 96) || bounds.right - bounds.left < int(120 * dpi / 96))) continue;
+        auto value = cachedString(element.p, UIA_ValueValuePropertyId);
+        if (value.empty()) value = cachedString(element.p, UIA_LegacyIAccessibleValuePropertyId);
+        const auto name = cachedString(element.p, UIA_NamePropertyId), id = cachedString(element.p, UIA_AutomationIdPropertyId);
+        const bool smartBox = yandex && yandexOmniboxIdentity(id, name);
+        if (!value.empty() && (smartBox || id == L"view_1012" || id == L"urlbar-input" ||
+            contains(name, {L"адрес", L"address", L"поиск", L"search"}) || extensionUrl(value) ||
+            value.rfind(L"http://127.0.0.1:", 0) == 0 || value.rfind(L"127.0.0.1:", 0) == 0) &&
+            (!yandex || browserChromeAddress(automation, element.p, window, smartBox))) return value;
+    }
+    return {};
+}
+bool activeBrowserAddressMatches(const std::wstring &actual, const std::wstring &expected) {
+    if (actual.empty() || expected.empty()) return false;
+    if (lower(actual) == lower(expected)) return true;
+    // Chromium may omit only the http scheme from its omnibox display value.
+    return expected.rfind(L"http://127.0.0.1:", 0) == 0 && lower(actual) == lower(expected.substr(7));
+}
+bool browserChromeAddress(IUIAutomation *automation, IUIAutomationElement *element, HWND window, bool smartBox, bool verifyRoot) {
+    Com<IUIAutomationTreeWalker> walker;
+    if (!hasInterface(automation->get_ControlViewWalker(walker.out()), walker.p)) return false;
+    Com<IUIAutomationElement> current;
+    if (!hasInterface(walker->GetParentElement(element, current.out()), current.p)) return false;
+    bool toolbar = false;
+    for (int depth = 0; depth < 16; ++depth) {
+        CONTROLTYPEID type = 0;
+        if (FAILED(current->get_CurrentControlType(&type)) || type == UIA_DocumentControlTypeId) return false;
+        if (type == UIA_ToolBarControlTypeId) toolbar = true;
+        if (type == UIA_WindowControlTypeId) {
+            if (!toolbar && !smartBox) return false;
+            if (!verifyRoot) return true;
+            Com<IUIAutomationElement> root;
+            BOOL same = FALSE;
+            return hasInterface(automation->ElementFromHandle(window, root.out()), root.p) &&
+                SUCCEEDED(automation->CompareElements(current.p, root.p, &same)) && same;
+        }
+        Com<IUIAutomationElement> next;
+        if (!hasInterface(walker->GetParentElement(current.p, next.out()), next.p)) return false;
+        current.p->Release(); current.p = next.p; next.p = nullptr;
+    }
+    return false;
+}
 // Called only for a requested, focused browser address bar; never for page controls.
-HRESULT setFocusedAddress(IUIAutomation *automation, HWND window, const std::wstring &url) {
+HRESULT setFocusedAddress(IUIAutomation *automation, HWND window, const std::wstring &url, bool yandex = false) {
     if (!automation || GetForegroundWindow() != window) return E_ACCESSDENIED;
     Com<IUIAutomationElement> element;
     auto result = automation->GetFocusedElement(element.out());
@@ -556,9 +693,21 @@ HRESULT setFocusedAddress(IUIAutomation *automation, HWND window, const std::wst
     int pid = 0; element->get_CurrentProcessId(&pid);
     DWORD expected = 0; GetWindowThreadProcessId(window, &expected);
     if (DWORD(pid) != expected) return E_ACCESSDENIED;
-    BSTR name = nullptr; element->get_CurrentName(&name);
-    std::wstring label = name ? lower(name) : L""; SysFreeString(name);
-    if (!contains(label, {L"адрес", L"address", L"поиск", L"search"})) return E_ACCESSDENIED;
+    // Names such as Search also occur inside the extensions page. Validate
+    // the chrome hierarchy for every language, even when the label is known.
+    CONTROLTYPEID type = 0; RECT bounds{}, frame{};
+    bool smartBox = false;
+    if (yandex) {
+        BSTR id = nullptr, name = nullptr;
+        element->get_CurrentAutomationId(&id); element->get_CurrentName(&name);
+        smartBox = yandexOmniboxIdentity(id ? lower(id) : L"", name ? lower(name) : L"");
+        SysFreeString(id); SysFreeString(name);
+    }
+    if (FAILED(element->get_CurrentControlType(&type)) || (type != UIA_EditControlTypeId && type != UIA_ComboBoxControlTypeId) ||
+        FAILED(element->get_CurrentBoundingRectangle(&bounds)) || !GetWindowRect(window, &frame) ||
+        !guideOmniboxBounds(bounds.left, bounds.top, bounds.right, bounds.bottom, frame.left, frame.top, frame.right, frame.bottom,
+            GetDpiForWindow(window), yandex) ||
+        !browserChromeAddress(automation, element.p, window, smartBox, yandex)) return E_ACCESSDENIED;
     BSTR text = SysAllocString(url.c_str());
     if (!text) return E_OUTOFMEMORY;
     Com<IUIAutomationValuePattern> value;
@@ -572,23 +721,57 @@ HRESULT setFocusedAddress(IUIAutomation *automation, HWND window, const std::wst
     }
     SysFreeString(text); return result;
 }
-// Tab titles are only candidates: the actual internal page is verified after selection.
-int selectExtensionsTab(IUIAutomation *automation, HWND window, ULONGLONG deadline, bool firefox) {
-    if (!automation || GetForegroundWindow() != window) return false;
+bool matchesActiveProbe(IUIAutomation *automation, HWND window, const std::wstring &url, bool yandex) {
+    const auto expectedTitle = yandex ? lower(wide(guideProfilePageTitle(utf8(url)))) : std::wstring{};
+    if (!expectedTitle.empty()) {
+        wchar_t caption[512]{};
+        if (GetWindowTextW(window, caption, 512) && guideYandexProbeCaption(lower(caption), expectedTitle))
+            return true;
+    }
+    if (activeBrowserAddressMatches(readActiveBrowserAddress(automation, window, yandex), url)) return true;
+    if (expectedTitle.empty() || !automation) return false;
     Com<IUIAutomationElement> root;
-    if (FAILED(automation->ElementFromHandle(window, root.out())) || !root.p) return false;
+    if (!hasInterface(automation->ElementFromHandle(window, root.out()), root.p)) return false;
     Variant type; type.value.vt = VT_I4; type.value.lVal = UIA_TabItemControlTypeId;
     Com<IUIAutomationCondition> condition;
-    if (FAILED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, type.value, condition.out())) || !condition.p) return false;
+    if (!hasInterface(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, type.value, condition.out()), condition.p)) return false;
     Com<IUIAutomationElementArray> tabs;
-    if (FAILED(root->FindAll(TreeScope_Descendants, condition.p, tabs.out())) || !tabs.p) return false;
+    if (!hasInterface(root->FindAll(TreeScope_Descendants, condition.p, tabs.out()), tabs.p)) return false;
+    int count = 0;
+    if (FAILED(tabs->get_Length(&count))) return false;
+    for (int i = 0; i < std::min(count, 200); ++i) {
+        Com<IUIAutomationElement> tab;
+        if (!hasInterface(tabs->GetElement(i, tab.out()), tab.p)) continue;
+        BSTR raw = nullptr;
+        tab->get_CurrentName(&raw);
+        auto title = raw ? lower(raw) : L"";
+        SysFreeString(raw);
+        if (!guideYandexProbeCaption(title, expectedTitle)) continue;
+        Com<IUIAutomationSelectionItemPattern> selection;
+        const auto hr = tab->GetCurrentPatternAs(UIA_SelectionItemPatternId, __uuidof(IUIAutomationSelectionItemPattern), (void **)selection.out());
+        BOOL selected = FALSE;
+        if (hasInterface(hr, selection.p) && SUCCEEDED(selection->get_CurrentIsSelected(&selected)) && selected &&
+            browserChromeAddress(automation, tab.p, window, true)) return true;
+    }
+    return false;
+}
+// Tab titles are only candidates: the actual internal page is verified after selection.
+int selectExtensionsTab(IUIAutomation *automation, HWND window, ULONGLONG deadline, bool firefox, bool yandex) {
+    if (!automation || GetForegroundWindow() != window) return 2;
+    Com<IUIAutomationElement> root;
+    if (FAILED(automation->ElementFromHandle(window, root.out())) || !root.p) return 2;
+    Variant type; type.value.vt = VT_I4; type.value.lVal = UIA_TabItemControlTypeId;
+    Com<IUIAutomationCondition> condition;
+    if (FAILED(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, type.value, condition.out())) || !condition.p) return 2;
+    Com<IUIAutomationElementArray> tabs;
+    if (FAILED(root->FindAll(TreeScope_Descendants, condition.p, tabs.out())) || !tabs.p) return 2;
     int count = 0; tabs->get_Length(&count); bool candidate = false;
     for (int i = 0; i < count && i < 200; ++i) {
         Com<IUIAutomationElement> tab;
         if (FAILED(tabs->GetElement(i, tab.out())) || !tab.p) continue;
         BSTR raw = nullptr; tab->get_CurrentName(&raw);
         std::wstring name = raw ? lower(raw) : L""; SysFreeString(raw);
-        if (!extensionsTabTitle(name, firefox)) continue;
+        if (!extensionsTabTitle(name, firefox, yandex)) continue;
         candidate = true;
         Com<IUIAutomationSelectionItemPattern> selection;
         auto hr = tab->GetCurrentPatternAs(UIA_SelectionItemPatternId, __uuidof(IUIAutomationSelectionItemPattern), (void **)selection.out());
@@ -606,6 +789,42 @@ int selectExtensionsTab(IUIAutomation *automation, HWND window, ULONGLONG deadli
         if (hasInterface(hr, legacy.p) && GetTickCount64() < deadline && GetForegroundWindow() == window && SUCCEEDED(legacy->DoDefaultAction())) return 1;
     }
     return candidate ? 2 : 0;
+}
+bool closeForwardingDuplicate(IUIAutomation *automation, HWND window, const std::wstring &url, bool yandex) {
+    if (!automation || GetForegroundWindow() != window || !modifiersUp()) return false;
+    Com<IUIAutomationElement> root;
+    if (!hasInterface(automation->ElementFromHandle(window, root.out()), root.p)) return false;
+    Variant type; type.value.vt = VT_I4; type.value.lVal = UIA_TabItemControlTypeId;
+    Com<IUIAutomationCondition> condition;
+    if (!hasInterface(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, type.value, condition.out()), condition.p)) return false;
+    Com<IUIAutomationElementArray> tabs;
+    if (!hasInterface(root->FindAll(TreeScope_Descendants, condition.p, tabs.out()), tabs.p)) return false;
+    int count = 0, matches = 0; tabs->get_Length(&count);
+    for (int i = 0; i < std::min(count, 200); ++i) {
+        Com<IUIAutomationElement> tab;
+        if (!hasInterface(tabs->GetElement(i, tab.out()), tab.p)) continue;
+        BSTR raw = nullptr; tab->get_CurrentName(&raw);
+        const auto name = raw ? lower(raw) : L""; SysFreeString(raw);
+        if (extensionsTabTitle(name, false, yandex)) ++matches;
+    }
+    // Close only our active nonce page, only while another candidate tab keeps
+    // the window alive. The candidate's internal URL is verified after selection.
+    return count >= 2 && matches >= 1 && matchesActiveProbe(automation, window, url, yandex) &&
+        GetForegroundWindow() == window && modifiersUp() && focusChord(VK_CONTROL, 'W');
+}
+bool closeExactProbeTab(IUIAutomation *automation, HWND window, const std::wstring &url, const std::atomic<ULONGLONG> &deadline, bool yandex) {
+    if (!automation || GetForegroundWindow() != window || !modifiersUp() || !deadline || GetTickCount64() >= deadline) return false;
+    Com<IUIAutomationElement> root;
+    if (!hasInterface(automation->ElementFromHandle(window, root.out()), root.p)) return false;
+    Variant type; type.value.vt = VT_I4; type.value.lVal = UIA_TabItemControlTypeId;
+    Com<IUIAutomationCondition> condition;
+    if (!hasInterface(automation->CreatePropertyCondition(UIA_ControlTypePropertyId, type.value, condition.out()), condition.p)) return false;
+    Com<IUIAutomationElementArray> tabs;
+    if (!hasInterface(root->FindAll(TreeScope_Descendants, condition.p, tabs.out()), tabs.p)) return false;
+    int count = 0;
+    if (FAILED(tabs->get_Length(&count)) || count < 2) return false;
+    return matchesActiveProbe(automation, window, url, yandex) && deadline && GetTickCount64() < deadline &&
+        GetForegroundWindow() == window && modifiersUp() && focusChord(VK_CONTROL, 'W');
 }
 } // namespace
 
@@ -657,14 +876,17 @@ std::wstring extensionPageUrl(GuidedBrowser kind) {
 
 struct ExtensionInstaller::Impl {
     bool firefox = false;
-    bool firefoxSawPicker = false;
+    bool yandex = false;
+    bool firefoxWaitingForInstallResult = false;
     FirefoxPickerGuard firefoxPickerGuard;
+    FirefoxInstallProgress firefoxInstallProgress;
     bool firefoxAcknowledgement = false;
-    ULONGLONG firefoxPickerClosedAt = 0;
+    ULONGLONG firefoxInstallWaitAt = 0;
     HWND panel{}, marker{}, dimmer{}, owner{}, browserWindow{}, picker{};
     std::function<void()> retryConnection;
     std::function<bool()> openSetup;
     bool setupRequested = false;
+    ULONGLONG setupRequestedAt = 0, connectionCheckAt = 0;
     bool autoCloseOnEnabled = true, reducedMotion = false;
     bool connectionConfirmed = false, extensionReloadRequired = false, extensionRunning = false;
     RECT dimTarget{}, dimPanel{}; bool dimPositioned = false;
@@ -678,7 +900,19 @@ struct ExtensionInstaller::Impl {
     ULONGLONG opened = GetTickCount64(), pickerAttemptAt = 0, connectionRetryAt = 0;
     bool navigationPending = true, markerPositioned = false;
     bool reuseBrowserWindow = false, newTabPending = false;
+    bool launchInitiated = false, navigationInitiated = false;
+    std::wstring forwardingUrl;
+    std::unique_ptr<GuideProfileChallenge> forwardingProbe;
+    std::atomic_bool identifyForwarded{false};
+    std::atomic<HWND> forwardedWindow{nullptr};
+    std::atomic_bool forwardingDuplicateRemoved{false};
+    std::atomic<HWND> forwardingDuplicateRequest{nullptr};
+    std::atomic<int> forwardingDuplicateResult{0};
+    std::atomic_bool forwardingPreparation{false};
+    bool forwardingTabHandled = false;
+    bool forwardingProofSeen = false;
     bool explicitProfile = false, profileWindowBound = false;
+    std::optional<FirefoxProfileOwner> firefoxProfileOwner;
     std::vector<std::wstring> launchArguments;
     std::vector<HWND> searchWindows;
     size_t searchWindowIndex = 0;
@@ -692,6 +926,13 @@ struct ExtensionInstaller::Impl {
     bool pageVerified = false;
     std::atomic<HWND> addressRequest{nullptr};
     std::atomic<LONG> addressResult{E_PENDING};
+    std::atomic<HWND> closeProbeRequest{nullptr};
+    std::atomic<int> closeProbeResult{0};
+    std::atomic<ULONGLONG> closeProbeDeadline{0};
+    std::mutex addressMutex;
+    std::wstring requestedAddress, challengeUrl, closeProbeUrl;
+    int challengePhase = 0;
+    ULONGLONG challengeAt = 0, challengeStarted = 0;
     std::atomic<HWND> tabRequest{nullptr};
     std::atomic<int> tabResult{-1};
     std::atomic<ULONGLONG> tabDeadline{0};
@@ -699,7 +940,7 @@ struct ExtensionInstaller::Impl {
     int pickerAttempts = 0;
     int folderPhase = 0;
     HWND folderEdit{};
-    ULONGLONG folderPhaseAt = 0;
+    ULONGLONG folderPhaseAt = 0, folderDeadline = 0;
     bool sawExtensionPage = false;
     ULONGLONG absenceSince = 0, absenceFirstScene = 0;
     GuideFlow flow;
@@ -708,19 +949,33 @@ struct ExtensionInstaller::Impl {
     std::thread scanner;
     std::mutex mutex;
     Scene latest, displayed;
-    RECT markerRect{}, markerTarget{}, markerStart{};
-    ULONGLONG markerMoveAt = 0, markerLostAt = 0;
+    RECT markerRect{}, markerTarget{};
+    GuideOverlayBox markerStart{};
+    ULONGLONG markerMoveAt = 0, markerDuration = 0, markerLostAt = 0, markerPaintAt = 0, markerRevealAt = 0;
+    BYTE markerAlpha = 0, markerRevealFrom = 0, markerFadeFrom = 0, dimAlpha = 155;
+    bool markerActive = false, markerShade = false;
     HDC panelDc{};
     HGLRC panelContext{};
     Canvas canvas;
     bool canvasReady = false, lightTheme = false, english = false;
     float mouseX = -1, mouseY = -1;
     int pressedButton = -1, focusedButton = 0;
+    FocusVisual keyboardFocusVisual;
     std::array<Spring, 4> buttonHover{}, buttonPress{};
     Spring stageMotion{1};
     int paintedStage = -1;
     ULONGLONG lastFrame = 0;
     float scale = 1;
+    enum class WaitTask { None, Page, Folder, Installation, Setup, Connection, Profile, CloseProbe };
+    struct PendingTask {
+        WaitTask task = WaitTask::None;
+        ULONGLONG deadline = 0;
+    };
+    WaitTask shownWaitTask = WaitTask::None;
+    ULONGLONG waitChangedAt = 0;
+    static constexpr ULONGLONG navigationLimit = 30'000, tabSelectionLimit = 10'500, tabConfirmationLimit = 8'000;
+    static constexpr ULONGLONG profileProbeLimit = 15'000, profileCleanupLimit = 3'000, folderNavigationLimit = 8'000;
+    static constexpr ULONGLONG firefoxInstallLimit = 15'000, installFeedbackLimit = 5'000, connectionFeedbackLimit = 4'000;
 #ifdef STREAMSHELF_INSTALLER_TESTING
     unsigned markerUpdates = 0, panelPaints = 0;
 #endif
@@ -751,6 +1006,7 @@ struct ExtensionInstaller::Impl {
             {L"Переключитесь на открытую вкладку расширений, чтобы продолжить.", L"Switch to the open extensions tab to continue."},
             {L"Браузер открыт, но страница расширений не подтверждена. Повторите открытие.", L"The browser is open, but the extensions page could not be verified. Open it again."},
             {L"Ожидаю адресную строку окна выбора папки…", L"Waiting for the address bar in the folder picker…"},
+            {L"Включите «Режим разработчика» в правом верхнем углу страницы расширений.", L"Turn on Developer mode in the top right of the extensions page."},
             {L"Перетащите окно мастера, чтобы открыть нужную кнопку.", L"Move this guide window to reveal the highlighted button."},
             {L"Подключите расширение и подтвердите доступ к сайтам, если согласны.", L"Connect the extension and allow website access if you agree."},
             {L"Ожидаю соединение. Если оно не появилось, нажмите значок StreamShelf в панели Firefox и подключите расширение.", L"Waiting for a connection. If it does not appear, click the StreamShelf icon in Firefox and connect the extension."},
@@ -774,6 +1030,7 @@ struct ExtensionInstaller::Impl {
             {L"Путь скопирован.", L"Path copied."},
             {L"Проверяю связь и открываю окно StreamShelf Connector. Подтвердите доступ к сайтам, если согласны.", L"Checking the connection and opening StreamShelf Connector. Allow website access if you agree."},
             {L"Не удалось прочитать интерфейс. Повторите действие в браузере.", L"Could not read the browser interface. Try the action again."},
+            {L"Не удалось автоматически выбрать вкладку расширений. Переключитесь на неё, чтобы продолжить.", L"Could not automatically select the extensions tab. Switch to it to continue."},
             {L"Следуйте подсказкам в браузере — шаги меняются автоматически.", L"Follow the browser instructions. The steps advance automatically."}
         };
         if (auto it = translations.find(value); it != translations.end()) return it->second;
@@ -796,7 +1053,20 @@ struct ExtensionInstaller::Impl {
         CloseHandle(process.hThread);
     }
     void openExtensionsPage(bool relaunch = false) {
+        if (navigationPending && navigationInitiated && !relaunch) return;
+        navigationInitiated = true;
         if (!IsWindow(browserWindow)) profileWindowBound = false;
+        if (firefox && explicitProfile && !profileWindowBound && !relaunch) {
+            firefoxProfileOwner = firefoxProfileLockOwner(profileDirectory.wstring());
+            if (firefoxProfileOwner) {
+                HWND selected = findBrowserWindow(exe, existingWindows, false, 0, firefoxProfileOwner->processId);
+                DWORD pid = 0; if (selected) GetWindowThreadProcessId(selected, &pid);
+                if (selected && firefoxProfileOwnerMatches(*firefoxProfileOwner, pid)) {
+                    browserWindow = selected;
+                    profileWindowBound = true;
+                }
+            }
+        }
         if (!IsWindow(browserWindow) && !relaunch && guideCanReuseBrowserWindow(explicitProfile, profileWindowBound))
             browserWindow = findBrowserWindow(exe, existingWindows, false);
         reuseBrowserWindow = !relaunch && IsWindow(browserWindow) && guideCanReuseBrowserWindow(explicitProfile, profileWindowBound);
@@ -807,11 +1077,13 @@ struct ExtensionInstaller::Impl {
             searchWindows.push_back(browserWindow);
             for (HWND window : existingWindows) {
                 wchar_t cls[100]{}; GetClassNameW(window, cls, 100);
+                DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
                 if (window != browserWindow && IsWindowVisible(window) && !GetWindow(window, GW_OWNER) &&
-                    std::wstring(cls) == L"MozillaWindowClass" && lower(processPath(window)) == lower(exe)) searchWindows.push_back(window);
+                    std::wstring(cls) == L"MozillaWindowClass" && lower(processPath(window)) == lower(exe) &&
+                    (!explicitProfile || (firefoxProfileOwner && firefoxProfileOwnerMatches(*firefoxProfileOwner, pid)))) searchWindows.push_back(window);
             }
         }
-        if (!reuseBrowserWindow) {
+        if (!reuseBrowserWindow && !launchInitiated) {
             // Snapshot immediately before the profile-specific launch. Never
             // fall back to a pre-existing window belonging to another profile.
             existingWindows.clear();
@@ -822,6 +1094,7 @@ struct ExtensionInstaller::Impl {
             }, reinterpret_cast<LPARAM>(this));
             profileWindowBound = false;
             launchBrowser();
+            launchInitiated = true;
         }
         navigationPending = true; pageVerified = false; navigationPhase = 1;
         navigationAttempts = 0; navigationStarted = navigationAt = GetTickCount64();
@@ -830,17 +1103,19 @@ struct ExtensionInstaller::Impl {
     void navigateBrowser() {
         if (!navigationPending) return;
         auto now = GetTickCount64();
-        if (now - navigationStarted > 30000) {
-            navigationPending = false;
+        if (now - navigationStarted >= navigationLimit) {
+            navigationPending = false; forwardingPreparation = false;
             setNotice(firefox && explicitProfile ? L"Не удалось открыть выбранный профиль. Если он уже открыт в Firefox, закройте его и повторите." : L"Страница не подтверждена. Нажмите «Открыть страницу» для повтора."); return;
         }
         if (navigationPhase == 1) {
-            auto found = (reuseBrowserWindow || (explicitProfile && profileWindowBound)) && IsWindow(browserWindow) ? browserWindow :
+            auto found = !forwardingUrl.empty() && !profileWindowBound ? forwardedWindow.load() :
+                (reuseBrowserWindow || (explicitProfile && profileWindowBound)) && IsWindow(browserWindow) ? browserWindow :
                 findBrowserWindow(exe, existingWindows, explicitProfile || (!reuseBrowserWindow && now - navigationStarted < 1700),
                                   firefox && explicitProfile ? launchPid : 0);
             if (!found) return;
             browserWindow = found; scanWindow = found;
             if (explicitProfile) profileWindowBound = true;
+            if (forwardingProbe && !forwardingTabHandled) forwardingProbe->advance(GuideProbeProgress::matched);
             wchar_t cls[100]{}; GetClassNameW(found, cls, 100); browserWindowClass = cls;
             DWORD pid = 0; GetWindowThreadProcessId(found, &pid); AllowSetForegroundWindow(pid);
             if (!IsZoomed(found)) { ShowWindowAsync(found, SW_MAXIMIZE); browserRectChangedAt = now; return; }
@@ -849,8 +1124,43 @@ struct ExtensionInstaller::Impl {
             if (!EqualRect(&current, &stableBrowserRect)) { stableBrowserRect = current; browserRectChangedAt = now; return; }
             if (now - browserRectChangedAt < 350) return;
             SetForegroundWindow(found);
-            if (GetForegroundWindow() == found) { navigationPhase = 2; navigationAt = now; }
+            if (GetForegroundWindow() == found) {
+                if (!forwardingUrl.empty() && !forwardingTabHandled) {
+                    forwardingTabHandled = true;
+                    navigationPhase = 9; navigationAt = now; return;
+                }
+                if (forwardingDuplicateRemoved) { tabSearchPending = true; newTabPending = false; }
+                // The external probe is only for profile/window identity.
+                // Reuse its tab for extensions unless an existing extensions
+                // tab allowed the probe to be closed safely.
+                navigationPhase = 2; navigationAt = now;
+            }
             return;
+        }
+        if (navigationPhase == 9) {
+            // The extension announces active tabs asynchronously. Keep this
+            // exact HTTP probe alive briefly so its first announcement can
+            // identify the session before we select/reuse an internal page.
+            if (guideWaitForProbePage(now - navigationAt, forwardingProofSeen,
+                                      !forwardingProbe || forwardingProbe->pageReady())) return;
+            forwardingDuplicateResult = 0; forwardingDuplicateRequest = browserWindow;
+            navigationPhase = 8; navigationAt = now; return;
+        }
+        if (navigationPhase == 8) {
+            const auto result = forwardingDuplicateResult.load();
+            if (!result) {
+                if (now - navigationAt >= tabConfirmationLimit) {
+                    forwardingPreparation = false;
+                    navigationPending = false;
+                    setNotice(L"Не удалось проверить открытые вкладки. Переключитесь на страницу расширений вручную.");
+                }
+                return;
+            }
+            forwardingDuplicateRemoved = result == 1;
+            forwardingPreparation = false;
+            if (forwardingProbe) forwardingProbe->advance(GuideProbeProgress::proceeding);
+            tabSearchPending = result == 1; newTabPending = false;
+            navigationPhase = 2; navigationAt = now; return;
         }
         if (GetForegroundWindow() != browserWindow || !modifiersUp()) return;
         if (now - navigationAt < 250) return;
@@ -868,7 +1178,7 @@ struct ExtensionInstaller::Impl {
         }
         if (navigationPhase == 6) {
             int result = tabResult;
-            if (result < 0 && now - navigationAt < 10500) return;
+            if (result < 0 && now - navigationAt < tabSelectionLimit) return;
             if (result < 0) {
                 navigationPending = false;
                 setNotice(L"Не удалось проверить открытые вкладки. Переключитесь на страницу расширений вручную."); return;
@@ -876,7 +1186,7 @@ struct ExtensionInstaller::Impl {
             if (result == 1) { navigationPhase = 7; navigationAt = now; }
             else if (result == 2) {
                 navigationPending = false;
-                setNotice(L"Вкладка расширений найдена. Переключитесь на неё, чтобы продолжить.");
+                setNotice(L"Не удалось автоматически выбрать вкладку расширений. Переключитесь на неё, чтобы продолжить.");
             } else if (firefox && searchWindowIndex + 1 < searchWindows.size()) {
                 browserWindow = searchWindows[++searchWindowIndex]; tabSearchPending = true;
                 navigationPhase = 1; navigationAt = now;
@@ -886,11 +1196,12 @@ struct ExtensionInstaller::Impl {
             } else { navigationPhase = 2; navigationAt = now; }
             return;
         }
-        if (navigationPhase == 7 && now - navigationAt > 8000) {
+        if (navigationPhase == 7 && now - navigationAt >= tabConfirmationLimit) {
             navigationPending = false;
             setNotice(L"Переключитесь на открытую вкладку расширений, чтобы продолжить."); return;
         }
         if (navigationPhase == 3) {
+            { std::lock_guard lock(addressMutex); requestedAddress = pageUrl; }
             addressResult = E_PENDING; addressRequest = browserWindow;
             navigationPhase = 4; navigationAt = now; return;
         }
@@ -919,8 +1230,10 @@ struct ExtensionInstaller::Impl {
     void navigateFolder(HWND window) {
         if (GetForegroundWindow() != window || !modifiersUp() || !belongsToBrowser(window, exe)) return;
         auto now = GetTickCount64();
+        if (folderDeadline && now >= folderDeadline) { folderPhase = 0; return; }
         if (folderPhase == 0) {
             if (pickerAttempts >= 2 || now - pickerAttemptAt < 1500) return;
+            if (!folderDeadline) folderDeadline = now + folderNavigationLimit;
             ++pickerAttempts; pickerAttemptAt = now;
             if (focusChord(VK_CONTROL, 'L')) { folderPhase = 1; folderPhaseAt = now; }
             return;
@@ -968,6 +1281,9 @@ struct ExtensionInstaller::Impl {
             return;
         }
         if (folderPhase == 3 && now - folderPhaseAt > 2500) folderPhase = 0;
+    }
+    bool folderAutomationFinished(ULONGLONG now) const {
+        return (folderDeadline && now >= folderDeadline) || (pickerAttempts >= 2 && folderPhase == 0);
     }
     void updatePanelRegion(HWND window) {
         RECT client{};
@@ -1040,6 +1356,89 @@ struct ExtensionInstaller::Impl {
         }
         if (!line.empty() && count < maxLines) canvas.text(line, x, y + count * size * 1.5f, size, color, width);
     }
+    PendingTask pendingTask(ULONGLONG now) {
+        const auto recent = [now](ULONGLONG since, ULONGLONG span) {
+            return since && now >= since && now - since < span;
+        };
+        if (connectionConfirmed || flow.stage == GuideStage::Done) return {};
+        if (challengePhase) {
+            if (challengePhase != 6 && GetForegroundWindow() != browserWindow) return {};
+            if (challengePhase == 6) return {WaitTask::CloseProbe, challengeAt + profileCleanupLimit};
+            return {WaitTask::Profile, challengeStarted + profileProbeLimit};
+        }
+        const bool connecting = flow.stage == GuideStage::Connect;
+        const bool verifying = flow.stage == GuideStage::Verify;
+        if (!navigationPending && !picker && !connecting && !verifying) return {};
+        std::lock_guard lock(mutex);
+        const auto &scene = latest;
+        const bool current = scene.valid && recent(scene.at, 3000);
+        if (current && (scene.permissionAllow.found || scene.popupConnect.found || scene.connectorPopup ||
+                        scene.firefoxAdd.found || scene.firefoxAddedNotice || scene.facts.confirmationDialog))
+            return {};
+        if (picker && current && scene.window == picker && scene.facts.folderDialog) {
+            if (firefox && firefoxPickerAction(scene.facts.folderReady, scene.firefoxFile.found,
+                                   scene.firefoxFileSelected, scene.firefoxFileReady) != FirefoxPickerAction::Navigate)
+                return {};
+            if (!firefox && (flow.stage != GuideStage::Folder || scene.facts.folderReady))
+                return {};
+            if (GetForegroundWindow() != picker || folderAutomationFinished(now))
+                return {};
+            return {WaitTask::Folder, folderDeadline};
+        }
+        if (navigationPending && navigationInitiated) {
+            const bool needsBrowserFocus = navigationPhase >= 2 && navigationPhase <= 4;
+            if (!needsBrowserFocus || GetForegroundWindow() == browserWindow)
+                return {WaitTask::Page, navigationStarted + navigationLimit};
+        }
+        const auto installAt = firefox ? firefoxInstallWaitAt : flow.pickerClosedAt;
+        const auto installLimit = firefox ? firefoxInstallLimit : installFeedbackLimit;
+        if (verifying && recent(installAt, installLimit))
+            return {WaitTask::Installation, installAt + installLimit};
+        if (connecting && !extensionReloadRequired) {
+            if (recent(connectionCheckAt, connectionFeedbackLimit)) return {WaitTask::Connection, connectionCheckAt + connectionFeedbackLimit};
+            if (setupRequested && recent(setupRequestedAt, connectionFeedbackLimit)) return {WaitTask::Setup, setupRequestedAt + connectionFeedbackLimit};
+        }
+        return {};
+    }
+    void paintPendingTask(ULONGLONG now, float width, float height, Ink ink, Ink accent, Ink edge) {
+        const auto pending = pendingTask(now);
+        const auto seconds = guideWaitSeconds(now, pending.deadline);
+        const auto task = seconds ? pending.task : WaitTask::None;
+        if (task != shownWaitTask) { shownWaitTask = task; waitChangedAt = now; }
+        if (task == WaitTask::None) return;
+        const char *labelsRu[] = {"", "Открываю страницу расширений", "Открываю нужную папку", "Проверяю установку",
+                                   "Открываю окно расширения", "Проверяю соединение", "Проверяю профиль браузера", "Закрываю служебную вкладку"};
+        const char *labelsEn[] = {"", "Opening the extensions page", "Opening the extension folder", "Checking installation",
+                                   "Opening the extension", "Checking connection", "Checking the browser profile", "Closing the verification tab"};
+        const auto label = (english ? labelsEn : labelsRu)[int(task)];
+        const auto countdown = std::to_string(seconds) + (english ? " s" : " с");
+        const float countdownWidth = canvas.measure(english ? "30 s" : "30 с", 11) + 20;
+        const float opacity = reducedMotion ? 1.f : std::clamp(float(now - waitChangedAt + 32) / 150.f, 0.f, 1.f);
+        const float top = height - 140, center = top + 11;
+        const float badgeWidth = std::min(width - 48, canvas.measure(label, 11) + 40 + countdownWidth);
+        const Rect badge{24, top, badgeWidth, 22};
+        canvas.rect(badge, 11, accent.alpha(.09f * opacity));
+        canvas.outline(badge, 11, mix(edge, accent, .28f).alpha(opacity), 1);
+        if (reducedMotion) {
+            canvas.outline({33, center - 5, 10, 10}, 5, accent.alpha(opacity), 1.4f);
+            canvas.circle(38, center, 1.45f, accent.alpha(opacity));
+        } else {
+            constexpr float turn = 6.2831853f;
+            const float head = float((now - waitChangedAt) % 1050) * turn / 1050;
+            for (int dot = 0; dot < 8; ++dot) {
+                const float angle = dot * turn / 8;
+                const float highlight = (1 + std::cos(angle - head)) * .5f;
+                const float strength = .22f + .78f * highlight * highlight * highlight;
+                canvas.circle(38 + std::cos(angle) * 5, center + std::sin(angle) * 5, 1.1f + .4f * strength,
+                              accent.alpha(opacity * strength));
+            }
+        }
+        canvas.text(label, 50, center + 4, 11, ink.alpha(opacity), badgeWidth - 32 - countdownWidth);
+        const float boundary = badge.x + badge.w - countdownWidth;
+        canvas.line(boundary, center - 5, boundary, center + 5, 1, edge.alpha(opacity));
+        canvas.text(countdown, boundary + (countdownWidth - canvas.measure(countdown, 11)) / 2, center + 4,
+                    11, ink.alpha(opacity), countdownWidth);
+    }
     void paintPanel(HWND window) {
 #ifdef STREAMSHELF_INSTALLER_TESTING
         ++panelPaints;
@@ -1105,9 +1504,16 @@ struct ExtensionInstaller::Impl {
         canvas.border({8, 8, width - 16, height - 16}, 20, edge, panelInk);
         canvas.text(english ? "STREAMSHELF  /  EXTENSION SETUP" : "STREAMSHELF  /  УСТАНОВКА РАСШИРЕНИЯ", 24, 32, 11, accent, width - 48);
         canvas.text(utf8(browserName), 24, 57, 12, muted, width - 48);
-        canvas.text(utf8(firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall) ? (english ? L"Extension added" : L"Расширение добавлено") : firefox ? (english ? firefoxTitlesEn[s] : firefoxTitles[s]) : (english ? titlesEn[s] : titles[s])), 24, 94 + (1 - t) * 4, 21, ink.alpha(t), width - 48);
-        const wchar_t *body = explicitProfile && s == int(GuideStage::Connect)
-            ? (english ? L"Connect the extension in the selected browser profile. Check the connection in StreamShelf, then click Close." : L"Подключите расширение в выбранном профиле. Проверьте связь в StreamShelf и нажмите «Закрыть».")
+        const bool opening = navigationPending && !pageVerified && s == 0;
+        const wchar_t *title = opening ? (english ? L"Opening the extensions page" : L"Открываю страницу расширений")
+            : firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall)
+                ? (english ? L"Extension added" : L"Расширение добавлено")
+                : firefox ? (english ? firefoxTitlesEn[s] : firefoxTitles[s]) : (english ? titlesEn[s] : titles[s]);
+        canvas.text(utf8(title), 24, 94 + (1 - t) * 4, 21, ink.alpha(t), width - 48);
+        const wchar_t *body = opening ? (english ? L"Wait while the guide finds the browser window and opens the extensions page."
+                                               : L"Мастер найдёт окно браузера и откроет страницу расширений.")
+            : explicitProfile && s == int(GuideStage::Connect)
+            ? (english ? L"Connect the extension in the selected profile. This guide closes automatically once the connection is confirmed." : L"Подключите расширение в выбранном профиле. Мастер закроется автоматически после подтверждения связи.")
             : firefox && firefoxAcknowledgement && s == int(FirefoxGuideStage::ConfirmInstall)
                 ? (english ? L"Click OK in the Firefox notification. Then enable the extension on its card if needed." : L"Нажмите «OK» в уведомлении Firefox. Затем при необходимости включите расширение переключателем в его карточке.")
                 : firefox ? (english ? firefoxBodiesEn[s] : firefoxBodies[s]) : (english ? bodiesEn[s] : bodies[s]);
@@ -1116,8 +1522,11 @@ struct ExtensionInstaller::Impl {
         canvas.text(firefox ? (english ? "Signed extension file" : "Подписанный файл расширения") : (english ? "Extension folder" : "Папка расширения"), 32, 235, 10, muted, width - 64);
         canvas.text(utf8(extension.wstring()), 32, 253, 11, ink, width - 64);
         wrapped(utf8(displayNotice(notice.empty() ? L"Следуйте подсказкам в браузере — шаги меняются автоматически." : notice)), 24, 286, width - 48, 12, 3, muted);
+        paintPendingTask(now, width, height, ink, accent, edge);
         for (int i = 0; i < 7; ++i) canvas.rect({24 + i * (width - 48) / 7, height - 112, (width - 48) / 7 - 5, 3}, 2, i <= s ? accent : edge);
         const std::string names[] = {english ? "Copy path" : "Копировать путь", english ? "Open folder" : "Открыть папку", !firefox && s == int(GuideStage::Verify) ? (english ? "Retry loading" : "Повторить загрузку") : s >= int(GuideStage::Connect) ? (english ? "Check connection" : "Проверить связь") : (english ? "Open page" : "Открыть страницу"), english ? "Close" : "Закрыть"};
+        if (GetFocus() != panel) keyboardFocusVisual.hide();
+        const float focusOpacity = keyboardFocusVisual.step(double(now) / 1000., dt, reducedMotion);
         for (int i = 0; i < 4; ++i) {
             auto box = buttonRect(i, width, height); auto &hover = buttonHover[i]; auto &press = buttonPress[i];
             hover.target = box.contains(mouseX, mouseY) ? 1 : 0; press.target = pressedButton == i ? 1 : 0;
@@ -1127,33 +1536,44 @@ struct ExtensionInstaller::Impl {
             bool primary = i == 2;
             auto fill = primary ? mix(accent, hex(0xb6f5e8), h * .3f) : mix(panelInk, lightTheme ? hex(0xe8f1f5) : hex(0x2a3b52), h * .5f);
             canvas.glow({box.x - 10, box.y - 8, box.w + 20, box.h + 22}, accent.alpha(h * (primary ? .12f : .04f)));
-            float focus = GetFocus() == panel && focusedButton == i ? .65f : 0.f;
-            canvas.border(box, 12, primary ? accent : mix(edge, accent, std::max(h * .4f, focus)), fill);
+            canvas.border(box, 12, primary ? accent : mix(edge, accent, h * .4f), fill);
+            if (focusedButton == i && focusOpacity > 0) {
+                const auto ring = box.inset(-4);
+                canvas.outline(ring, 16, (lightTheme ? hex(0xffffff) : hex(0x08101c)).alpha(focusOpacity), 5);
+                canvas.outline(ring, 16, accent.alpha(focusOpacity), 2);
+            }
             float x = box.x + std::max(9.f, (box.w - canvas.measure(names[i], 12.5f)) / 2);
             canvas.text(names[i], x, box.y + box.h / 2 + 4.5f, 12.5f, primary ? hex(0x102821) : ink, box.w - 18);
         }
         canvas.render(); SwapBuffers(panelDc); wglMakeCurrent(previousDc, previousContext); EndPaint(window, &ps);
     }
-    void outline(const RECT &control) {
+    static GuideOverlayBox markerBox(const RECT &bounds) {
+        return {double(bounds.left), double(bounds.top), double(bounds.right), double(bounds.bottom)};
+    }
+    GuideOverlayBox markerPose(ULONGLONG now) const {
+        const double time = reducedMotion || !markerDuration ? 1. : double(now - markerMoveAt) / double(markerDuration);
+        return guideOverlayInterpolate(markerStart, markerBox(markerTarget), time);
+    }
+    void outline(const RECT &control, bool shaded = false) {
         RECT target = control; InflateRect(&target, px(9), px(9));
-        auto now = GetTickCount64();
-        if (markerLostAt) {
-            SetWindowLongPtrW(marker, GWL_EXSTYLE, GetWindowLongPtrW(marker, GWL_EXSTYLE) & ~WS_EX_LAYERED);
-            SetWindowLongPtrW(marker, GWL_EXSTYLE, GetWindowLongPtrW(marker, GWL_EXSTYLE) | WS_EX_LAYERED);
+        const auto now = GetTickCount64();
+        if (!markerActive) {
+            markerRevealAt = now;
+            markerRevealFrom = markerAlpha;
         }
-        markerLostAt = 0;
-        if (!markerPositioned || !IsWindowVisible(marker)) {
-            markerStart = markerTarget = target; markerMoveAt = now;
-        } else if (!EqualRect(&target, &markerTarget)) {
-            markerStart = markerRect; markerTarget = target; markerMoveAt = now;
+        if (!markerPositioned && !markerActive) {
+            markerStart = guideOverlayOpeningBox(markerBox(target), px(4));
+            markerTarget = target;
+            markerMoveAt = now; markerDuration = guideOverlayRevealMs;
+        } else if (!markerActive || !EqualRect(&target, &markerTarget)) {
+            markerStart = markerActive ? markerPose(now) : markerBox(markerRect);
+            markerTarget = target;
+            markerMoveAt = now; markerDuration = guideOverlayTravel(markerStart, markerBox(target), scale);
         }
-        double t = reducedMotion ? 1. : std::clamp(double(now - markerMoveAt) / 280., 0., 1.);
-        t = t * t * (3. - 2. * t);
-        auto lerp = [t](LONG a, LONG b) { return LONG(std::lround(a + (b - a) * t)); };
-        RECT rect{lerp(markerStart.left, markerTarget.left), lerp(markerStart.top, markerTarget.top),
-                  lerp(markerStart.right, markerTarget.right), lerp(markerStart.bottom, markerTarget.bottom)};
-        RECT border = rect;
-        if (reducedMotion && markerPositioned && EqualRect(&rect, &markerRect)) { showIfChanged(marker, true); return; }
+        markerActive = true; markerShade = shaded; markerLostAt = 0;
+        if (!markerPositioned) paintOverlay(now);
+    }
+    void presentMarker(const RECT &rect, BYTE opacity, ULONGLONG frameAt) {
         int width = rect.right - rect.left, height = rect.bottom - rect.top;
         if (width <= 0 || height <= 0 || width > 5000 || height > 2000) return;
         BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth = width;
@@ -1162,49 +1582,80 @@ struct ExtensionInstaller::Impl {
         HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
         if (!memory || !bitmap || !pixels) { if (bitmap) DeleteObject(bitmap); if (memory) DeleteDC(memory); ReleaseDC(nullptr, dc); return; }
         auto old = SelectObject(memory, bitmap); auto data = static_cast<uint32_t *>(pixels);
-        double boxWidth = border.right - border.left;
+        double boxWidth = width;
         double radius = std::min(double(px(10)), std::min(boxWidth, double(height)) / 2.0 - 2), thickness = std::max(4, px(7));
-        double phase = reducedMotion ? 0 : GetTickCount64() / 180.;
-        double pulse = reducedMotion ? 0 : (1. - std::cos(GetTickCount64() * 2. * 3.141592653589793 / 1800.)) / 2.;
-        for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+        double phase = reducedMotion ? 0 : frameAt / 180.;
+        double pulse = reducedMotion ? 0 : (1. - std::cos(frameAt * 2. * 3.141592653589793 / 1800.)) / 2.;
+        std::fill_n(data, size_t(width) * height, 0u);
+        const auto drawPixel = [&](int x, int y) {
             double qx = std::abs(x + .5 - boxWidth / 2.) - (boxWidth / 2. - radius - thickness / 2. - 1);
             double qy = std::abs(y + .5 - height / 2.) - (height / 2. - radius - thickness / 2. - 1);
             double distance = std::hypot(std::max(qx, 0.), std::max(qy, 0.)) + std::min(std::max(qx, qy), 0.) - radius + pulse * px(3);
-            double opacity = x < boxWidth ? std::clamp(thickness / 2. + .5 - std::abs(distance), 0., 1.) : 0.;
-            unsigned alpha = unsigned(255 * opacity);
+            unsigned alpha = unsigned(255 * std::clamp(thickness / 2. + .5 - std::abs(distance), 0., 1.));
+            if (!alpha) return;
             double trail = reducedMotion ? 0 : std::pow((1 + std::cos(std::atan2(y + .5 - height / 2., x + .5 - boxWidth / 2.) - phase)) / 2., 12);
             unsigned red = unsigned(68 + 140 * trail), green = unsigned(201 + 45 * trail);
-            data[y * width + x] = (alpha << 24) | ((red * alpha / 255) << 16) | ((green * alpha / 255) << 8) | alpha;
+            data[size_t(y) * width + x] = (alpha << 24) | ((red * alpha / 255) << 16) | ((green * alpha / 255) << 8) | alpha;
+        };
+        const int band = std::max(24, px(24));
+        for (int y = 0; y < height; ++y) {
+            if (y < band || y >= height - band || width <= 2 * band) {
+                for (int x = 0; x < width; ++x) drawPixel(x, y);
+            } else {
+                for (int x = 0; x < band; ++x) drawPixel(x, y);
+                for (int x = width - band; x < width; ++x) drawPixel(x, y);
+            }
         }
-        POINT position{rect.left, rect.top}, source{}; SIZE size{width, height}; BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+        POINT position{rect.left, rect.top}, source{}; SIZE size{width, height};
+        BLENDFUNCTION blend{AC_SRC_OVER, 0, opacity, AC_SRC_ALPHA};
         if (UpdateLayeredWindow(marker, dc, &position, &size, memory, &source, 0, &blend, ULW_ALPHA)) {
 #ifdef STREAMSHELF_INSTALLER_TESTING
             ++markerUpdates;
 #endif
-            markerRect = rect; markerPositioned = true; showIfChanged(marker, true);
+            markerRect = rect; markerPositioned = true; markerAlpha = opacity; markerPaintAt = frameAt;
+            showIfChanged(marker, true);
         }
         SelectObject(memory, old); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(nullptr, dc);
     }
-    void hideFocus() {
+    void hideFocus(bool immediate = false) {
+        markerActive = false; markerShade = false;
         showIfChanged(dimmer, false);
-        if (!IsWindowVisible(marker)) return;
-        auto now = GetTickCount64();
-        if (!markerLostAt) markerLostAt = now;
-        if (reducedMotion || now - markerLostAt >= 220) {
-            showIfChanged(marker, false); markerPositioned = false;
-            SetWindowLongPtrW(marker, GWL_EXSTYLE, GetWindowLongPtrW(marker, GWL_EXSTYLE) & ~WS_EX_LAYERED);
-            SetWindowLongPtrW(marker, GWL_EXSTYLE, GetWindowLongPtrW(marker, GWL_EXSTYLE) | WS_EX_LAYERED);
-            markerLostAt = 0;
-        } else {
-            // Fade the existing premultiplied image without changing its geometry.
-            BYTE alpha = BYTE(255 * (1. - double(now - markerLostAt) / 220.));
-            SetLayeredWindowAttributes(marker, 0, alpha, LWA_ALPHA);
+        if (immediate || reducedMotion) {
+            showIfChanged(marker, false);
+            markerPositioned = false; markerLostAt = 0; markerAlpha = 0;
+        } else if (markerPositioned && !markerLostAt) {
+            markerLostAt = GetTickCount64();
+            markerFadeFrom = markerAlpha;
         }
     }
-    void shade(const RECT &target) {
+    void paintOverlay(ULONGLONG now) {
+        if (!markerActive) {
+            if (!markerPositioned || !markerLostAt) return;
+            const auto alpha = reducedMotion ? BYTE(0) : BYTE(guideOverlayFade(now - markerLostAt, markerFadeFrom));
+            if (!alpha) hideFocus(true);
+            else if (alpha != markerAlpha) presentMarker(markerRect, alpha, markerPaintAt);
+            return;
+        }
+        const BYTE alpha = reducedMotion ? 255 : BYTE(guideOverlayReveal(now - markerRevealAt, markerRevealFrom));
+        if (!alpha) return;
+        const auto pose = markerPose(now);
+        const RECT rect{LONG(std::lround(pose.left)), LONG(std::lround(pose.top)),
+                        LONG(std::lround(pose.right)), LONG(std::lround(pose.bottom))};
+        if (!markerPositioned || markerAlpha != alpha || !EqualRect(&rect, &markerRect) ||
+            (!reducedMotion && now - markerPaintAt >= 32))
+            presentMarker(rect, alpha, now);
+        if (markerShade && markerPositioned) shade(markerRect, BYTE((155u * markerAlpha + 127) / 255));
+        else showIfChanged(dimmer, false);
+    }
+    void shade(const RECT &target, BYTE opacity) {
+        if (!opacity) { showIfChanged(dimmer, false); return; }
+        if (dimAlpha != opacity) {
+            if (!SetLayeredWindowAttributes(dimmer, 0, opacity, LWA_ALPHA)) return;
+            dimAlpha = opacity;
+        }
         // Expose only the control and the inside edge of the stroke. A larger
         // cutout exposes a rectangular patch around small rounded controls.
-        RECT hole = target; InflateRect(&hole, px(2), px(2));
+        RECT hole = target; InflateRect(&hole, px(2) - px(9), px(2) - px(9));
         RECT card{}; GetWindowRect(panel, &card);
         if (!dimPositioned || !EqualRect(&hole, &dimTarget) || !EqualRect(&card, &dimPanel)) {
             int x = GetSystemMetrics(SM_XVIRTUALSCREEN), y = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -1241,17 +1692,16 @@ struct ExtensionInstaller::Impl {
         }
         RECT intersection{};
         if (IntersectRect(&intersection, &control.rect, &windowRect)) {
-            if (scene.permissionAllow.found || scene.firefoxAdd.found || scene.firefoxAddedNotice) showIfChanged(dimmer, false); else shade(control.rect);
-            outline(control.rect);
+            outline(control.rect, !scene.permissionAllow.found && !scene.firefoxAdd.found && !scene.firefoxAddedNotice);
         } else hideFocus();
     }
     void tickFirefox(const Scene &scene, bool current, bool browser, bool own) {
         if (!extensionRunning) setupRequested = false;
         FirefoxGuideObservation observation;
+        const auto now = GetTickCount64();
         if (current) {
             observation.manager = scene.facts.page;
             observation.menu = scene.firefoxMenu.found;
-            const auto now = GetTickCount64();
             if (browser) firefoxPickerGuard.observeMenu(observation.manager, observation.menu, now);
             const bool sameOwner = scene.window && browserWindow &&
                 GetAncestor(scene.window, GA_ROOTOWNER) == GetAncestor(browserWindow, GA_ROOTOWNER);
@@ -1269,15 +1719,29 @@ struct ExtensionInstaller::Impl {
             }
         }
         observation.extensionRunning = extensionRunning;
-        if (current && observation.picker) { firefoxSawPicker = true; firefoxPickerClosedAt = 0; }
-        else if (current && firefoxSawPicker && !firefoxPickerClosedAt) firefoxPickerClosedAt = GetTickCount64();
-        if (firefoxPickerClosedAt && GetTickCount64() - firefoxPickerClosedAt < 15000) observation.awaitingInstall = true;
-        if (observation.installed || observation.extensionRunning || (firefoxPickerClosedAt && GetTickCount64() - firefoxPickerClosedAt >= 15000)) { firefoxSawPicker = false; firefoxPickerClosedAt = 0; }
+        if (current && (observation.picker || observation.installPrompt)) {
+            firefoxWaitingForInstallResult = true;
+            firefoxInstallWaitAt = 0;
+        } else if (current && firefoxWaitingForInstallResult && !firefoxInstallWaitAt) {
+            firefoxInstallWaitAt = now;
+        }
+        if (observation.installed || observation.extensionRunning || observation.addedNotice || observation.removedNotice ||
+            (firefoxInstallWaitAt && now - firefoxInstallWaitAt >= firefoxInstallLimit)) {
+            firefoxWaitingForInstallResult = false;
+            firefoxInstallWaitAt = 0;
+        }
+        observation.awaitingInstall = firefoxInstallWaitAt != 0;
+        const bool profileAbsent = current && scene.profileAbsenceKnown && scene.enumerationComplete && scene.ownNamesSeen == 0;
+        firefoxInstallProgress.apply(observation, profileAbsent, scene.at);
         if (observation.picker && browser) {
             navigationPending = false;
-            if (picker != scene.window) { picker = scene.window; pickerAttempts = 0; pickerAttemptAt = 0; folderPhase = 0; }
-            // Do not send navigation input to a generic Open dialog. Even an
-            // owned picker is not proof that the user requested an XPI file.
+            if (picker != scene.window) { picker = scene.window; pickerAttempts = 0; pickerAttemptAt = 0; folderPhase = 0; folderDeadline = 0; }
+            // The guard above requires the installation menu in this browser
+            // and an owned picker. Restore 2.5's automatic folder navigation
+            // only after that proof, never for an unrelated browser Open dialog.
+            if (firefoxPickerAction(scene.facts.folderReady, scene.firefoxFile.found,
+                                   scene.firefoxFileSelected, scene.firefoxFileReady) == FirefoxPickerAction::Navigate)
+                navigateFolder(scene.window);
         } else if (current && !observation.picker) { picker = nullptr; pickerAttempts = 0; folderPhase = 0; }
         auto stage = firefoxGuideStage(observation);
         auto previous = flow.stage;
@@ -1287,9 +1751,12 @@ struct ExtensionInstaller::Impl {
         if (guideConnectionRetryDue(flow.stage, GetTickCount64(), connectionRetryAt) && retryConnection) {
             connectionRetryAt = GetTickCount64();
             retryConnection();
-            if (stop || !IsWindow(panel)) return;
+            if (stop || !IsWindow(panel) || challengePhase) return;
         }
-        if (stage == FirefoxGuideStage::Connect && browser && extensionRunning && !setupRequested && openSetup && openSetup()) setupRequested = true;
+        if (stage == FirefoxGuideStage::Connect && browser && extensionRunning && !setupRequested && openSetup && openSetup()) {
+            setupRequested = true;
+            setupRequestedAt = GetTickCount64();
+        }
         if (stage == FirefoxGuideStage::Connect) {
             if (scene.permissionAllow.found || scene.popupConnect.found)
                 setNotice(L"Подключите расширение и подтвердите доступ к сайтам, если согласны.");
@@ -1314,14 +1781,45 @@ struct ExtensionInstaller::Impl {
         else if (stage == FirefoxGuideStage::Connect) {
             if (scene.permissionAllow.found) control = scene.permissionAllow;
             else if (scene.popupConnect.found) control = scene.popupConnect;
-            else if (current && browser && scene.toolbarAction.found) control = scene.toolbarAction;
         }
-        if (stage == FirefoxGuideStage::SelectFile) setNotice(scene.firefoxFile.found && !scene.firefoxFileSelected ? L"Выберите файл StreamShelf Connector в списке." : (scene.firefoxFileReady || scene.firefoxFileSelected) ? L"Файл указан. Нажмите кнопку «Открыть»." : L"Выберите подписанный XPI вручную; путь можно скопировать кнопкой мастера.");
+        if (stage == FirefoxGuideStage::SelectFile) setNotice(scene.firefoxFile.found && !scene.firefoxFileSelected ? L"Выберите файл StreamShelf Connector в списке." : (scene.firefoxFileReady || scene.firefoxFileSelected) ? L"Файл указан. Нажмите кнопку «Открыть»." : folderAutomationFinished(GetTickCount64()) ? L"Откройте папку с XPI вручную или вставьте путь в поле имени файла." : L"Открываю папку с подписанным файлом расширения…");
         if (stage == FirefoxGuideStage::ConfirmInstall && !scene.firefoxAdd.found && !scene.firefoxAddedNotice) setNotice(L"Ожидаю подтверждение Firefox. Если выбор отменён, откройте меню установки снова.");
         if (stage == FirefoxGuideStage::Enable && !control.found) setNotice(L"Включите StreamShelf Connector в списке дополнений Firefox.");
         highlightTarget(scene, control);
     }
     void tick() {
+        if (challengePhase) {
+            hideFocus(true);
+            const auto now = GetTickCount64();
+            if (challengePhase == 6) {
+                if (closeProbeResult == 1 || now - challengeAt >= profileCleanupLimit || !IsWindow(browserWindow)) {
+                    closeProbeDeadline = 0; closeProbeRequest = nullptr; challengePhase = 0; challengeUrl.clear();
+                    return;
+                }
+                if (closeProbeResult == 2 && GetForegroundWindow() == browserWindow && modifiersUp()) {
+                    closeProbeResult = 0; closeProbeRequest = browserWindow;
+                }
+                return;
+            }
+            if (now - challengeStarted >= profileProbeLimit || !IsWindow(browserWindow)) { challengePhase = 0; return; }
+            if (GetForegroundWindow() != browserWindow || !modifiersUp()) return;
+            if (challengePhase == 1) {
+                if (focusChord(VK_CONTROL, 'T')) { challengePhase = 2; challengeAt = now; }
+            } else if (challengePhase == 2 && now - challengeAt >= 180) {
+                if (focusChord(VK_CONTROL, 'L')) { challengePhase = 3; challengeAt = now; }
+            } else if (challengePhase == 3 && now - challengeAt >= 120) {
+                { std::lock_guard lock(addressMutex); requestedAddress = challengeUrl; }
+                addressResult = E_PENDING; addressRequest = browserWindow; challengePhase = 4;
+            } else if (challengePhase == 4) {
+                LONG result = addressResult;
+                if (result == E_PENDING) return;
+                if (FAILED(result)) { challengePhase = 0; return; }
+                INPUT enter[2]{}; enter[0].type = enter[1].type = INPUT_KEYBOARD;
+                enter[0].ki.wVk = enter[1].ki.wVk = VK_RETURN; enter[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                if (SendInput(2, enter, sizeof(INPUT)) == 2) challengePhase = 5;
+            }
+            return;
+        }
         HWND beforeNavigation = GetForegroundWindow();
         wchar_t activeClass[100]{}; if (beforeNavigation) GetClassNameW(beforeNavigation, activeClass, 100);
         bool pickerOwnedByTarget = browserWindow && beforeNavigation &&
@@ -1359,14 +1857,21 @@ struct ExtensionInstaller::Impl {
         if (firefox) { tickFirefox(scene, current, browser, own); return; }
         if (current) {
             auto facts = scene.facts;
+            if (yandex && navigationPending && navigationPhase == 7 && scene.at >= navigationAt &&
+                guideInternalPage(scene.currentAddress, L"browser://tune")) {
+                navigationPhase = 2; navigationAt = GetTickCount64();
+            }
             // A verified live session proves our extension is loaded and enabled.
             // Developer mode remains the first prerequisite in GuideFlow.
-            if (facts.page && extensionRunning && !(scene.liveEnabledKnown && !facts.enabled)) {
+            if (facts.page && extensionRunning && !facts.developerRequired && !(scene.liveEnabledKnown && !facts.enabled)) {
                 facts.installedCard = true; facts.enabledKnown = true; facts.enabled = true;
             }
-            bool possibleRemoval = facts.page && flow.installedSeen && scene.profileAbsenceKnown &&
+            if (yandex && facts.page && facts.developerKnown && !facts.developerOn &&
+                (facts.installedCard || flow.installedSeen) && !(facts.enabledKnown && facts.enabled))
+                facts.developerRequired = true;
+            bool possibleRemoval = facts.page && (flow.installedSeen || flow.stage == GuideStage::Verify) && scene.profileAbsenceKnown &&
                 scene.enumerationComplete && scene.ownNamesSeen == 0 && !facts.installedCard && !extensionRunning &&
-                flow.stage != GuideStage::Folder && flow.stage != GuideStage::Confirm && flow.stage != GuideStage::Verify;
+                flow.stage != GuideStage::Folder && flow.stage != GuideStage::Confirm;
             if (possibleRemoval) {
                 if (!absenceSince) { absenceSince = GetTickCount64(); absenceFirstScene = scene.at; }
                 if (scene.at > absenceFirstScene && GetTickCount64() - absenceSince >= 2000) facts.installedAbsent = true;
@@ -1379,7 +1884,9 @@ struct ExtensionInstaller::Impl {
                 scene.developer.found || scene.load.found || scene.liveCardFound)) {
                 navigationPending = false; pageVerified = true; setNotice(L"Страница расширений открыта и проверена.");
             }
-            if (facts.folderDialog && pickerAttempts && (folderPhase < 3 || GetTickCount64() - folderPhaseAt < 400)) facts.folderReady = false;
+            const auto now = GetTickCount64();
+            if (facts.folderDialog && pickerAttempts && !folderAutomationFinished(now) &&
+                (folderPhase < 3 || now - folderPhaseAt < 400)) facts.folderReady = false;
             if (facts.page) sawExtensionPage = true;
             if (facts.folderDialog && (!sawExtensionPage || flow.stage == GuideStage::Enable || flow.stage == GuideStage::Connect || flow.stage == GuideStage::Done)) facts.folderDialog = false;
             auto previous = flow.stage;
@@ -1388,11 +1895,13 @@ struct ExtensionInstaller::Impl {
                 setNotice(L"");
                 InvalidateRect(panel, nullptr, FALSE);
             }
+            if (facts.developerRequired && flow.stage == GuideStage::Developer)
+                setNotice(L"Включите «Режим разработчика» в правом верхнем углу страницы расширений.");
             if (facts.folderDialog && flow.expectsPicker()) {
-                if (picker != scene.window) { picker = scene.window; pickerAttempts = 0; pickerAttemptAt = 0; folderPhase = 0; }
+                if (picker != scene.window) { picker = scene.window; pickerAttempts = 0; pickerAttemptAt = 0; folderPhase = 0; folderDeadline = 0; }
                 if (!facts.folderReady && browser) navigateFolder(scene.window);
                 if (facts.folderReady) setNotice(L"Папка расширения открыта. Нажмите обведённую кнопку «Выбор папки».");
-                else if (pickerAttempts >= 2 && GetTickCount64() - pickerAttemptAt > 1800)
+                else if (folderAutomationFinished(GetTickCount64()))
                     setNotice(L"Вставьте путь вручную в адресную строку окна папки (Alt+D), затем Enter.");
             } else if (!scene.facts.folderDialog) { picker = nullptr; pickerAttempts = 0; folderPhase = 0; }
             displayed = scene;
@@ -1400,7 +1909,7 @@ struct ExtensionInstaller::Impl {
         if (guideConnectionRetryDue(flow.stage, GetTickCount64(), connectionRetryAt) && retryConnection) {
             connectionRetryAt = GetTickCount64();
             retryConnection();
-            if (stop || !IsWindow(panel)) return;
+            if (stop || !IsWindow(panel) || challengePhase) return;
         }
         // A verified Native Messaging response from this browser already proves
         // that our extension is installed and running. Once the developer-mode
@@ -1409,9 +1918,11 @@ struct ExtensionInstaller::Impl {
         bool afterFolder = flow.stage == GuideStage::Confirm || flow.stage == GuideStage::Verify ||
                            flow.stage == GuideStage::Enable || flow.stage == GuideStage::Connect;
         bool browserMain = browser && foreground == browserWindow && std::wstring(foregroundClass) != L"#32770";
-        if (autoCloseOnEnabled && pageVerified && flow.developerVerified && afterFolder && browserMain &&
+        bool installedAndEnabled = flow.installedSeen && flow.installedEnabledKnown && flow.installedEnabled;
+        if (autoCloseOnEnabled && pageVerified && (flow.developerVerified || installedAndEnabled) && afterFolder && browserMain &&
             !navigationPending && !extensionReloadRequired && !setupRequested && openSetup && openSetup()) {
             setupRequested = true;
+            setupRequestedAt = GetTickCount64();
             flow.installedSeen = true;
             flow.stage = GuideStage::Connect;
             InvalidateRect(panel, nullptr, FALSE);
@@ -1433,6 +1944,8 @@ struct ExtensionInstaller::Impl {
         if (flow.stage == GuideStage::Connect || flow.stage == GuideStage::Done)
             control = scene.permissionAllow.found ? scene.permissionAllow : scene.popupConnect;
         if (!control.found) {
+            if (flow.stage == GuideStage::Developer && scene.facts.page)
+                setNotice(L"Включите «Режим разработчика» в правом верхнем углу страницы расширений.");
             if (flow.stage == GuideStage::Enable && scene.facts.page)
                 setNotice(L"Найдите карточку StreamShelf Connector и прокрутите её в видимую область: мастер ищет её переключатель.");
             hideFocus(); return;
@@ -1461,8 +1974,7 @@ struct ExtensionInstaller::Impl {
         RECT intersection{};
         if (IntersectRect(&intersection, &control.rect, &windowRect)) {
             // Keep the entire browser permission prompt readable, including Deny.
-            if (scene.permissionAllow.found) showIfChanged(dimmer, false); else shade(control.rect);
-            outline(control.rect);
+            outline(control.rect, !scene.permissionAllow.found);
         } else hideFocus();
     }
     void copyPath() {
@@ -1509,7 +2021,7 @@ struct ExtensionInstaller::Impl {
             case WM_SIZE: self->updatePanelRegion(h); return 0;
             case WM_TIMER:
                 if (w == 1) self->tick();
-                else if (w == 2) InvalidateRect(h, nullptr, FALSE);
+                else if (w == 2) { self->paintOverlay(GetTickCount64()); InvalidateRect(h, nullptr, FALSE); }
                 return 0;
             case WM_DPICHANGED: {
                 self->scale = HIWORD(w) / 96.f; auto r = reinterpret_cast<RECT *>(l);
@@ -1527,6 +2039,7 @@ struct ExtensionInstaller::Impl {
             }
             case WM_MOUSELEAVE: self->mouseX = self->mouseY = -1; InvalidateRect(h, nullptr, FALSE); return 0;
             case WM_LBUTTONDOWN: {
+                self->keyboardFocusVisual.hide();
                 self->mouseX = float(GET_X_LPARAM(l)) / self->scale; self->mouseY = float(GET_Y_LPARAM(l)) / self->scale;
                 self->pressedButton = self->buttonAt(self->mouseX, self->mouseY);
                 if (self->pressedButton >= 0) { self->focusedButton = self->pressedButton; SetFocus(h); SetCapture(h); }
@@ -1548,7 +2061,10 @@ struct ExtensionInstaller::Impl {
                 case 103:
                     if (self->flow.stage == GuideStage::Connect || self->flow.stage == GuideStage::Done) {
                         self->setupRequested = false;
-                        if (self->retryConnection) self->retryConnection();
+                        if (self->retryConnection) {
+                            self->connectionCheckAt = GetTickCount64();
+                            self->retryConnection();
+                        }
                         self->setNotice(L"Проверяю связь и открываю окно StreamShelf Connector. Подтвердите доступ к сайтам, если согласны.");
                         break;
                     }
@@ -1559,11 +2075,15 @@ struct ExtensionInstaller::Impl {
             case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
             case WM_KEYDOWN:
                 if (w == VK_ESCAPE) SendMessageW(h, WM_CLOSE, 0, 0);
-                else if (w == VK_TAB) { self->focusedButton = (self->focusedButton + ((GetKeyState(VK_SHIFT) & 0x8000) ? 3 : 1)) % 4; InvalidateRect(h, nullptr, FALSE); }
+                else if (w == VK_TAB) {
+                    self->focusedButton = (self->focusedButton + ((GetKeyState(VK_SHIFT) & 0x8000) ? 3 : 1)) % 4;
+                    self->keyboardFocusVisual.show(double(GetTickCount64()) / 1000.);
+                    InvalidateRect(h, nullptr, FALSE);
+                }
                 else if (w == VK_RETURN || w == VK_SPACE) SendMessageW(h, WM_COMMAND, 101 + self->focusedButton, 0);
                 return 0;
             case WM_CLOSE:
-                self->stop = true; KillTimer(h, 1); KillTimer(h, 2); self->hideFocus(); self->destroyPanelRenderer(); DestroyWindow(h); return 0;
+                self->stop = true; KillTimer(h, 1); KillTimer(h, 2); self->hideFocus(true); self->destroyPanelRenderer(); DestroyWindow(h); return 0;
             case WM_DESTROY: self->stop = true; return 0;
             }
         } catch (...) { self->setNotice(L"Не удалось прочитать интерфейс. Повторите действие в браузере."); }
@@ -1573,6 +2093,7 @@ struct ExtensionInstaller::Impl {
         owner = parent; exe = wide(browser.exe); browserName = wide(browser.name); extension = folder;
         auto kind = guidedBrowser(browser);
         firefox = kind == GuidedBrowser::Firefox;
+        yandex = kind == GuidedBrowser::Yandex;
         pageUrl = extensionPageUrl(kind == GuidedBrowser::None ? GuidedBrowser::Chrome : kind);
         EnumWindows([](HWND h, LPARAM context) -> BOOL {
             auto self = reinterpret_cast<Impl *>(context);
@@ -1610,12 +2131,35 @@ struct ExtensionInstaller::Impl {
                     result = automation->QueryInterface(__uuidof(IUIAutomation2), (void **)options.out());
                     if (hasInterface(result, options.p)) { options->put_ConnectionTimeout(700); options->put_TransactionTimeout(500); }
                     while (!stop) {
-                        if (HWND requested = tabRequest.exchange(nullptr)) tabResult = selectExtensionsTab(automation.p, requested, tabDeadline, firefox);
-                        if (HWND requested = addressRequest.exchange(nullptr)) addressResult = setFocusedAddress(automation.p, requested, pageUrl);
+                        if (HWND requested = forwardingDuplicateRequest.exchange(nullptr))
+                            forwardingDuplicateResult = closeForwardingDuplicate(automation.p, requested, forwardingUrl, yandex) ? 1 : 2;
+                        if (HWND requested = closeProbeRequest.exchange(nullptr)) {
+                            std::wstring url; { std::lock_guard lock(addressMutex); url = closeProbeUrl; }
+                            closeProbeResult = closeExactProbeTab(automation.p, requested, url, closeProbeDeadline, yandex) ? 1 : 2;
+                        }
+                        if (identifyForwarded && !forwardingUrl.empty()) {
+                            struct ForwardSearch { Impl *self; IUIAutomation *automation; HWND found{}; } search{this, automation.p};
+                            EnumWindows([](HWND window, LPARAM param) -> BOOL {
+                                auto &s = *reinterpret_cast<ForwardSearch *>(param);
+                                if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) || lower(processPath(window)) != lower(s.self->exe)) return TRUE;
+                                try {
+                                    if (matchesActiveProbe(s.automation, window, s.self->forwardingUrl, s.self->yandex)) {
+                                        s.found = window; return FALSE;
+                                    }
+                                } catch (...) {}
+                                return TRUE;
+                            }, reinterpret_cast<LPARAM>(&search));
+                            if (search.found) { forwardedWindow = search.found; identifyForwarded = false; }
+                        }
+                        if (HWND requested = tabRequest.exchange(nullptr)) tabResult = selectExtensionsTab(automation.p, requested, tabDeadline, firefox, yandex);
+                        if (HWND requested = addressRequest.exchange(nullptr)) {
+                            std::wstring text; { std::lock_guard lock(addressMutex); text = requestedAddress; }
+                            addressResult = setFocusedAddress(automation.p, requested, text, yandex);
+                        }
                         HWND window = scanWindow;
-                        if (window && IsWindow(window) && belongsToBrowser(window, exe)) {
+                        if (!forwardingPreparation && window && IsWindow(window) && belongsToBrowser(window, exe)) {
                             try {
-                                auto scene = inspect(automation.p, window, extension.wstring(), firefox);
+                                auto scene = inspect(automation.p, window, extension.wstring(), firefox, yandex);
                                 if (firefox && !profileDirectory.empty()) {
                                     try {
                                         auto path = profileDirectory / L"extensions.json";
@@ -1664,7 +2208,8 @@ struct ExtensionInstaller::Impl {
                                 if (scene.valid) { std::lock_guard lock(mutex); latest = std::move(scene); }
                             } catch (...) { /* An unavailable provider must not terminate the application. */ }
                         }
-                        for (int i = 0; i < 5 && !stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        if (forwardingPreparation) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                        else for (int i = 0; i < 5 && !stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
                     }
                 }
             }
@@ -1677,6 +2222,31 @@ struct ExtensionInstaller::Impl {
 ExtensionInstaller::ExtensionInstaller() = default;
 ExtensionInstaller::~ExtensionInstaller() = default;
 bool ExtensionInstaller::active() const { return impl && IsWindow(impl->panel) && !impl->stop; }
+bool ExtensionInstaller::beginProfileVerification(const std::wstring &url) {
+    if (!active() || !impl->explicitProfile || !impl->profileWindowBound || impl->navigationPending ||
+        impl->challengePhase || !IsWindow(impl->browserWindow) || GetForegroundWindow() != impl->browserWindow ||
+        url.rfind(L"http://127.0.0.1:", 0) != 0) return false;
+    impl->challengeUrl = url; impl->challengePhase = 1;
+    impl->challengeStarted = impl->challengeAt = GetTickCount64();
+    impl->hideFocus(true);
+    return true;
+}
+void ExtensionInstaller::finishProfileVerification(const std::wstring &url) {
+    if (impl && !impl->forwardingUrl.empty() && activeBrowserAddressMatches(url, impl->forwardingUrl)) {
+        impl->forwardingProofSeen = true;
+        return;
+    }
+    if (!impl || impl->challengeUrl != url) return;
+    impl->hideFocus(true);
+    if (impl->challengePhase != 6) {
+        impl->challengePhase = 6; impl->challengeAt = GetTickCount64(); impl->closeProbeDeadline = impl->challengeAt + Impl::profileCleanupLimit;
+        { std::lock_guard lock(impl->addressMutex); impl->closeProbeUrl = url; }
+        impl->closeProbeResult = 0; impl->closeProbeRequest = impl->browserWindow;
+    }
+}
+bool ExtensionInstaller::profileVerificationFinishing() const {
+    return active() && (impl->challengePhase == 6 || (!impl->forwardingUrl.empty() && impl->navigationPending));
+}
 bool ExtensionInstaller::translate(MSG &message) {
     (void)message;
     return false;
@@ -1693,7 +2263,13 @@ void ExtensionInstaller::connectionEstablished() {
 void ExtensionInstaller::setExtensionReloadRequired(bool required) { if (impl) { impl->extensionReloadRequired = required; InvalidateRect(impl->panel, nullptr, FALSE); } }
 void ExtensionInstaller::setRetryConnection(std::function<void()> callback) { if (impl) impl->retryConnection = std::move(callback); }
 void ExtensionInstaller::setOpenSetup(std::function<bool()> callback) { if (impl) impl->openSetup = std::move(callback); }
-void ExtensionInstaller::setExtensionRunning(bool running) { if (impl) impl->extensionRunning = running; }
+void ExtensionInstaller::setExtensionRunning(bool running) {
+    if (!impl) return;
+    impl->extensionRunning = running;
+    // A disconnected/replaced session may need its permissions window opened
+    // again. Do not leave Chromium stuck behind the previous session's flag.
+    if (!running) impl->setupRequested = false;
+}
 void ExtensionInstaller::setLanguage(const std::string &language) {
     english = language == "en";
     if (impl) { impl->english = english; if (IsWindow(impl->panel)) { SetWindowTextW(impl->panel, english ? L"StreamShelf · Extension setup" : L"StreamShelf · Установка расширения"); InvalidateRect(impl->panel, nullptr, FALSE); } }
@@ -1716,6 +2292,7 @@ Json ExtensionInstaller::diagnostics() const {
         {"launch_error", impl->launchError}, {"connection_confirmed", impl->connectionConfirmed},
         {"toolbar_icon_found", scene.toolbarAction.found}, {"connector_popup", scene.connectorPopup}, {"toolbar_controls", scene.toolbarControls},
         {"browser_window", (uint64_t)(uintptr_t)impl->browserWindow},
+        {"forwarding_profile", !impl->forwardingUrl.empty()}, {"forwarded_window_found", bool(impl->forwardedWindow.load())},
         {"browser_window_visible", bool(IsWindowVisible(impl->browserWindow))}, {"panel_visible", bool(IsWindowVisible(impl->panel))},
         {"page_verified", impl->pageVerified}, {"page_observed", scene.facts.page}, {"internal_url", utf8(scene.internalUrl.empty() ? impl->lastInternalUrl : scene.internalUrl)},
         {"developer_found", scene.developer.found}, {"load_found", scene.load.found}, {"outline_visible", bool(IsWindowVisible(impl->marker))},
@@ -1727,6 +2304,9 @@ Json ExtensionInstaller::diagnostics() const {
         {"stage", int(impl->flow.stage)}, {"notice", utf8(impl->notice)}};
 }
 bool ExtensionInstaller::hasExplicitProfile() const { return impl && impl->explicitProfile; }
+bool ExtensionInstaller::isVerificationUrl(const std::string &url) const {
+    return impl && (activeBrowserAddressMatches(wide(url), impl->forwardingUrl) || activeBrowserAddressMatches(wide(url), impl->challengeUrl));
+}
 void ExtensionInstaller::start(HWND owner, const Browser &browser, const Profile *profile, const fs::path &extension, bool reduced, bool light) {
     if (active()) { showIfChanged(impl->panel, true); SetForegroundWindow(impl->panel); return; }
     auto kind = guidedBrowser(browser);
@@ -1741,6 +2321,15 @@ void ExtensionInstaller::start(HWND owner, const Browser &browser, const Profile
             CoTaskMemFree(local);
         }
     }
+    if (next->explicitProfile && kind != GuidedBrowser::Firefox) {
+        next->forwardingProbe = std::make_unique<GuideProfileChallenge>(GuideProbePurpose::openExtensions, english, light, reduced);
+        next->forwardingUrl = wide(next->forwardingProbe->url);
+        arguments.erase(std::remove(arguments.begin(), arguments.end(), L"--new-window"), arguments.end());
+        if (!arguments.empty()) arguments.back() = next->forwardingUrl;
+        next->identifyForwarded = true;
+        next->forwardingPreparation = true;
+    }
+    // Publish all immutable forwarding state before create starts the scanner.
     next->create(owner, browser, extension);
     next->launchArguments = std::move(arguments);
     next->openExtensionsPage(); impl = std::move(next);
@@ -1888,9 +2477,18 @@ int ExtensionInstaller::runNativeRegression(const fs::path &folder) {
         guide.impl->autoCloseOnEnabled = false; guide.impl->reducedMotion = true;
         guide.impl->navigationPending = false; guide.impl->scanWindow = fixture;
         check(fixture && edit && toggle && load, "fixture created");
+        check(activeBrowserAddressMatches(L"127.0.0.1:43123/streamshelf-profile-abc", L"http://127.0.0.1:43123/streamshelf-profile-abc"),
+            "probe address accepts Chromium's omitted http scheme");
+        check(!activeBrowserAddressMatches(L"127.0.0.1:43123/streamshelf-profile-other", L"http://127.0.0.1:43123/streamshelf-profile-abc") &&
+              !activeBrowserAddressMatches(L"example.test/streamshelf-profile-abc", L"http://127.0.0.1:43123/streamshelf-profile-abc"),
+            "probe address rejects a different nonce or host");
+        Com<IUIAutomation> addressAutomation;
+        auto addressAutomationResult = CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER, __uuidof(IUIAutomation), (void **)addressAutomation.out());
+        check(hasInterface(addressAutomationResult, addressAutomation.p) && readActiveBrowserAddress(addressAutomation.p, fixture) == L"chrome://extensions/",
+            "lightweight address scan identifies the visible browser chrome");
         SetForegroundWindow(guide.impl->panel);
         std::cout << "READY: activate the local regression fixture if Windows denied foreground focus" << std::endl;
-        check(pump([&] { return lower(processPath(GetForegroundWindow())) == lower(browser.exe.empty() ? L"" : wide(browser.exe)); }, 10000), "fixture foreground granted");
+        check(pump([&] { return lower(processPath(GetForegroundWindow())) == lower(browser.exe.empty() ? L"" : wide(browser.exe)); }, 30000), "fixture foreground granted");
         guide.impl->scanWindow = fixture;
         check(pump([&] { return guide.impl->displayed.facts.page && IsWindowVisible(guide.impl->marker); }), "cached UIA discovers extension page and checkbox");
         check(guide.impl->flow.stage == GuideStage::Developer, "unchecked mode waits");
@@ -1989,7 +2587,7 @@ int ExtensionInstaller::runNativeRegression(const fs::path &folder) {
         check(pump([&] { return EqualRect(&expected, &guide.impl->markerRect) && IsWindowVisible(guide.impl->marker); }), "reopened disabled extension outlines its own switch, not the neighbouring card");
         SendMessageW(toggle, BM_SETCHECK, BST_UNCHECKED, 0); ShowWindow(load, SW_HIDE);
         NotifyWinEvent(EVENT_OBJECT_STATECHANGE, toggle, OBJID_CLIENT, CHILDID_SELF);
-        check(pump([&] { return guide.impl->flow.stage == GuideStage::Developer; }), "disabled developer mode has priority over installed extension");
+        check(pump([&] { return guide.impl->flow.stage == GuideStage::Enable && guide.impl->displayed.facts.developerKnown && !guide.impl->displayed.facts.developerOn; }), "installed extension remains the priority when developer mode is disabled");
         SendMessageW(toggle, BM_SETCHECK, BST_CHECKED, 0); ShowWindow(load, SW_SHOW);
         NotifyWinEvent(EVENT_OBJECT_STATECHANGE, toggle, OBJID_CLIENT, CHILDID_SELF);
         check(pump([&] { return guide.impl->flow.stage == GuideStage::Enable; }), "enabling developer mode resumes at the existing disabled extension");
@@ -2012,9 +2610,9 @@ int ExtensionInstaller::runNativeRegression(const fs::path &folder) {
         guide.impl->create(fixture, browser, folder);
         guide.impl->autoCloseOnEnabled = false; guide.impl->navigationPending = false;
         guide.impl->scanWindow = fixture; SetForegroundWindow(fixture);
-        check(pump([&] { return guide.impl->flow.stage == GuideStage::Developer && guide.impl->displayed.facts.installedCard; }), "fresh guide identifies disabled developer mode and already installed extension");
-        GetWindowRect(toggle, &expected); InflateRect(&expected, guide.impl->px(9), guide.impl->px(9));
-        check(pump([&] { return EqualRect(&expected, &guide.impl->markerRect) && IsWindowVisible(guide.impl->marker); }), "fresh guide outlines developer mode before extension switch");
+        check(pump([&] { return guide.impl->flow.stage == GuideStage::Enable && guide.impl->displayed.facts.installedCard && guide.impl->displayed.facts.developerKnown && !guide.impl->displayed.facts.developerOn; }), "fresh guide prioritizes installed extension even with developer mode disabled");
+        GetWindowRect(enable, &expected); InflateRect(&expected, guide.impl->px(9), guide.impl->px(9));
+        check(pump([&] { return EqualRect(&expected, &guide.impl->markerRect) && IsWindowVisible(guide.impl->marker); }), "fresh guide outlines the installed extension switch");
         SendMessageW(toggle, BM_CLICK, 0, 0); ShowWindow(load, SW_SHOW);
         NotifyWinEvent(EVENT_OBJECT_STATECHANGE, toggle, OBJID_CLIENT, CHILDID_SELF);
         check(pump([&] { return guide.impl->flow.stage == GuideStage::Enable; }), "clicking developer mode resumes at already disabled extension");
@@ -2060,10 +2658,38 @@ int ExtensionInstaller::runNativeRegression(const fs::path &folder) {
         check(IsWindowVisible(guide.impl->panel), "minimizing the application does not hide the independent guide");
         guide.impl->reducedMotion = false;
         auto before = guide.impl->markerUpdates;
-        guide.impl->outline(buttonRect); guide.impl->outline(buttonRect);
+        guide.impl->outline(buttonRect, true);
+        const auto revealAt = guide.impl->markerRevealAt;
+        guide.impl->paintOverlay(revealAt + 65);
+        guide.impl->paintOverlay(revealAt + 140);
+        BYTE dimmerOpacity = 0;
+        check(guide.impl->markerAlpha == 128 &&
+              GetLayeredWindowAttributes(guide.impl->dimmer, nullptr, &dimmerOpacity, nullptr) && dimmerOpacity == 78,
+              "the border and the dimmer appear together");
         check(guide.impl->markerUpdates >= before + 2, "animated border redraws without recreating its window");
+        guide.impl->paintOverlay(revealAt + guideOverlayRevealMs);
+        auto drawn = guide.impl->markerRect;
+        guide.impl->hideFocus();
+        guide.impl->paintOverlay(guide.impl->markerLostAt + 120);
+        BYTE markerGlobalAlpha = 0;
+        check(guide.impl->markerAlpha == 128 && EqualRect(&drawn, &guide.impl->markerRect) &&
+              !GetLayeredWindowAttributes(guide.impl->marker, nullptr, &markerGlobalAlpha, nullptr),
+              "fading preserves position and uses the per-pixel layered surface");
+        guide.impl->paintOverlay(guide.impl->markerLostAt + 240);
+        check(!IsWindowVisible(guide.impl->marker) && !IsWindowVisible(guide.impl->dimmer), "fade ends with both layers hidden");
+        guide.impl->outline(buttonRect, true);
+        guide.impl->paintOverlay(guide.impl->markerRevealAt + guideOverlayRevealMs);
+        guide.impl->challengeUrl = L"http://127.0.0.1:8765/test";
+        guide.finishProfileVerification(guide.impl->challengeUrl);
+        check(!IsWindowVisible(guide.impl->marker) && !IsWindowVisible(guide.impl->dimmer),
+              "closing the service tab removes both highlighting layers before automation");
+        guide.impl->closeProbeDeadline = 0; guide.impl->closeProbeRequest = nullptr;
+        guide.impl->challengePhase = 0; guide.impl->challengeUrl.clear();
         check((GetWindowLongPtrW(guide.impl->dimmer, GWL_EXSTYLE) & WS_EX_TRANSPARENT) != 0, "dimmer passes mouse input through");
         guide.impl->autoCloseOnEnabled = true; guide.impl->pageVerified = true;
+        guide.impl->setupRequested = true;
+        guide.setExtensionRunning(false);
+        check(!guide.impl->setupRequested, "connection loss permits the replacement Chromium session to reopen setup");
         guide.impl->tick();
         check(guide.active(), "enabled extension alone does not close the guide before connection confirmation");
         guide.connectionEstablished();

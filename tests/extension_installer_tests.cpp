@@ -28,6 +28,10 @@ int main() {
         check(!pickerGuard.observePicker(true, false, 250), "Picker from another browser window is ignored");
         pickerGuard.observeMenu(true, true, 300);
         check(pickerGuard.observePicker(true, true, 400), "Firefox picker after the installation menu belongs to the guide");
+        check(firefoxPickerAction(false, false, false, false) == FirefoxPickerAction::Navigate,
+              "Confirmed Firefox installation picker automatically navigates to the signed package folder");
+        check(firefoxPickerAction(false, false, false, true) == FirefoxPickerAction::OpenFile,
+              "Manually entered XPI is not replaced by automatic folder navigation");
         check(pickerGuard.observePicker(true, true, 9000), "Accepted picker remains active while open");
         pickerGuard.observePicker(false, true, 9010);
         check(!pickerGuard.observePicker(true, true, 9020), "Closing picker clears pending installation");
@@ -95,14 +99,14 @@ int main() {
         GuideFlow existing; page.installedCard = true; existing.observe(page, 100);
         check(existing.stage == GuideStage::Connect, "Previously installed extension skips redundant installation");
         page.developerOn = false; page.enabled = false; existing.observe(page, 110);
-        check(existing.stage == GuideStage::Developer, "Developer mode has priority over disabled installed extension");
+        check(existing.stage == GuideStage::Enable, "Disabled installed extension does not require developer mode");
         page.enabled = true; existing.observe(page, 120);
-        check(existing.stage == GuideStage::Developer, "Even enabled installed extension waits for developer mode");
+        check(existing.stage == GuideStage::Connect, "Enabled installed extension connects without developer mode");
         page.developerOn = true; page.enabled = false; existing.observe(page, 130);
         check(existing.stage == GuideStage::Enable, "Developer mode confirmation resumes enable step without reloading");
         GuideFlow unknownDeveloper; auto unknownPage = page; unknownPage.developerKnown = false;
         unknownDeveloper.observe(unknownPage, 140);
-        check(unknownDeveloper.stage == GuideStage::Developer, "Unverified developer checkbox cannot skip prerequisite");
+        check(unknownDeveloper.stage == GuideStage::Enable, "Installed extension skips unknown developer mode");
         GuideFlow cancelled; cancelled.stage = GuideStage::Verify; cancelled.retryInstallation();
         cancelled.observe(page = GuideObservation{true, true, true}, 200);
         check(cancelled.stage == GuideStage::Load, "Retrying loading requires an explicit retry action");
@@ -114,6 +118,28 @@ int main() {
         prefs["extensions"]["settings"][ExtensionId] = Json::object();
         check(!extensionPresence(prefs).installed, "Empty Yandex preference tombstone is not an installed extension");
         check(!extensionPresence(Json::object()).installed, "Missing settings remain unknown rather than installation success");
+        prefs["extensions"]["settings"][ExtensionId] = {{"manifest", {{"name", "__MSG_extensionName__"}, {"version", "1.0.5"}, {"manifest_version", 3}}}, {"state", 1}};
+        presence = extensionPresence(prefs);
+        check(presence.installed && presence.enabledKnown && presence.enabled, "Localized manifest name is recognized by fixed extension ID without a display-language dependency");
+        prefs["extensions"]["settings"][ExtensionId]["manifest"]["name"] = "Поиск медиа";
+        check(extensionPresence(prefs).installed, "Translated manifest display name cannot hide our fixed extension ID");
+        prefs["extensions"]["settings"]["another-extension"] = prefs["extensions"]["settings"][ExtensionId];
+        prefs["extensions"]["settings"].erase(ExtensionId);
+        check(!extensionPresence(prefs).installed, "A localized manifest for another extension cannot identify our extension");
+        prefs["extensions"]["settings"][ExtensionId] = {{"manifest", {{"name", "__MSG_extensionName__"}, {"manifest_version", 3}}}, {"state", 1}};
+        check(!extensionPresence(prefs).installed, "Incomplete residual localized manifest is not installation success");
+        prefs["extensions"]["settings"][ExtensionId] = {{"path", "C:/Connector"}, {"state", "enabled"}};
+        presence = extensionPresence(prefs);
+        check(presence.installed && !presence.enabledKnown, "Malformed enabled state remains unknown rather than silently enabling an extension");
+        FirefoxGuideObservation firefoxManual{};
+        firefoxManual.installedKnown = firefoxManual.installed = firefoxManual.enabledKnown = firefoxManual.enabled = true;
+        check(firefoxGuideStage(firefoxManual) == FirefoxGuideStage::Connect, "Firefox manual installation skips manager and install menu");
+        firefoxManual.enabled = false;
+        check(firefoxGuideStage(firefoxManual) == FirefoxGuideStage::Enable, "Firefox manually disabled extension returns to enable step");
+        firefoxManual.installed = false;
+        check(firefoxGuideStage(firefoxManual) == FirefoxGuideStage::OpenManager, "Firefox removal outside guide returns to manager discovery");
+        firefoxManual.manager = firefoxManual.menu = true;
+        check(firefoxGuideStage(firefoxManual) == FirefoxGuideStage::InstallFile, "Firefox out-of-order open installation menu resumes directly at file selection");
         check(guidedBrowserProduct(L"Google Chrome", L"chrome.exe") == GuidedBrowser::Chrome, "Chrome supported");
         check(guidedBrowserProduct(L"Yandex", L"browser.exe") == GuidedBrowser::Yandex, "Yandex supported");
         check(guidedBrowserProduct(L"Yandex Browser", L"BROWSER.EXE") == GuidedBrowser::Yandex, "Yandex product variant");

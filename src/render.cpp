@@ -181,6 +181,16 @@ void Canvas::border(Rect r, float z, Ink e, Ink f, float t) {
     rect(r, z, e);
     rect(r.inset(t), std::max(0.f, z - t), f);
 }
+void Canvas::outline(Rect r, float radius, Ink color, float thickness) {
+    if (r.w <= 0 || r.h <= 0 || thickness <= 0 || color.a * opacity < .001f) return;
+    radius = std::clamp(radius, 0.f, std::min(r.w, r.h) / 2);
+    thickness = std::min(thickness, std::min(r.w, r.h) / 2);
+    // Leave room for the outer antialias fringe; the fragment shader draws
+    // a transparent-centred stroke rather than painting over its contents.
+    constexpr float fringe = 1.5f;
+    const auto padded = r.inset(-fringe);
+    quad(padded, 0, 0, 1, 1, color, padded.w, padded.h, radius + fringe, -1.f - thickness);
+}
 void Canvas::circle(float x, float y, float r, Ink c) {
     quad({x - r, y - r, r * 2, r * 2}, 0, 0, 1, 1, c, r * 2, r * 2, r, 2);
 }

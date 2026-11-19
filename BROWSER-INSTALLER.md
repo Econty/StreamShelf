@@ -4,7 +4,7 @@
 
 The guided extension setup is available for Google Chrome, Yandex Browser, and Mozilla Firefox. In the Connection page, select the browser and profile, then choose **Install with guide**. Other compatible browsers require manual installation.
 
-**For builds from the current source:** the signed Firefox XPI 1.0.4 in this repository predates the tab-scoped credentials fix. The application does not use cookies from that old version. To test the updated source, load `extensions/firefox-development/manifest.json` as a temporary add-on using `about:debugging#/runtime/this-firefox`; Firefox removes it on restart. A new Mozilla signature is required for permanent installation; see [FIREFOX-SIGNING.md](FIREFOX-SIGNING.md).
+**For builds from the current source:** the Firefox guide requires the Mozilla-signed Connector 1.0.6 XPI. An already installed 1.0.5 connector can still connect. See [FIREFOX-SIGNING.md](FIREFOX-SIGNING.md).
 
 For Chrome and Yandex Browser, the guide walks through developer mode, loading the unpacked extension, checking installation, and connecting the tab. For Firefox, the guide requires the current Mozilla-signed XPI; it is not available in the beta package that omits the Firefox connector.
 
@@ -20,4 +20,4 @@ To build, run `cmake --preset dev` followed by `cmake --build --preset dev`. Nat
 
 The end-to-end installation check with manual confirmations can be run with `scripts/Test-BrowserGuide.ps1 -Browser chrome -InstallationFlow` (or `yandex`). It records the initially absent extension, the observed steps, and confirmed enablement; simply opening the page is not considered a successful installation.
 
-The guide checks the extension connection and uses an animated outline and dimmed overlay around the target. Reduced motion keeps a static outline. Connection state is checked through Native Messaging; multiple profiles of the same browser require additional testing. The ChromeExtensionInstaller approach was adapted into a native module; its MIT notice is in `licenses/ChromeExtensionInstaller-LICENSE.txt`.
+The guide checks the extension connection and uses an animated outline and dimmed overlay around the target. During automatic steps, the indicator shows how many seconds remain in the wait. Reduced motion keeps the outline and icon static while the countdown updates. Connection state is checked through Native Messaging; multiple profiles of the same browser require separate verification. The ChromeExtensionInstaller approach was adapted into a native module; its MIT notice is in `licenses/ChromeExtensionInstaller-LICENSE.txt`.

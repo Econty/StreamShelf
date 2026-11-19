@@ -1,7 +1,7 @@
 # Beta: Firefox connector is not included
 
 This beta package does not contain a Mozilla-signed StreamShelf Connector
-1.0.5 XPI. Permanent Firefox installation and the Firefox setup guide will not
+1.0.6 XPI. Installing the updated add-on permanently and using the Firefox setup guide will not
 work until the signed package is supplied. Chromium-family browser setup is
 available. See [FIREFOX-SIGNING.md](FIREFOX-SIGNING.md) for details.
 
@@ -14,7 +14,7 @@ Other known beta limitations:
 # Бета: расширение Firefox не включено
 
 В этот бета-пакет не входит подписанный Mozilla XPI-файл StreamShelf Connector
-1.0.5. Постоянная установка в Firefox и мастер подключения Firefox заработают
+1.0.6. Постоянная установка новой версии в Firefox и мастер подключения Firefox заработают
 после добавления подписанного пакета. Для браузеров семейства Chromium установка
 доступна. Подробности: [FIREFOX-SIGNING.md](FIREFOX-SIGNING.md).
 

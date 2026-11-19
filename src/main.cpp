@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "connector_install.hpp"
 #include "connector_uninstall.hpp"
 #include "interface_text.hpp"
 #include <windowsx.h>
@@ -256,7 +257,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     }
     try {
         auto filename = executable().filename().wstring();
-        if (filename == L"StreamShelf.Host.exe")
+        if (isConnectorHostFilename(filename))
             return nativeHostMain();
         if (unregisterIfOwned) {
             try { unregisterConnectorIfOwned(dataRoot(), executable(), HKEY_CURRENT_USER); return 0; }

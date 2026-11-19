@@ -305,7 +305,9 @@ struct ResumeState {
 };
 static void fetch(const std::string &url, size_t limit,
                   const std::function<void(const char *, size_t, uint64_t)> &sink, std::atomic_bool *cancel,
-                  const Json &headers, const std::string &cookieText, ResumeState *resume = nullptr) {
+                  const Json &headers, const std::string &cookieText, ResumeState *resume = nullptr,
+                  bool preview = false) {
+    if (cancel && *cancel) throw std::runtime_error("Отменено");
     if (!httpUrl(url))
         throw std::runtime_error("Нужен HTTP/HTTPS URL без логина в адресе");
     auto u = wide(url.substr(0, url.find('#')));
@@ -319,10 +321,11 @@ static void fetch(const std::string &url, size_t limit,
     if (parts.dwExtraInfoLength)
         path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
     Internet session(
-        WinHttpOpen(L"StreamShelfNative/2026.11.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0));
+        WinHttpOpen(L"StreamShelfNative/2026.11.17", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0));
     if (!session.h)
         throw std::runtime_error("WinHTTP init");
-    WinHttpSetTimeouts(session, 15000, 15000, 20000, 30000);
+    if (preview) WinHttpSetTimeouts(session, 3000, 3000, 4000, 4000);
+    else WinHttpSetTimeouts(session, 15000, 15000, 20000, 30000);
     Internet connection(WinHttpConnect(session, host.c_str(), parts.nPort, 0));
     Internet request(WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                         WINHTTP_DEFAULT_ACCEPT_TYPES,
@@ -444,7 +447,7 @@ static void fetch(const std::string &url, size_t limit,
         depth++;
         if (resume) { resume->offset = 0; resume->validator.clear(); resume->redirected = true; }
         try {
-            fetch(next, limit, sink, cancel, redirectedHeaders, cookieText, resume);
+            fetch(next, limit, sink, cancel, redirectedHeaders, cookieText, resume, preview);
         } catch (...) {
             depth--;
             throw;
@@ -479,7 +482,24 @@ static void fetch(const std::string &url, size_t limit,
 }
 std::string httpPreview(const std::string &url, std::atomic_bool &cancel, const Json &headers, const std::string &cookieText) {
     std::string result;
-    fetch(url,8*1024*1024,[&](const char* data,size_t size,uint64_t){result.append(data,size);},&cancel,headers,cookieText);
+    fetch(url,8*1024*1024,[&](const char* data,size_t size,uint64_t){result.append(data,size);},&cancel,headers,cookieText,nullptr,true);
+    return result;
+}
+std::string httpPreviewPrefix(const std::string &url, std::atomic_bool &cancel, const Json &headers,
+                              const std::string &cookieText, size_t limit) {
+    if (!limit || limit > 32 * 1024 * 1024) throw std::runtime_error("Некорректный предел превью");
+    struct PrefixComplete {};
+    std::string result;
+    try {
+        // Fetch retains the cookie domain/path/Secure rules and strips private
+        // headers on cross-origin redirects. Stop at the prefix without passing
+        // credentials or the signed media URL to an external decoder.
+        fetch(url, SIZE_MAX, [&](const char *data, size_t size, uint64_t) {
+            const auto copied = std::min(size, limit - result.size());
+            result.append(data, copied);
+            if (result.size() == limit) throw PrefixComplete{};
+        }, &cancel, headers, cookieText, nullptr, true);
+    } catch (const PrefixComplete &) {}
     return result;
 }
 std::string httpGet(const std::string &url, size_t limit) {

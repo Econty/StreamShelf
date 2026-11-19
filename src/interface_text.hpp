@@ -376,6 +376,9 @@ inline std::string interfaceText(std::string_view language, const std::string &v
         {"Неподдерживаемые метаданные главы", "Unsupported chapter metadata"},
         {"Список глав пуст или имеет неверный формат", "Chapter list is empty or invalid"},
         {"Историю очереди не удалось восстановить", "Could not restore the queue history"},
+        {"Доступ к сайту изменился. Повторите анализ перед новой попыткой скачивания.", "Website credentials changed. Analyze the page again before retrying the download."},
+        {"Доступ к странице обновляется. Подождите немного и повторите анализ.", "Page access is being refreshed. Wait a moment and try analyzing again."},
+        {"Браузер передал cookies, которые нельзя безопасно использовать для анализа. Для общедоступной страницы можно выбрать режим «Без браузера».", "The browser supplied cookies that cannot safely be used for analysis. For a public page, you can use No browser mode."},
         {"Не удалось сохранить резервную копию истории очереди", "Could not back up the original queue history"},
         {"Установка компонентов запущена", "Component installation started"},
         {"Проверка компонентов запущена", "Component check started"},
@@ -404,7 +407,7 @@ inline std::string interfaceText(std::string_view language, const std::string &v
         {"Ошибка регистрации Native Messaging", "Native Messaging registration failed"},
         {"Ошибка записи реестра", "Could not write to the registry"},
         {"Не удалось загрузить SDF-атлас", "Could not load the SDF font atlas"},
-        {"Подписанный файл расширения Firefox версии 1.0.5 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.5.xpi рядом с программой.", "Signed Firefox extension version 1.0.5 was not found. After Mozilla signs it, save the XPI as extensions/firefox-signed/StreamShelf-Connector-1.0.5.xpi next to the application."},
+        {"Подписанный файл расширения Firefox версии 1.0.6 не найден. После подписи Mozilla сохраните XPI как extensions/firefox-signed/StreamShelf-Connector-1.0.6.xpi рядом с программой.", "Signed Firefox extension version 1.0.6 was not found. After Mozilla signs it, save the XPI as extensions/firefox-signed/StreamShelf-Connector-1.0.6.xpi next to the application."},
         {"Неизвестен", "Unknown"}
     };
     if (const auto it = translations.find(value); it != translations.end()) return it->second;

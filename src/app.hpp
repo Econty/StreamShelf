@@ -6,22 +6,31 @@
 #include "component_manager.hpp"
 #include "log_text.hpp"
 #include "accessibility.hpp"
+#include "focus_visual.hpp"
+#include "job_access.hpp"
 #include <deque>
 #include <array>
 #include <shared_mutex>
 #include <set>
+#include <tuple>
 namespace ss {
+class GuideProfileChallenge;
 struct Preview {
     PreviewImage image;
     std::string message="Загрузка превью…";
     bool done=false;
     uint64_t id=0, lastSeenFrame=0;
+    ULONGLONG retryAt=0;
 };
 struct Job {
     std::string id, title, state = "Ожидание", detail, metrics, folder, page, pair, local, output;
     Media item;
     std::shared_ptr<Session> session;
     BrowserSource browserSource;
+    std::string resumeAccessKey;
+    std::mutex resumeAccessMutex;
+    std::atomic_bool preparingAccess{false};
+    bool resumeAccessRemoved = false;
     bool browserSourceRequired = false;
     bool mux = false;
     bool assemblyInput = false, localFile = false, conversionSource = false;
@@ -40,6 +49,9 @@ struct Job {
     std::atomic_bool cancel{false}, claimed{false}, done{false};
     double percent = 0;
 };
+inline std::string jobCredentialTarget(const Job &job) {
+    return job.item.format ? job.page : job.item.credentialUrl.empty() ? job.item.url : job.item.credentialUrl;
+}
 class App {
     std::mutex eventsMutex;
     std::deque<std::function<void()>> events;
@@ -70,15 +82,25 @@ class App {
     uint64_t jobSerial = 0;
     int previewActive=0;
     uint64_t previewSerial=0;
-    std::string previewCacheKey(const Media &);
-    struct ProbeTask { Media item; std::shared_ptr<Session> session; BrowserSource source; std::shared_ptr<std::atomic_bool> cancelled; uint64_t generation = 0; int tab = -1; int priority = 0; };
+    std::string previewCacheKey(const Media &, const Job *job = nullptr);
+    struct ProbeTask { Media item; std::shared_ptr<Session> session; BrowserSource source; std::shared_ptr<std::atomic_bool> cancelled; uint64_t generation = 0; int tab = -1; int priority = 0; bool captureOnly = false; };
     std::mutex probeMutex;
     std::condition_variable probeCv;
     std::deque<ProbeTask> probes;
     std::vector<std::thread> probeWorkers;
+    using MediaCredentialKey = std::tuple<uint64_t,uint64_t,std::optional<uint64_t>,std::string>;
+    std::map<MediaCredentialKey, Session::CredentialSnapshot> mediaCredentialSnapshots;
+    std::set<uint64_t> sessionsWithSiteAccess;
+    std::map<uint64_t, ULONGLONG> siteAccessWithdrawnAt;
+    size_t mediaCredentialBytes = 0;
+    void clearMediaAccess() { mediaCredentialSnapshots.clear(); mediaCredentialBytes = 0; }
+    void rememberMediaAccess(const std::shared_ptr<Session> &, const std::string &, Session::CredentialSnapshot);
+    std::optional<JobDownloadAccess> capturedDownloadAccess(const Job &);
     void resetCredentialSnapshots();
-    void enqueueProbe(const Media &, const std::shared_ptr<Session> &, uint64_t, int);
+    void enqueueProbe(const Media &, const std::shared_ptr<Session> &, uint64_t, int, bool captureOnly = false);
     void probeLoop();
+    void prepareAnalysisAccess(const std::shared_ptr<Session> &, const std::string &, std::atomic_bool &,
+                               BrowserSource &, Session::CredentialSnapshot &, const std::function<void(const DownloadAccess &)> &);
     void seedAndUpdate(bool);
     void scanToolComponents(bool install);
     void refreshToolFiles();
@@ -102,6 +124,15 @@ class App {
     ComponentProgress componentProgress;
     std::vector<Component> components;
     std::string installerBrowserExecutable;
+    std::shared_ptr<GuideProfileChallenge> installerProfileChallenge;
+    std::weak_ptr<Session> installerProfileSession;
+    std::string installerProfilePing;
+    std::string installerProfileUrl;
+    std::set<std::string> installerProbeUrls;
+    std::weak_ptr<Session> installerProbeSession;
+    bool installerConnectionPending = false;
+    std::pair<std::wstring,std::wstring> installerProfileKey;
+    std::map<std::pair<std::wstring,std::wstring>,std::weak_ptr<Session>> installerVerifiedProfiles;
     std::vector<Browser> browsers;
     std::set<std::string> customBrowserPaths;
     std::vector<std::shared_ptr<Session>> sessions;
@@ -134,6 +165,11 @@ class App {
     std::atomic_uint64_t languageRevision{0};
     void setInterfaceLanguage(const std::string &);
     void bindJobSource(Job &, const Media &);
+    void stageDownloadAccess(const std::vector<std::shared_ptr<Job>> &);
+    JobDownloadAccess getDownloadAccess(Job &, bool prepareOnly = false);
+    bool saveDownloadAccess(Job &, const JobDownloadAccess &);
+    void discardDownloadAccess(Job &, bool removed = false);
+    void revokeSessionAccess(const std::shared_ptr<Session> &);
     void saveSettings();
     bool scanCommandPending = false;
     bool splashEnabled = true;
@@ -176,9 +212,10 @@ class App {
     std::shared_ptr<Session> session();
     fs::path tool(const wchar_t *);
     std::pair<std::string, Json> credentials(std::shared_ptr<Session>, const std::string &,
-                                             std::atomic_bool &, const BrowserSource *source = nullptr);
+                                             std::atomic_bool &, const BrowserSource *source = nullptr,
+                                             Session::CredentialSnapshot *pinned = nullptr);
     void analyze(const std::string &, bool deep = false);
-    std::shared_ptr<Preview> requestPreview(const Media &);
+    std::shared_ptr<Preview> requestPreview(const Media &, const Job *job = nullptr);
     void enqueue();
     void refreshSessions();
     void closeRequest();
@@ -210,6 +247,9 @@ class UI {
     std::optional<Hit> capture;
     bool snapshotFresh = false;
     std::string keyboardFocus;
+    FocusVisual focusVisual;
+    std::string paintedKeyboardFocus, fadingKeyboardFocus;
+    float fadingFocusOpacity = 0;
     bool focusControl(const std::string &);
     void focusNext(bool backwards);
     bool keyboardFocusable(const Hit &) const;
@@ -264,7 +304,7 @@ class UI {
     struct PreviewTexture { unsigned texture=0; uint64_t lastSeenFrame=0; };
     std::map<std::string,PreviewTexture> previewTextures;
     std::map<uint64_t,std::string> metadataPreviews;
-    void previewTile(const Media &,Rect);
+    void previewTile(const Media &,Rect,const Job *job = nullptr);
     Ink bg, panel, edge, text, muted, accent;
     float to(const std::string &, float, float initial = 0, float freq = 5, float damping = .9f);
     void hit(const std::string &, Rect, std::function<void()>, bool edit = false,

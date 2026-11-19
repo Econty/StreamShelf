@@ -23,6 +23,20 @@ MAX_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_EXPANDED_BYTES = 64 * 1024 * 1024
 EXPECTED_ADDON_ID = "connector@streamshelf.local"
 SIGNATURE_MEMBERS = {"META-INF/manifest.mf", "META-INF/mozilla.sf", "META-INF/mozilla.rsa"}
+TEXT_EXTENSIONS = {".css", ".html", ".js", ".json"}
+
+
+def source_matches(name: str, packaged: bytes, source: bytes) -> bool:
+    # Git may check out text as CRLF on Windows, while Mozilla signs the LF
+    # archive. Accept line-ending differences without weakening comparisons of
+    # content or binary assets. The manifest may also lack its final newline.
+    if Path(name).suffix.lower() in TEXT_EXTENSIONS:
+        packaged = packaged.replace(b"\r\n", b"\n")
+        source = source.replace(b"\r\n", b"\n")
+        if name == "manifest.json":
+            packaged = packaged.rstrip(b"\n")
+            source = source.rstrip(b"\n")
+    return packaged == source
 
 
 def jar_sections(content: bytes) -> list[dict[str, str]]:
@@ -121,7 +135,7 @@ def validate_package(repo: Path, package: Path) -> None:
         if missing:
             raise ValueError(f"Firefox package is missing source files: {', '.join(sorted(missing))}")
         for name, path in source.items():
-            if path.stat().st_size > MAX_MEMBER_BYTES or archive.read(name) != path.read_bytes():
+            if path.stat().st_size > MAX_MEMBER_BYTES or not source_matches(name, archive.read(name), path.read_bytes()):
                 raise ValueError(f"Firefox package is stale: {name} differs from current source")
         for name in SIGNATURE_MEMBERS:
             if not archive.read(name):

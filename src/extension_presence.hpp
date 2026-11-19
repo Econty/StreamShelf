@@ -24,8 +24,18 @@ inline ExtensionPresence extensionPresence(const Json &preferences) {
     auto entry = settings->find(ExtensionId);
     if (entry == settings->end() || !entry->is_object()) return result;
     auto path = entry->find("path"), manifest = entry->find("manifest");
-    result.installed = (path != entry->end() && path->is_string() && !path->get_ref<const std::string &>().empty()) ||
-        (manifest != entry->end() && manifest->is_object() && manifest->value("name", std::string()) == "StreamShelf Connector");
+    // The entry is already scoped to our fixed extension ID. A valid manifest
+    // may use a localized __MSG_...__ name, so don't identify it by display
+    // text. Empty or residual dictionaries alone are still not installation.
+    bool validManifest = false;
+    if (manifest != entry->end() && manifest->is_object()) {
+        auto name = manifest->find("name"), version = manifest->find("version");
+        auto manifestVersion = manifest->find("manifest_version");
+        validManifest = name != manifest->end() && name->is_string() && !name->get_ref<const std::string &>().empty() &&
+            version != manifest->end() && version->is_string() && !version->get_ref<const std::string &>().empty() &&
+            manifestVersion != manifest->end() && manifestVersion->is_number_integer() && manifestVersion->get<int64_t>() > 0;
+    }
+    result.installed = (path != entry->end() && path->is_string() && !path->get_ref<const std::string &>().empty()) || validManifest;
     if (!result.installed) return result;
     auto reasons = entry->find("disable_reasons");
     if (reasons != entry->end() && reasons->is_array()) {

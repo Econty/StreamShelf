@@ -147,27 +147,43 @@ void identityAndRetry() {
     std::atomic_bool cancel{false};
     const std::string url="https://example.test/video?token=one";
     session.scopedCredentialsSupported = true;
-    session.updateTab({{"tabId",7},{"url","https://example.test/watch"},{"storeId","store-A"},{"sourceId",uint64_t(1)}});
+    session.updateTab({{"tabId",7},{"url","https://example.test/watch"},{"storeId","store-A"},{"sourceId",uint64_t(1)},{"credentialRevision",uint64_t(1)}});
     auto originalSource = session.source();
-    auto request=[&](const std::string &target, Json reply) {
-        auto pending=std::async(std::launch::async,[&]{return session.credentials(target,cancel);});
+    auto request=[&](const std::string &target, Json reply, Session::CredentialSnapshot *pin=nullptr) {
+        auto expected = session.source();
+        auto pending=std::async(std::launch::async,[&,expected]{return session.credentials(target,expected,cancel,pin);});
         auto frame=receive();
         reply["requestId"]=str(frame,"requestId");
         if (!reply.contains("type")) reply["type"]="credentialsResult";
         if (str(reply, "type") != "error") {
-            reply["tabId"]=7; reply["storeId"]="store-A"; reply["sourceId"]=uint64_t(1);
+            reply["tabId"]=frame["tabId"]; reply["storeId"]=frame["storeId"]; reply["sourceId"]=frame["sourceId"];
+            if (!reply.contains("credentialRevision") && frame.contains("credentialRevision")) reply["credentialRevision"]=frame["credentialRevision"];
             if (!reply.contains("cookies")) reply["cookies"]=Json::array();
             if (!reply.contains("headers")) reply["headers"]=Json::object();
         }
         session.acceptCredentialReply(reply);
         return pending.get();
     };
-    auto firstSnapshot=request(url,{{"url",url},{"headers",{{"Referer","https://example.test/"}}}});
+    Json jar=Json::array({{{"domain","example.test"},{"path","/media"},{"name","sid"},{"value","session-test-secret"},{"secure",true},{"httpOnly",true}}});
+    auto firstSnapshot=request(url,{{"url",url},{"cookies",jar},{"headers",{{"Referer","https://example.test/"}}}});
     check("the initial credential snapshot is accepted",str(firstSnapshot,"url")==url);
+    auto pinned=session.pinCredentials(url,originalSource);
+    check("session snapshots are encrypted and retain scoped cookies",pinned && pinned->protectedData &&
+        pinned->protectedData->find("session-test-secret")==std::string::npos && firstSnapshot["cookies"]==jar &&
+        cookies(firstSnapshot["cookies"]).find("#HttpOnly_example.test\tFALSE\t/media\tTRUE")!=std::string::npos);
+    auto oldPin=*pinned;
+    pinned->captured=0;
+    { std::lock_guard lock(session.mutex); session.credentialSnapshots[url].captured=0; }
+    check("session credentials do not expire while the same source is active",session.pinCredentials(url,originalSource).has_value());
+    auto replaced=request(url,{{"url",url}},&*pinned);
+    check("a pinned job still asks for fresh credentials and accepts cookie removal",replaced["cookies"].empty() &&
+        oldPin.protectedData==pinned->protectedData && oldPin.protectedData->find("session-test-secret")==std::string::npos);
     bool rejected=false;
     try { request(url,{{"type","error"},{"message","tab changed"}}); }
     catch(const BrowserSourceChanged &) { rejected=true; }
     check("explicit extension refusal cannot reuse credentials or retry anonymously",rejected);
+    auto afterRefusal=request(url,{{"url",url},{"headers",{{"Referer","confirmed after refusal"}}}},&oldPin);
+    check("a pin cannot bypass fresh confirmation after a refusal",str(afterRefusal["headers"],"Referer")=="confirmed after refusal");
     rejected=false;
     try { request(url,{{"url","https://example.test/different"},{"headers",{{"Referer","wrong"}}}}); }
     catch(const BrowserSourceChanged &) { rejected=true; }
@@ -196,18 +212,43 @@ void identityAndRetry() {
     auto fresh=request(url,{{"url",url},{"headers",{{"Referer","fresh"}}}});
     check("new request succeeds after late replies",str(fresh["headers"],"Referer")=="fresh");
 
+    session.updateCredentials({{"tabId",8},{"sourceId",uint64_t(1)},{"storeId","store-A"},{"credentialRevision",uint64_t(2)}});
+    check("credential change from another tab cannot alter the active source",session.source().credentialRevision==uint64_t(1));
+    session.updateCredentials({{"tabId",7},{"sourceId",uint64_t(1)},{"storeId","store-A"},{"credentialRevision",uint64_t(2)}});
+    check("cookie rotation changes access revision without pretending to navigate",session.sourceMatches(originalSource) && session.source().credentialRevision==uint64_t(2));
+    rejected=false;
+    try { session.credentials(url,originalSource,cancel); } catch(const BrowserCredentialsChanged &) { rejected=true; }
+    check("a queued attempt cannot acquire credentials from a later account revision",rejected);
+    check("a later revision cannot pin the old credentials",!session.pinCredentials(url,originalSource));
+    auto rotated=request(url,{{"url",url},{"headers",{{"Referer","rotated"}}}});
+    check("freshly analysed revision receives its own authoritative credentials",str(rotated["headers"],"Referer")=="rotated");
+
+    {
+        Session legacy; legacy.pipe=pipes.server; legacy.scopedCredentialsSupported=true;
+        legacy.updateTab({{"tabId",7},{"url","https://example.test/watch"},{"storeId","store-A"},{"sourceId",uint64_t(1)}});
+        auto pending=std::async(std::launch::async,[&]{return legacy.credentials(url,cancel);});
+        auto first=receive();
+        legacy.acceptCredentialReply({{"requestId",str(first,"requestId")},{"type","error"},{"message","The tab changed"}});
+        auto second=receive();
+        legacy.acceptCredentialReply({{"requestId",str(second,"requestId")},{"type","credentialsResult"},{"url",url},{"tabId",7},{"storeId","store-A"},{"sourceId",uint64_t(1)},{"cookies",jar},{"headers",Json::object()}});
+        auto result=pending.get();
+        check("legacy same-tab focus gets one fresh scoped retry with a new request ID",str(first,"requestId")!=str(second,"requestId") && result["cookies"]==jar);
+        check("legacy connectors without revision never reuse credentials",legacy.credentialSnapshots.empty() && !legacy.pinCredentials(url,legacy.source()));
+    }
+
+    auto activeSource=session.source();
     auto pending=std::async(std::launch::async,[&]{
-        try { session.credentials(url, originalSource, cancel); return false; }
+        try { session.credentials(url, activeSource, cancel); return false; }
         catch (const BrowserSourceChanged &) { return true; }
     });
     auto pendingFrame=receive();
     session.updateTab({{"tabId",8},{"url","https://example.test/watch"},{"storeId","store-B"},{"sourceId",uint64_t(2)}});
     session.acceptCredentialReply({{"requestId",str(pendingFrame,"requestId")},{"url",url},{"tabId",7},{"storeId","store-A"},{"sourceId",uint64_t(1)}});
     check("changing accounts while a credential request is pending fails closed",pending.get());
-    bool refused=false; try { session.credentials(url,originalSource,cancel); } catch(const BrowserSourceChanged &) { refused=true; }
+    bool refused=false; try { session.credentials(url,activeSource,cancel); } catch(const BrowserSourceChanged &) { refused=true; }
     check("old job cannot request credentials or cached data from a new account",refused);
     session.updateTab({{"tabId",7},{"url","https://example.test/watch"},{"storeId","store-A"},{"sourceId",uint64_t(1)}});
-    refused=false; try { session.credentials(url,originalSource,cancel); } catch(const BrowserSourceChanged &) { refused=true; }
+    refused=false; try { session.credentials(url,activeSource,cancel); } catch(const BrowserSourceChanged &) { refused=true; }
     check("switching away and back does not revive a stale job identity",refused);
 
 }

@@ -14,16 +14,18 @@ CHECK = ROOT / "scripts" / "Verify-FirefoxPackage.py"
 MANIFEST = ROOT / "extension" / "firefox-development" / "manifest.json"
 SHARED = ROOT / "extension" / "shared"
 VERSION = json.loads(MANIFEST.read_text(encoding="utf-8"))["version"]
+SIGNED = ROOT / "extension" / "firefox-signed" / f"StreamShelf-Connector-{VERSION}.xpi"
+SIGNATURE_FIXTURE = SIGNED if SIGNED.is_file() else SIGNED.with_name("StreamShelf-Connector-1.0.5.xpi")
 
 
 class FirefoxPackageTests(unittest.TestCase):
     def check(self, path):
         return subprocess.run([sys.executable, str(CHECK), "--repo", str(ROOT), "--package", str(path)], capture_output=True, text=True)
 
-    def create(self, directory, *, changed=None, extra=None, signed=True):
+    def create(self, directory, *, changed=None, extra=None, signed=True, manifest_data=None):
         path = Path(directory) / f"StreamShelf-Connector-{VERSION}.xpi"
         with zipfile.ZipFile(path, "w") as archive:
-            contents = {"manifest.json": MANIFEST.read_bytes()}
+            contents = {"manifest.json": MANIFEST.read_bytes() if manifest_data is None else manifest_data}
             for source in SHARED.rglob("*"):
                 if source.is_file():
                     name = source.relative_to(SHARED).as_posix()
@@ -53,8 +55,9 @@ class FirefoxPackageTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("cryptographic signature", result.stderr)
 
+    @unittest.skipUnless(SIGNATURE_FIXTURE.is_file(), "No Mozilla-signed package fixture")
     def test_genuine_mozilla_signature_matches_its_source(self):
-        old = ROOT / "extension" / "firefox-signed" / "StreamShelf-Connector-1.0.4.xpi"
+        old = SIGNATURE_FIXTURE
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory) / "repo"
             shared = repo / "extension" / "shared"
@@ -67,13 +70,27 @@ class FirefoxPackageTests(unittest.TestCase):
                         continue
                     target = (development if name == "manifest.json" else shared) / name
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(archive.read(name))
+                    data = archive.read(name)
+                    if target.suffix.lower() in {".css", ".html", ".js", ".json"}:
+                        data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+                        if name == "manifest.json":
+                            data = data.rstrip(b"\r\n") + b"\r\n"
+                    target.write_bytes(data)
             result = subprocess.run([sys.executable, str(CHECK), "--repo", str(repo), "--package", str(old)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Mozilla production signature is valid", result.stdout)
 
+    def test_changed_manifest_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            manifest["name"] = "Different extension"
+            result = self.check(self.create(directory, manifest_data=json.dumps(manifest).encode()))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("manifest.json differs", result.stderr)
+
+    @unittest.skipUnless(SIGNATURE_FIXTURE.is_file(), "No Mozilla-signed package fixture")
     def test_tampering_is_rejected_even_if_source_matches(self):
-        old = ROOT / "extension" / "firefox-signed" / "StreamShelf-Connector-1.0.4.xpi"
+        old = SIGNATURE_FIXTURE
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory) / "repo"
             shared = repo / "extension" / "shared"
@@ -110,12 +127,28 @@ class FirefoxPackageTests(unittest.TestCase):
             self.assertNotEqual(self.check(self.create(directory, extra="injected.js")).returncode, 0)
             self.assertNotEqual(self.check(self.create(directory, extra="META-INF/../../injected.js")).returncode, 0)
 
+    @unittest.skipUnless(SIGNATURE_FIXTURE.is_file(), "No Mozilla-signed package fixture")
     def test_older_signed_package_cannot_be_renamed_as_current(self):
         with tempfile.TemporaryDirectory() as directory:
-            old = ROOT / "extension" / "firefox-signed" / "StreamShelf-Connector-1.0.4.xpi"
-            renamed = Path(directory) / f"StreamShelf-Connector-{VERSION}.xpi"
-            renamed.write_bytes(old.read_bytes())
-            self.assertNotEqual(self.check(renamed).returncode, 0)
+            repo = Path(directory) / "repo"
+            shared = repo / "extension" / "shared"
+            development = repo / "extension" / "firefox-development"
+            development.mkdir(parents=True)
+            with zipfile.ZipFile(SIGNATURE_FIXTURE) as archive:
+                for name in archive.namelist():
+                    if name.startswith("META-INF/") or name.endswith("/") or name == "manifest.json":
+                        continue
+                    target = shared / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(archive.read(name))
+            manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            manifest["version"] = VERSION + ".1"
+            (development / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            renamed = Path(directory) / f"StreamShelf-Connector-{manifest['version']}.xpi"
+            renamed.write_bytes(SIGNATURE_FIXTURE.read_bytes())
+            result = subprocess.run([sys.executable, str(CHECK), "--repo", str(repo), "--package", str(renamed)], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("manifest.json differs", result.stderr)
 
 
 if __name__ == "__main__":

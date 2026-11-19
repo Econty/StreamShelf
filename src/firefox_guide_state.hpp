@@ -8,6 +8,39 @@ struct FirefoxGuideObservation {
     bool installedKnown = false, installed = false, enabledKnown = false, enabled = false;
     bool extensionRunning = false, connectionConfirmed = false, removedNotice = false;
 };
+struct FirefoxInstallProgress {
+    bool installed = false, enabledKnown = false, enabled = false;
+    uint64_t absentSince = 0;
+
+    void apply(FirefoxGuideObservation &o, bool profileAbsent, uint64_t scannedAt) {
+        if (o.removedNotice) { *this = {}; return; }
+
+        if (o.installed || o.addedNotice || o.extensionRunning) {
+            installed = true;
+            if (o.installed && o.enabledKnown) {
+                enabledKnown = true;
+                enabled = o.enabled;
+            } else if (o.extensionRunning) {
+                enabledKnown = enabled = true;
+            }
+            absentSince = 0;
+        } else if (installed && o.manager && profileAbsent && !o.awaitingInstall && !o.installPrompt && !o.picker) {
+            // Firefox can briefly publish a profile without the add-on during installation.
+            // Measure from successive scans so a cached result cannot confirm removal.
+            if (!absentSince) absentSince = scannedAt;
+            else if (scannedAt >= absentSince + 2'000) { *this = {}; return; }
+        } else {
+            absentSince = 0;
+        }
+
+        if (!installed) return;
+        o.installedKnown = o.installed = true;
+        if (!o.enabledKnown && enabledKnown) {
+            o.enabledKnown = true;
+            o.enabled = enabled;
+        }
+    }
+};
 inline bool firefoxRemovedNotice(const std::wstring &name) {
     if (name.find(L"streamshelf connector") == std::wstring::npos) return false;
     for (auto phrase : {L"удален", L"удалён", L"удалено", L"удалены", L"was removed", L"has been removed"})

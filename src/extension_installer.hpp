@@ -22,6 +22,10 @@ class ExtensionInstaller {
     bool active() const;
     // Browser executable paths alone cannot distinguish sessions in different profiles.
     bool hasExplicitProfile() const;
+    bool isVerificationUrl(const std::string &url) const;
+    bool beginProfileVerification(const std::wstring &url);
+    void finishProfileVerification(const std::wstring &url);
+    bool profileVerificationFinishing() const;
     bool translate(MSG &);
     void connectionEstablished();
     void setExtensionReloadRequired(bool required);

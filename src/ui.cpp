@@ -422,7 +422,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
         c.circle(cx + 11, cy - 105 + drift, 2.5f + pulse, hex(0x8be2d1));
         centered("KRECHETOV LABS", cy - 48, 13, hex(0x8be2d1));
         centered("StreamShelf", cy + 5, 36, hex(0xeef3fc));
-        centered(tr("Версия v2026.11.1 Beta", "Version v2026.11.1 Beta"), cy + 41, 12, hex(0x8999b4));
+        centered(tr("Версия v2026.11.17 Beta", "Version v2026.11.17 Beta"), cy + 41, 12, hex(0x8999b4));
         c.rect({cx - 50, cy + 69, 100, 2}, 1, hex(0x2a374b));
         c.rect({cx - 50, cy + 69, 100 * std::clamp(elapsedSeconds / float(app.splashSeconds), 0.f, 1.f), 2}, 1, hex(0x8be2d1));
         c.opacity = 1; c.render(); return;
@@ -536,7 +536,7 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     c.circle(40, height - 28, 3, app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady ? accent : muted);
     if(!compactMenu)c.text(app.session() && app.session()->alive && app.session()->verified && app.session()->setupReady?tr("Браузер подключён", "Browser connected"):tr("Нет соединения", "Not connected"),52,height-24,10,muted,150);
     if (!compactMenu) {
-        c.text("StreamShelf v2026.11.1 Beta", 25, height - 80, 9, muted, 195);
+        c.text("StreamShelf v2026.11.17 Beta", 25, height - 80, 9, muted, 195);
         c.text(tr("Разработчик: Арсений Кречетов", "Developer: Arseniy Krechetov"), 25, height - 59, 9, muted, 195);
     }
     float contentLeft=compactMenu?76.f:226.f;
@@ -573,18 +573,31 @@ void UI::frame(int pw, int ph, float elapsed, float dpi, bool resizing) {
     }
     c.text(std::to_string(app.media.size()) + tr(" ресурсов", " resources"), width - 170, height - 15, 9, muted);
     overlays();
-    if (!keyboardFocus.empty()) {
-        auto current=std::find_if(hits.begin(),hits.end(),[this](const Hit &item){return item.id==keyboardFocus && keyboardFocusable(item);});
-        if(current!=hits.end()) {
-            // A transparent fill does not erase the solid outer rectangle drawn
-            // by Canvas::border, so draw the focus ring as four strokes instead.
-            auto ring=current->rect.inset(2);
-            c.line(ring.x,ring.y,ring.x+ring.w,ring.y,2,accent);
-            c.line(ring.x+ring.w,ring.y,ring.x+ring.w,ring.y+ring.h,2,accent);
-            c.line(ring.x+ring.w,ring.y+ring.h,ring.x,ring.y+ring.h,2,accent);
-            c.line(ring.x,ring.y+ring.h,ring.x,ring.y,2,accent);
-        }
+    if (paintedKeyboardFocus != keyboardFocus) {
+        fadingKeyboardFocus = paintedKeyboardFocus;
+        fadingFocusOpacity = focusVisual.opacity;
+        paintedKeyboardFocus = keyboardFocus;
+        focusVisual.opacity = 0;
     }
+    auto drawFocus = [&](const std::string &id, float alpha) {
+        if (alpha < .001f || id.empty()) return;
+        auto current=std::find_if(hits.begin(),hits.end(),[&](const Hit &item){return item.id==id && keyboardFocusable(item);});
+        if(current==hits.end()) return;
+        // The inset and contrasting halo keep focus visible over accent-filled
+        // controls. A single analytic stroke avoids faceted per-segment lines.
+        const auto ring=current->rect.inset(-3.f);
+        const float radius=std::min({current->edit?16.f:
+            current->accessibleRole==ROLE_SYSTEM_CHECKBUTTON?
+                (current->id.rfind("settings:",0)==0?ring.h/2:9.5f):15.f,
+            ring.w/2,ring.h/2});
+        c.outline(ring.inset(-1.f),radius+1.f,(app.light?hex(0xffffff):hex(0x08101c)).alpha(alpha*.9f),4.f);
+        c.outline(ring,radius,accent.alpha(alpha),2.f);
+    };
+    const float focusAlpha=focusVisual.step(clock,dt,app.reduced);
+    if (app.reduced) fadingFocusOpacity=0;
+    else fadingFocusOpacity*=std::exp(-dt/.1f);
+    drawFocus(fadingKeyboardFocus,fadingFocusOpacity);
+    drawFocus(keyboardFocus,focusAlpha);
     snapshotFresh = true;
     syncAccessibility();
     c.opacity = 1;
@@ -716,7 +729,7 @@ void UI::mediaPage(Rect r) {
     auto visible=filtered();
     const bool selectable=std::any_of(visible.begin(),visible.end(),[](const auto *m){return !m->drm;});
     const bool allMediaSelected=selectable && std::all_of(visible.begin(),visible.end(),[](const auto *m){return m->drm || m->selected;});
-    button("selectall", {r.x + r.w - 268, r.y + 291 - saved, 138, 36}, allMediaSelected?tr("Снять все галочки", "Deselect all"):tr("Выбрать все", "Select all"), [this,allMediaSelected] {
+    button("selectall", {r.x + r.w - 268, r.y + 291 - saved, 138, 36}, allMediaSelected?tr("Снять выбор", "Deselect all"):tr("Выбрать все", "Select all"), [this,allMediaSelected] {
         for (auto *m : filtered()) if (!m->drm) m->selected = !allMediaSelected;
     },false,selectable);
     button("view",{r.x+r.w-120,r.y+291-saved,120,36},cardView?tr("Подробности", "Details"):tr("Карточки", "Cards"),[this]{cardView=!cardView;mediaScroll.p.target=0;});
@@ -763,8 +776,8 @@ void UI::mediaPage(Rect r) {
                 c.rect(badge, 7, hex(m.videoOnly || m.category == "Видео без звука" ? 0x8f462a : 0x263a48, .94f));
                 c.text(sound, badge.x + 9, badge.y + 15, 10, hex(0xffffff), badge.w - 14);
             }
-            hit(id,box,[this,key=m.key]{for(auto &item:app.media)if(item.key==key){app.selectedMedia=key;if(!item.drm)item.selected=!item.selected;break;}},false,name);
-            check(id+":check",{box.x+6,box.y+7,30,30},m.selected,[this,key=m.key]{for(auto &item:app.media)if(item.key==key&&!item.drm){item.selected=!item.selected;app.selectedMedia=key;}},std::string(tr("Выбрать ", "Select "))+name);
+            hit(id,box,[this,key=m.key]{for(auto &item:app.media)if(item.key==key){app.selectedMedia=key;if(!item.drm)item.selected=!item.selected;break;}},
+                false,name,ROLE_SYSTEM_LISTITEM,m.selected);
         }
         c.pop();scrollbar("media:scroll",{table.x,table.y+6,table.w-5,table.h-12},mediaScroll);
         if(rows.empty())c.text(!app.media.empty()?tr("Нет результатов для выбранных фильтров.", "No results match the current filters."):app.scanning?tr("Поиск включён — запустите медиа в браузере", "Search is active — play media in your browser"):tr("Нет файлов. Добавьте ссылку или включите поиск во вкладке «Подключение».", "No files. Add a URL or start searching on the Connection page."),table.x+20,table.y+40,12,muted,table.w-40);
@@ -821,15 +834,14 @@ void UI::mediaPage(Rect r) {
         collectionSurface(id,row,true,m->selected,i);
         auto accessibleName=displayMediaTitle(app.interfaceLanguage,*m);
         if(!m->sourceTitle.empty())accessibleName=mediaJobTitle(*m);
-        hit(id,row,[this,key=m->key]{app.selectedMedia=key;},false,accessibleName);
-        check(id + ":check", {row.x + 5, row.y, 30, row.h}, m->selected, [this, key = m->key] {
-            for (auto &m : app.media)
-                if (m.key == key && !m.drm) {
-                    m.selected = !m.selected;
+        hit(id,row,[this,key=m->key]{
+            for (auto &item : app.media)
+                if (item.key == key) {
                     app.selectedMedia = key;
+                    if (!item.drm) item.selected = !item.selected;
                     break;
                 }
-        },std::string(tr("Выбрать ", "Select "))+accessibleName);
+        },false,accessibleName,ROLE_SYSTEM_LISTITEM,m->selected);
         Ink category = m->drm                                             ? hex(0xff8d8d)
                        : m->category == "Аудио"                           ? hex(0xc9a7ff)
                        : m->category.find("Субтитры") != m->category.npos ? hex(0xffd18d)
@@ -886,9 +898,9 @@ void UI::mediaPage(Rect r) {
            app.manualAnalysis ? tr("Без браузера: включено", "No browser: on") : tr("Без браузера: выключено", "No browser: off"),
            [this]{app.action("toggleManualAnalysis");});
 }
-void UI::previewTile(const Media &media,Rect box){
+void UI::previewTile(const Media &media,Rect box,const Job *job){
     c.rect(box,7,hex(app.light?0xe5eaf1:0x0b121d));
-    auto preview=app.requestPreview(media);
+    auto preview=app.requestPreview(media,job);
     if(preview&&!preview->image.rgba.empty()){
         auto key=std::to_string(app.previewGeneration) + "|" + std::to_string(preview->id);
         auto it=previewTextures.find(key);
@@ -908,9 +920,32 @@ void UI::previewTile(const Media &media,Rect box){
             it->second.lastSeenFrame=app.previewFrame;
             c.image(it->second.texture,box,preview->image.width,preview->image.height);
         }
-    }else{
-        c.text(preview?interfaceText(app.interfaceLanguage, preview->message):tr("Ожидание превью…", "Waiting for preview…"),box.x+12,box.y+box.h/2,11,muted,box.w-24);
+        if(it!=previewTextures.end())return;
     }
+    const auto label = media.category == "Аудио" ? tr("Аудио", "Audio")
+        : media.category.find("Субтитры") != std::string::npos || media.category == "Автосубтитры" ? tr("Субтитры", "Subtitles")
+        : media.category == "Изображения" || media.category == "Превью" ? tr("Изображение", "Image")
+        : media.category.find("Видео") != std::string::npos || media.category == "HLS" || media.category == "DASH" ? tr("Видео", "Video")
+        : tr("Медиафайл", "Media file");
+    const float center=box.x+box.w/2, middle=box.y+box.h/2;
+    auto badge=media.ext;
+    if(badge.empty() || badge.size()>10 || !std::all_of(badge.begin(),badge.end(),[](unsigned char value){return std::isalnum(value);}))badge.clear();
+    std::transform(badge.begin(),badge.end(),badge.begin(),[](unsigned char value){return char(std::toupper(value));});
+    const auto caption=badge.empty()?label:std::string(label)+" · "+badge;
+    const auto detail=!preview || !preview->done ? tr("Загрузка превью…", "Loading preview…")
+        : interfaceText(app.interfaceLanguage,preview->message);
+    const auto tone=accent.alpha(app.light?.14f:.2f);
+    c.rect({center-19,middle-35,38,34},9,tone);
+    if(media.category=="Аудио"){
+        constexpr float amplitudes[]{5,11,16,9,6};
+        for(int bar=0;bar<5;++bar)c.rect({center-10+bar*4.5f,middle-18-amplitudes[bar]/2,2,amplitudes[bar]},1,accent);
+    }else{
+        c.outline({center-8,middle-28,16,19},3,accent,1.5f);
+        c.line(center-4,middle-21,center+4,middle-21,1.5f,accent);
+        c.line(center-4,middle-16,center+2,middle-16,1.5f,accent);
+    }
+    c.text(caption,std::max(box.x+8,center-c.measure(caption,11)/2),middle+15,11,text,box.w-16);
+    if(!detail.empty() && detail!=caption)c.text(detail,std::max(box.x+8,center-c.measure(detail,10)/2),middle+31,10,muted,box.w-16);
 }
 void UI::browserPage(Rect r) {
     auto tr = [this](const char *ru, const char *en) { return app.interfaceLanguage == "ru" ? ru : en; };
@@ -979,8 +1014,9 @@ void UI::collectionSurface(const std::string &id, Rect row, bool details, bool s
     if(details) {
         c.rect(row,9,mix(panel,accent,.025f+(index%2)*.025f+h*.05f+selectedMix*.12f));
     } else {
-        c.border(row,12,mix(edge,accent,selectedMix),mix(panel,accent,h*.035f),1.f+2.5f*selectedMix);
+        c.border(row,12,edge,mix(panel,accent,h*.035f));
     }
+    if(selectedMix>.001f)c.outline(row.inset(1.5f),details?8.f:10.5f,accent.alpha(selectedMix),3.5f);
 }
 float UI::collectionRowY(const std::string &id,float target) {
     auto &y=rowY.try_emplace(id,target).first->second;
@@ -990,9 +1026,10 @@ float UI::collectionRowY(const std::string &id,float target) {
 void UI::selectionHeading(const std::string &id,Rect area,bool &selectedFirst) {
     float h=hover(id,area);
     c.rect(area.inset(3),7,accent.alpha((selectedFirst?.16f:0.f)+h*.07f));
-    c.text(selectedFirst?"✓ ↑":"✓",area.x+10,area.y+26,11,selectedFirst?accent:muted,area.w-12);
+    c.outline({area.x+10,area.y+15,14,12},3,selectedFirst?accent:muted,selectedFirst?2.5f:1.5f);
+    if(selectedFirst)c.text("↑",area.x+26,area.y+26,10,accent,area.w-27);
     hit(id,area,[&selectedFirst]{selectedFirst=!selectedFirst;},false,
-        tr("Сначала отмеченные", "Selected first"),ROLE_SYSTEM_CHECKBUTTON,selectedFirst);
+        tr("Сначала выбранные", "Selected first"),ROLE_SYSTEM_PUSHBUTTON);
 }
 void UI::downloadsPage(Rect r) {
     c.text(tr("Загрузки · ", "Downloads · ")+std::to_string(app.jobs.size()), r.x, r.y + 28, 20, text, r.w - 400);
@@ -1189,20 +1226,17 @@ void UI::downloadsPage(Rect r) {
         bool checked=app.selectedJobs.count(j->id)!=0;
         bool active=j->id==app.selectedJob;
         auto stateColor=j->state=="Ошибка"?hex(0xff9292):accent;
-        collectionSurface(id,row,jobDetails,checked || active,index);
+        collectionSurface(id,row,jobDetails,checked,index);
         if(active)c.rect({row.x+row.w-4,row.y+5,3,std::max(0.f,row.h-10)},2,accent);
         if(!jobDetails) {
-            auto previewItem=j->item;
-            if(j->assembly && !j->singleExport && j->done && j->state=="Готово" && !j->output.empty())
-                previewItem.thumbnail="assembly-cover:"+j->id+"|"+j->output;
-            previewTile(previewItem,{row.x+6,row.y+6,row.w-12,row.h-122});
+            previewTile(j->item,{row.x+6,row.y+6,row.w-12,row.h-122},j.get());
         }
         const bool processing=!j->done && (j->state=="Сборка контейнера" ||
             j->state=="Проверка результата" || j->state=="Распознавание субтитров" || j->state=="Объединение" || j->state=="Скачивание");
         const float progress=to(id+":progress",processing && j->percent>=0
             ?std::clamp(float(j->percent/100),0.f,1.f):0.f,0,4,1);
         if(processing){
-            Rect fill=row.inset(checked?2.f:1.f);
+            Rect fill=row.inset(checked?6.f:1.f);
             Rect visible=fill;
             if(j->percent<0){
                 visible.w=fill.w*.24f;
@@ -1244,14 +1278,12 @@ void UI::downloadsPage(Rect r) {
             auto detail=j->detail.empty()?j->output:interfaceText(app.interfaceLanguage, j->detail);
             if(!detail.empty())c.text(detail,x,y+32+15*detailRow,10,muted,w);
         }
-        auto select=[this,j]{ app.selectedJob=j->id; };
         auto checkJob=[this,j]{
             app.selectedJob=j->id;
             if(app.selectedJobs.count(j->id))app.selectedJobs.erase(j->id);
             else app.selectedJobs.insert(j->id);
         };
-        hit(id,row,select,false,j->title);
-        check(id+":check",{row.x+(jobDetails?5:6),row.y+(jobDetails?0:7),30,jobDetails?row.h:30},checked,checkJob,std::string(tr("Выбрать задачу ", "Select task "))+j->title);
+        hit(id,row,checkJob,false,j->title,ROLE_SYSTEM_LISTITEM,checked);
     }
     c.pop();
     scrollbar("jobs:scroll",view,jobsScroll);
@@ -1458,7 +1490,7 @@ void UI::aboutPage(Rect r) {
     card({r.x, y, r.w, 152});
     c.text("KRECHETOV LABS", r.x + 24, y + 30, 11, accent, r.w - 48);
     c.text("StreamShelf", r.x + 24, y + 69, 25, text, r.w - 48);
-    c.text(tr("Версия v2026.11.1 Beta · Windows x64", "Version v2026.11.1 Beta · Windows x64"), r.x + 24, y + 100, 12, muted, r.w - 48);
+    c.text(tr("Версия v2026.11.17 Beta · Windows x64", "Version v2026.11.17 Beta · Windows x64"), r.x + 24, y + 100, 12, muted, r.w - 48);
     c.text(tr("Разработчик: Арсений Кречетов", "Developer: Arseniy Krechetov"), r.x + 24, y + 126, 12, muted, r.w - 48);
     y += 168;
     card({r.x, y, r.w, 220});
@@ -1657,6 +1689,7 @@ void UI::rightClick(float x,float y) {
 }
 void UI::press() {
     if(!snapshotFresh)return;
+    focusVisual.hide();
     down = true;
     downX = mx;
     downY = my;
@@ -1696,6 +1729,7 @@ void UI::cancelInput() {
     focus.clear();
     editingContext.clear();
     keyboardFocus.clear();
+    focusVisual.hide();
     editing = nullptr;
     suggestions.clear();
     suggestionField.clear();
@@ -1718,6 +1752,7 @@ bool UI::focusControl(const std::string &id) {
     auto it=std::find_if(hits.begin(),hits.end(),[&](const Hit &item){return item.id==id && keyboardFocusable(item);});
     if(it==hits.end())return false;
     keyboardFocus=id;
+    focusVisual.show(clock);
     if(it->edit) {
         // Place the caret at the end when focus came from the keyboard, rather
         // than using the position of an unrelated mouse pointer.
@@ -1761,7 +1796,10 @@ void UI::syncAccessibility() {
         if(std::any_of(nodes.begin(),nodes.end(),[&](const auto &node){return node.id==id->second;}))continue;
         AccessibleNode node;
         node.id=id->second;node.role=item.accessibleRole;node.enabled=item.enabled;node.editable=item.edit;node.actionable=bool(item.action);
-        node.state=(!item.enabled?STATE_SYSTEM_UNAVAILABLE:item.action?STATE_SYSTEM_FOCUSABLE:0) | (item.checked?STATE_SYSTEM_CHECKED:0);
+        node.state=(!item.enabled?STATE_SYSTEM_UNAVAILABLE:item.action?STATE_SYSTEM_FOCUSABLE:0);
+        if(item.accessibleRole==ROLE_SYSTEM_LISTITEM)
+            node.state|=STATE_SYSTEM_SELECTABLE | (item.checked?STATE_SYSTEM_SELECTED:0);
+        else if(item.checked)node.state|=STATE_SYSTEM_CHECKED;
         if(item.id==keyboardFocus && GetForegroundWindow()==app.hwnd) {node.state|=STATE_SYSTEM_FOCUSED;focusedId=node.id;}
         node.bounds={LONG(origin.x+std::lround(item.rect.x*scale)),LONG(origin.y+std::lround(item.rect.y*scale)),
                      LONG(origin.x+std::lround((item.rect.x+item.rect.w)*scale)),LONG(origin.y+std::lround((item.rect.y+item.rect.h)*scale))};
@@ -1907,6 +1945,7 @@ void UI::key(int k, bool ctrl, bool shift) {
         return;
     }
     if (k == VK_TAB && !ctrl) {
+        focusVisual.show(clock);
         // Terminal completion remains available with Tab; Shift+Tab always
         // moves to the preceding control.
         if (!shift && terminal && suggestionField==focus && !suggestions.empty())acceptSuggestion(suggestionIndex);

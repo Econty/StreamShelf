@@ -95,6 +95,7 @@ struct Analysis {
 std::string str(const Json &j, const char *key, const std::string &fallback = "");
 double number(const Json &j, const char *key, double fallback = 0);
 Analysis parseAnalysis(const Json &j, const std::string &url);
+bool isExtractedThumbnail(const Media &item);
 std::string quoteArg(const std::wstring &arg);
 std::wstring quoteWide(const std::wstring &arg);
 std::string redact(std::string s);

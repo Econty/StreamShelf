@@ -43,8 +43,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'C++ build failed' }
     ctest --preset $Preset
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
-    if ($Preset -eq 'release' -and -not $BetaWithoutFirefox -and -not (Test-Path -LiteralPath (Join-Path $root 'extension/firefox-signed/StreamShelf-Connector-1.0.5.xpi') -PathType Leaf)) {
-        throw 'The Firefox 1.0.5 extension needs Mozilla signing before a release package can be staged; see FIREFOX-SIGNING.md'
+    if ($Preset -eq 'release' -and -not $BetaWithoutFirefox -and -not (Test-Path -LiteralPath (Join-Path $root 'extension/firefox-signed/StreamShelf-Connector-1.0.6.xpi') -PathType Leaf)) {
+        throw 'The Firefox 1.0.6 extension needs Mozilla signing before a release package can be staged; see FIREFOX-SIGNING.md'
     }
 
     Assert-NoReparseAncestors $root

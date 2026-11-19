@@ -96,6 +96,35 @@ int main() {
         o.connectionConfirmed = o.installed = o.enabled = false;
         check(firefoxGuideStage(o) == FirefoxGuideStage::OpenMenu, "removed add-on returns to installation");
     });
+    test("Firefox installation progress survives intermittent add-on detection", [] {
+        FirefoxInstallProgress progress;
+        const auto stage = [&](FirefoxGuideObservation observation, bool absent, uint64_t scannedAt) {
+            progress.apply(observation, absent, scannedAt);
+            return firefoxGuideStage(observation);
+        };
+        FirefoxGuideObservation manager;
+        manager.manager = true;
+        FirefoxGuideObservation pending = manager;
+        pending.awaitingInstall = true;
+        check(stage(pending, true, 100) == FirefoxGuideStage::ConfirmInstall, "pending browser response keeps the confirmation step");
+        check(stage(manager, true, 16'000) == FirefoxGuideStage::OpenMenu, "without a successful installation the guide can retry");
+        FirefoxGuideObservation added;
+        added.addedNotice = true;
+        check(stage(added, false, 17'000) == FirefoxGuideStage::ConfirmInstall, "show Firefox acknowledgement");
+        check(stage(manager, true, 17'100) == FirefoxGuideStage::Enable, "missing card after acknowledgement does not highlight the gear");
+        FirefoxGuideObservation active = manager;
+        active.installedKnown = active.installed = active.enabledKnown = active.enabled = true;
+        check(stage(active, false, 17'200) == FirefoxGuideStage::Connect, "active card advances to connection");
+        check(stage(manager, false, 17'300) == FirefoxGuideStage::Connect, "unknown scan preserves connection step");
+        check(stage(manager, true, 17'400) == FirefoxGuideStage::Connect, "first absence scan preserves connection step");
+        check(stage(manager, true, 17'400) == FirefoxGuideStage::Connect, "cached scan does not count twice");
+        check(stage(manager, true, 19'400) == FirefoxGuideStage::OpenMenu, "persistent absence allows reinstalling");
+        check(stage(active, false, 19'500) == FirefoxGuideStage::Connect, "guide detects a manually reinstalled add-on");
+        active.enabled = false;
+        check(stage(active, false, 19'600) == FirefoxGuideStage::Enable, "explicitly disabled add-on still requires enabling");
+        manager.removedNotice = true;
+        check(stage(manager, true, 19'700) == FirefoxGuideStage::OpenMenu, "explicit removal immediately allows reinstalling");
+    });
     test("Mux settings and chapters preserve safe arguments and chapter timing", [] {
         MuxOptions o; check(muxContainer(o) == "mkv", "default container");
         auto args = muxCodecArgs(o); check(args.size() == 6 && args[1] == L"copy", "copy streams by default");
@@ -338,6 +367,31 @@ int main() {
         auto a = parseAnalysis(sample, "https://x.test");
         check(a.items.size() == 9 && a.items[5].category == "Превью" && a.items.back().id == "chapters",
               "Extras");
+    });
+    test("Formats and subtitles inherit valid cover variants", [&] {
+        auto source = sample;
+        source["thumbnail"] = "file:///private.png";
+        source["formats"][1]["thumbnail"] = "https://a.test/audio.jpg";
+        source["thumbnails"].push_back({{"url", "https://a.test/high.jpg"}, {"width", 640}, {"height", 360}});
+        source["thumbnails"].push_back({{"url", "file:///bigger.jpg"}, {"width", 4096}, {"height", 4096}});
+        auto result = parseAnalysis(source, "https://x.test");
+        check(result.items[0].thumbnail == "https://a.test/high.jpg" &&
+              result.items[1].thumbnail == "https://a.test/audio.jpg" &&
+              result.items[3].thumbnail == "https://a.test/high.jpg" &&
+              result.items.size() == 10, "Choose valid individual or shared artwork");
+    });
+    test("Only an exact extractor thumbnail may use anonymous cover access", [] {
+        const std::string cover = "https://images.example/cover.jpg?variant=original";
+        const auto analysis = parseAnalysis(Json{{"thumbnails", Json::array({Json{{"url", cover}}})}},
+                                            "https://video.example/watch");
+        const auto &item = analysis.items.front();
+        check(isExtractedThumbnail(item), "Extractor thumbnail carries the original URL");
+        auto changed = item;
+        changed.url = "https://images.example/cover.jpg?variant=other";
+        check(!isExtractedThumbnail(changed), "A different rendition needs its own authorization");
+        auto captured = item;
+        captured.id = "network:cover";
+        check(!isExtractedThumbnail(captured), "A browser-captured image retains its original scope");
     });
     test("Playlists are rejected",
          [] { rejects([] { parseAnalysis(Json{{"entries", Json::array()}}, "https://x.test"); }); });

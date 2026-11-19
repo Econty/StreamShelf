@@ -17,6 +17,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         requests.append(self.path)
         body = b'CORRUPTED MEDIA THAT IS NOT HTML'
+        if self.path in ('/restart-access', '/offline-file'):
+            if self.headers.get('Cookie') != 'checkpoint=local-fixture-value':
+                self.send_error(403)
+                return
+            body = b'fixture-download'
+        if self.path == '/offline-cover':
+            if self.headers.get('Cookie') or self.headers.get('Authorization'):
+                self.send_error(403)
+                return
+            body = b'fixture-download'
         self.send_response(200)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -45,6 +55,20 @@ try:
     if names.returncode or requests[previous_requests:] != ['/first', '/second']:
         raise AssertionError(f'names exit={names.returncode}, requests={requests}, stdout={names.stdout}, stderr={names.stderr}')
     print('PASS: preserved analyses retain their source titles in queue and output filenames')
+    previous_requests = len(requests)
+    subprocess.run([str(exe), '--save-retry-access',
+                    f'http://127.0.0.1:{server.server_address[1]}/restart-access'],
+                   check=True, timeout=15)
+    subprocess.run([str(exe), '--resume-without-browser'], check=True, timeout=15)
+    if requests[previous_requests:] != ['/restart-access']:
+        raise AssertionError('Expected exactly one download with saved job access after restart')
+    print('PASS: a job kept its encrypted access across a process restart without a browser')
+    previous_requests = len(requests)
+    subprocess.run([str(exe), '--offline-assembly', f'http://127.0.0.1:{server.server_address[1]}'],
+                   check=True, timeout=20)
+    if requests[previous_requests:] != ['/offline-file', '/offline-cover']:
+        raise AssertionError('Expected only the exact offline file and the anonymous cover')
+    print('PASS: analyzed media and assembly sources queue after tab/profile changes and browser shutdown')
     previews = subprocess.run([str(exe), '--preview-cache'], capture_output=True, text=True,
                               encoding='utf-8', errors='replace', timeout=15)
     if previews.returncode:

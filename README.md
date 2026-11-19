@@ -8,7 +8,7 @@ StreamShelf is a native Windows application for working with media from your bro
 
 ### [Releases](https://github.com/Econty/StreamShelf/releases) | [Getting started](#get-started) ([Русский](README_RU.md#подключение-и-анализ)) | [Build guide](BUILDING.md) ([Русский](BUILDING_RU.md))
 
-**Current source version: StreamShelf v2026.11.1 Beta.** Downloadable releases are listed on the [releases page](https://github.com/Econty/StreamShelf/releases). The beta package does not include a signed Firefox connector; permanent Firefox installation requires Mozilla's signature for Connector 1.0.5. The application and installer are not digitally signed.
+**Current source version: StreamShelf v2026.11.17 Beta.** Downloadable releases are listed on the [releases page](https://github.com/Econty/StreamShelf/releases). The application and installer are not digitally signed.
 
 ## Features
 
@@ -24,7 +24,7 @@ Availability depends on the site, file, codecs, and container. StreamShelf does 
 
 StreamShelf supports English and Russian. On first launch, it selects Russian when the Windows display language is Russian and English otherwise. The language can be changed under **Settings → Language / Язык**.
 
-The current StreamShelf Connector 1.0.5 source follows the app's language. When disconnected, it uses the browser's interface language, falling back to English for languages other than Russian. Permanent Firefox installation of version 1.0.5 requires Mozilla signing; see the [signing notes](FIREFOX-SIGNING.md).
+StreamShelf Connector 1.0.6 follows the app's language. When disconnected, it uses the browser's interface language, falling back to English for languages other than Russian. The Mozilla-signed Firefox 1.0.6 package is included in the repository; see the [signing notes](FIREFOX-SIGNING.md).
 
 **Русскоязычным пользователям:** [открыть полную инструкцию на русском](README_RU.md).
 
@@ -34,7 +34,7 @@ See also the [Russian instructions](README_RU.md).
 
 1. Use Windows 10 or 11 x64 with an OpenGL 3.3-compatible graphics driver. If you downloaded an archive, extract it to a permanent folder and run `StreamShelf.exe`.
 2. Open **Settings → Components** to check and install the tools you need: yt-dlp, FFmpeg, FFprobe, and Deno. These tools are managed in `%LOCALAPPDATA%\StreamShelfNative\tools`. If your package includes bundled tools, **Install bundled tools** explicitly imports missing files after checking their hashes and versions, without replacing installed tools.
-3. Open the connection page, select your browser, and start the extension setup. Follow the browser prompts to install and enable StreamShelf Connector. Chrome and Yandex Browser load the unpacked Chromium extension. Firefox requires a signed XPI, which is not included in this beta.
+3. Open the connection page, select your browser, and start the extension setup. Follow the browser prompts to install and enable StreamShelf Connector. Chrome and Yandex Browser load the unpacked Chromium extension. Firefox uses the signed XPI included in a normal release; the previously prepared beta without Firefox must be rebuilt.
 4. Open StreamShelf Connector in the browser, select **Connect extension**, and review the requested website access. Open a page with media, return to StreamShelf, and select **Analyze**. Deep analysis can look for additional page resources; dynamic streams may require playback or a page reload.
 5. Select media and a destination, then download it or open the builder to arrange tracks and adjust supported settings.
 
@@ -91,6 +91,10 @@ ctest --preset dev
 ```
 
 For a release build, use the `release` preset. To include MediaInfo in the package, set `STREAMSHELF_MEDIAINFO_DLL` to a compatible signed DLL; otherwise the app looks for it separately. See the [build guide](BUILDING.md) ([Русский](BUILDING_RU.md)), [Firefox signing notes](FIREFOX-SIGNING.md), and [third-party notices](THIRD_PARTY.md) (Russian).
+
+## License
+
+StreamShelf is distributed under the [MIT License](LICENSE). See [THIRD_PARTY.md](THIRD_PARTY.md) for third-party licenses and notices.
 
 ## Support the project
 
